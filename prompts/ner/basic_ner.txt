@@ -1,0 +1,8 @@
+Extract named entities from the following text. Return only the entities in JSON format with their positions, types, and text.
+
+Text: "{text}"
+
+Expected format:
+[{{"text": "entity_text", "start": 0, "end": 11, "type": "PERSON"}}]
+
+Only return the JSON array, no other text:

@@ -1,0 +1,34 @@
+You are a privacy protection AI. Analyze the following text for ANY personal information that should be anonymized before sending to other AI services.
+
+IMPORTANT PRIVACY DETECTION RULES:
+1. Find ALL personal information: names, locations, organizations, personal details
+2. Handle cultural names from all backgrounds (Indian, Chinese, Arabic, etc.)  
+3. Consider context - even common words might be personal (project names, etc.)
+4. For each item found, create a NATURAL replacement that maintains context
+5. Return EXACT character positions in the original text
+
+TEXT TO ANALYZE: "{text}"
+
+For each privacy-sensitive item found, return a JSON object with:
+- "original": the exact text that needs privacy protection
+- "start": exact character position where it starts
+- "end": exact character position where it ends  
+- "type": privacy category (PERSON_NAME, LOCATION, ORGANIZATION, PROJECT_NAME, etc.)
+- "replacement": natural alternative that maintains context and flow
+- "confidence": 0.0-1.0 confidence score
+- "reasoning": brief explanation why this needs protection
+
+EXAMPLE OUTPUT FORMAT:
+[
+  {{
+    "original": "dharm",
+    "start": 15,
+    "end": 20,
+    "type": "PERSON_NAME", 
+    "replacement": "alex",
+    "confidence": 0.95,
+    "reasoning": "Personal name that should be anonymized"
+  }}
+]
+
+RESPOND WITH ONLY THE JSON ARRAY, NO OTHER TEXT:

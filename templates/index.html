@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Guardian Gateway</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🛡️ Privacy Guardian Gateway</h1>
+            <p>Secure AI interactions with automatic PII protection</p>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot"></span>
+                <span id="statusText">Checking status...</span>
+            </div>
+            <div class="ai-service-selector">
+                <label for="aiService">AI Service:</label>
+                <select id="aiService">
+                    <option value="lm_studio">LM Studio (Local)</option>
+                    <option value="gemini">Google Gemini</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="main-interface">
+            <div class="input-section">
+                <div class="input-group">
+                    <label for="systemPrompt">System Prompt (Optional):</label>
+                    <textarea id="systemPrompt" placeholder="Enter system instructions for the AI..."></textarea>
+                </div>
+                
+                <div class="input-group">
+                    <label for="userMessage">Your Message:</label>
+                    <textarea id="userMessage" placeholder="Enter your message here. Don't worry about including sensitive information like emails, phone numbers, or names - they'll be automatically protected!"></textarea>
+                </div>
+                
+                <div class="button-group">
+                    <button id="sendButton" onclick="processMessage()">
+                        <span class="button-text">Send Message</span>
+                        <span class="loading-spinner" style="display: none;">⚡</span>
+                    </button>
+                    <button id="sanitizeOnlyButton" onclick="sanitizeOnly()">
+                        Preview Sanitization
+                    </button>
+                    <button id="testConnectionButton" onclick="testConnection()">
+                        Test AI Connection
+                    </button>
+                </div>
+            </div>
+
+            <div class="results-section" id="resultsSection" style="display: none;">
+                <h3>Results</h3>
+                
+                <div class="result-box">
+                    <h4>📝 Your Original Message</h4>
+                    <div class="result-content" id="originalMessage"></div>
+                </div>
+
+                <div class="result-box" id="sanitizedBox" style="display: none;">
+                    <h4>🔒 Sanitized Message (Sent to AI)</h4>
+                    <div class="result-content" id="sanitizedMessage"></div>
+                    <div class="privacy-items" id="privacyItems"></div>
+                </div>
+
+                <div class="result-box" id="aiResponseBox" style="display: none;">
+                    <h4>🤖 AI Response (With Placeholders)</h4>
+                    <div class="result-content" id="aiResponse"></div>
+                </div>
+
+                <div class="result-box" id="finalResponseBox" style="display: none;">
+                    <h4>✅ Final Response (Privacy Restored)</h4>
+                    <div class="result-content" id="finalResponse"></div>
+                </div>
+            </div>
+
+            <div class="error-section" id="errorSection" style="display: none;">
+                <h3>⚠️ Error</h3>
+                <div class="error-content" id="errorMessage"></div>
+            </div>
+        </div>
+
+        <footer>
+            <p>Privacy Guardian Gateway - Protecting your data while enabling AI interactions</p>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
