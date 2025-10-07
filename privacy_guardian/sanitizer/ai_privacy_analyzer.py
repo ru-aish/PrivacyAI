@@ -68,9 +68,9 @@ class AIPrivacyAnalyzer:
                 json={
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
-                    "max_tokens": 1000
+                    "max_tokens": 2000
                 },
-                timeout=15
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -100,6 +100,13 @@ class AIPrivacyAnalyzer:
                 ai_response = ai_response[:-3]
             ai_response = ai_response.strip()
             
+            # Handle incomplete JSON by trying to close it
+            if not ai_response.endswith(']'):
+                # Try to find the last complete JSON object
+                last_brace = ai_response.rfind('}')
+                if last_brace != -1:
+                    ai_response = ai_response[:last_brace + 1] + '\n]'
+            
             detections_data = json.loads(ai_response)
             detections = []
             
@@ -109,33 +116,23 @@ class AIPrivacyAnalyzer:
                 end = item.get('end', 0) 
                 original = item.get('original', '')
                 
-                # Verify the positions are correct
-                if start >= 0 and end <= len(original_text) and original_text[start:end] == original:
-                    detection = PrivacyDetection(
-                        original_text=original,
-                        start_pos=start,
-                        end_pos=end,
-                        privacy_type=item.get('type', 'UNKNOWN'),
-                        replacement_text=item.get('replacement', '[REDACTED]'),
-                        confidence=item.get('confidence', 0.5),
-                        reasoning=item.get('reasoning', 'Privacy protection')
-                    )
-                    detections.append(detection)
-                else:
-                    print(f"AI gave invalid positions for '{original}' at ({start}, {end})")
-                    # Try to find the correct position
-                    correct_start = original_text.find(original)
-                    if correct_start != -1:
+                # Use intelligent search & replace - ignore AI positions completely
+                found_occurrences = self._find_and_replace_intelligent(original_text, original)
+                
+                if found_occurrences:
+                    for occurrence_start, occurrence_end in found_occurrences:
                         detection = PrivacyDetection(
                             original_text=original,
-                            start_pos=correct_start,
-                            end_pos=correct_start + len(original),
+                            start_pos=occurrence_start,
+                            end_pos=occurrence_end,
                             privacy_type=item.get('type', 'UNKNOWN'),
                             replacement_text=item.get('replacement', '[REDACTED]'),
-                            confidence=item.get('confidence', 0.5) * 0.8,  # Lower confidence for position fix
-                            reasoning=item.get('reasoning', 'Privacy protection (position corrected)')
+                            confidence=item.get('confidence', 0.5),
+                            reasoning=item.get('reasoning', 'Privacy protection')
                         )
                         detections.append(detection)
+                else:
+                    print(f"Could not find '{original}' in text using intelligent search")
             
             return detections
             
@@ -143,6 +140,80 @@ class AIPrivacyAnalyzer:
             print(f"Error parsing AI privacy response: {e}")
             print(f"AI Response was: {ai_response}")
             return self._basic_fallback_detection(original_text)
+    
+    def _find_and_replace_intelligent(self, text: str, target: str) -> List[Tuple[int, int]]:
+        """
+        Intelligently find all occurrences of target text using multiple strategies.
+        
+        Args:
+            text: The full text to search in
+            target: The target string to find
+            
+        Returns:
+            List of (start, end) tuples for all found occurrences
+        """
+        occurrences = []
+        
+        # Strategy 1: Exact match
+        start = 0
+        while True:
+            pos = text.find(target, start)
+            if pos == -1:
+                break
+            occurrences.append((pos, pos + len(target)))
+            start = pos + 1
+        
+        if occurrences:
+            return occurrences
+        
+        # Strategy 2: Case-insensitive match
+        target_lower = target.lower()
+        start = 0
+        while True:
+            pos = text.lower().find(target_lower, start)
+            if pos == -1:
+                break
+            # Get the actual text with original casing
+            actual_end = pos + len(target)
+            occurrences.append((pos, actual_end))
+            start = pos + 1
+        
+        if occurrences:
+            return occurrences
+        
+        # Strategy 3: Partial word match (for names that might be part of larger strings)
+        import re
+        # Look for the target as a word boundary
+        pattern = rf'\b{re.escape(target)}\b'
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            occurrences.append((match.start(), match.end()))
+        
+        if occurrences:
+            return occurrences
+        
+        # Strategy 4: Fuzzy matching for slight variations
+        # Split target into words and look for each word
+        target_words = target.split()
+        if len(target_words) > 1:
+            for word in target_words:
+                if len(word) > 2:  # Only search for meaningful words
+                    word_pattern = rf'\b{re.escape(word)}\b'
+                    for match in re.finditer(word_pattern, text, re.IGNORECASE):
+                        # Found a component word, try to extend the match
+                        start_pos = match.start()
+                        end_pos = match.end()
+                        
+                        # Try to find the full phrase around this word
+                        context_start = max(0, start_pos - 50)
+                        context_end = min(len(text), end_pos + 50)
+                        context = text[context_start:context_end]
+                        
+                        # Simple heuristic: if we find most words from target in nearby context
+                        words_found = sum(1 for w in target_words if w.lower() in context.lower())
+                        if words_found >= len(target_words) * 0.7:  # 70% of words found
+                            occurrences.append((start_pos, end_pos))
+        
+        return occurrences
     
     def _basic_fallback_detection(self, text: str) -> List[PrivacyDetection]:
         """Basic fallback when AI is not available."""
@@ -155,9 +226,20 @@ class AIPrivacyAnalyzer:
         
         for pattern in name_patterns:
             for match in re.finditer(pattern, text):
-                # Skip common words
+                # Skip common words - expanded list for better accuracy
                 word = match.group().lower()
-                if word in ['the', 'and', 'but', 'for', 'are', 'this', 'that', 'with']:
+                common_words = {
+                    'the', 'and', 'but', 'for', 'are', 'this', 'that', 'with', 'from', 'they',
+                    'have', 'had', 'has', 'was', 'were', 'been', 'will', 'would', 'could', 
+                    'should', 'may', 'might', 'can', 'must', 'shall', 'then', 'than', 'when',
+                    'where', 'what', 'why', 'how', 'who', 'which', 'there', 'here', 'now',
+                    'today', 'tomorrow', 'yesterday', 'monday', 'tuesday', 'wednesday', 
+                    'thursday', 'friday', 'saturday', 'sunday', 'january', 'february', 'march',
+                    'april', 'june', 'july', 'august', 'september', 'october', 'november',
+                    'december', 'city', 'hospital', 'doctor', 'patient', 'contact', 'called',
+                    'visited', 'finally', 'about', 'another', 'appointment', 'scheduled'
+                }
+                if word in common_words:
                     continue
                     
                 detection = PrivacyDetection(

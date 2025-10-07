@@ -42,7 +42,13 @@ echo "  • Try: 'so my name is rudra'"
 echo "  • Try: 'My friend dharm works at Google in Mumbai'"
 echo "  • Use /test for automated examples"
 echo "  • Use /demo for interactive demo"
+echo "  • Use /prompt-analysis for detailed analysis with timing"
 echo "  • Use /help for all commands"
+echo ""
+echo "🤖 AI-FRIENDLY TESTING:"
+echo "  • python3 prompt_analysis_api.py 'test message'  # JSON output"
+echo "  • python3 prompt_analysis_api.py --pretty 'test' # Pretty JSON"
+echo "  • echo 'test' | python3 prompt_analysis_api.py --stdin"
 echo ""
 
 # Launch the terminal interface

@@ -81,6 +81,11 @@ class PrivacyTerminal:
    /coord-test        - Test multi-AI coordination system
    /filter-test       - Interactive filter testing (shows all levels)
    /prompt-analysis   - Detailed prompt analysis with timing
+                        Usage: /prompt-analysis [--json] [message]
+                        Examples:
+                          /prompt-analysis
+                          /prompt-analysis my name is john
+                          /prompt-analysis --json test message
    /quit or /exit     - Exit the application
 
  💬 USAGE MODES:
@@ -488,7 +493,14 @@ class PrivacyTerminal:
             self._run_interactive_filter_test()
         
         elif cmd == 'prompt-analysis':
-            self._run_prompt_analysis()
+            if arg:
+                if arg.startswith('--json '):
+                    message = arg[7:].strip()
+                    self._run_prompt_analysis(single_message=message, json_output=True)
+                else:
+                    self._run_prompt_analysis(single_message=arg)
+            else:
+                self._run_prompt_analysis()
         
         elif cmd in ['quit', 'exit', 'q']:
             print(self.colored_text("👋 Thank you for using Privacy Guardian Gateway!", 'cyan'))
@@ -641,11 +653,32 @@ class PrivacyTerminal:
             except Exception as e:
                 print(self.colored_text(f"❌ Error during testing: {str(e)}", 'red'))
 
-    def _run_prompt_analysis(self):
-        """Detailed prompt analysis with comprehensive timing"""
+    def _run_prompt_analysis(self, single_message=None, json_output=False):
+        """Detailed prompt analysis with comprehensive timing
+        
+        Args:
+            single_message: If provided, analyze just this message and exit
+            json_output: If True, output in JSON format for AI consumption
+        """
+        if single_message:
+            if json_output:
+                result = self._detailed_prompt_analysis(single_message, json_output=True)
+                print(json.dumps(result, indent=2))
+            else:
+                print(self.colored_text("📊 DETAILED PROMPT ANALYSIS MODE", 'cyan'))
+                print(self.colored_text("=" * 60, 'cyan'))
+                print()
+                print(self.colored_text("=" * 80, 'green'))
+                print(self.colored_text("📊 DETAILED PROMPT ANALYSIS WITH TIMING", 'green'))
+                print(self.colored_text("=" * 80, 'green'))
+                self._detailed_prompt_analysis(single_message)
+                print(self.colored_text("\n" + "=" * 80, 'green'))
+            return
+        
         print(self.colored_text("📊 DETAILED PROMPT ANALYSIS MODE", 'cyan'))
         print(self.colored_text("=" * 60, 'cyan'))
         print(self.colored_text("Provides comprehensive timing and analysis data", 'blue'))
+        print(self.colored_text("💡 Tip: Use --json flag for machine-readable output", 'yellow'))
         print()
         
         while True:
@@ -765,29 +798,111 @@ class PrivacyTerminal:
         print(f"   Prompt: \"{self.colored_text(final_prompt, 'white')}\"")
         print(self.colored_text("   ⚠️  NOTE: This prompt is NOT actually sent to any AI service", 'red'))
 
-    def _detailed_prompt_analysis(self, message):
-        """Provide detailed analysis with comprehensive metrics"""
+    def _detailed_prompt_analysis(self, message, json_output=False):
+        """Provide detailed analysis with comprehensive metrics
+        
+        Args:
+            message: The message to analyze
+            json_output: If True, return structured data instead of printing
+        """
         import time
         from datetime import datetime
+        from privacy_guardian.sanitizer.processor import PrivacyProcessor
+        from privacy_guardian.sanitizer.ai_privacy_analyzer import AIPrivacyAnalyzer
         
         analysis_start = time.time()
         
-        print(self.colored_text("📋 ANALYSIS METADATA:", 'cyan'))
-        print(f"   🕐 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"   📏 Input Length: {len(message)} characters")
-        print(f"   📝 Word Count: {len(message.split())}")
-        print(f"   🔤 Character Types: {self._analyze_character_types(message)}")
-        print()
+        metadata = {
+            'timestamp': datetime.now().isoformat(),
+            'input_length': len(message),
+            'word_count': len(message.split()),
+            'character_analysis': self._analyze_character_types(message) if not json_output else self._get_character_types_dict(message)
+        }
         
-        # Run the comprehensive analysis
-        self._analyze_all_filter_levels(message)
+        if not json_output:
+            print(self.colored_text("📋 ANALYSIS METADATA:", 'cyan'))
+            print(f"   🕐 Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   📏 Input Length: {len(message)} characters")
+            print(f"   📝 Word Count: {len(message.split())}")
+            print(f"   🔤 Character Types: {metadata['character_analysis']}")
+            print()
         
-        # Additional metrics
-        analysis_time = time.time() - analysis_start
-        print(self.colored_text("🔬 ANALYSIS METRICS:", 'cyan'))
-        print(f"   ⏱️  Total Analysis Time: {analysis_time:.3f}s")
-        print(f"   🚀 Processing Speed: {len(message)/analysis_time:.1f} chars/second")
-        print(f"   💾 Memory Impact: Minimal (stateless processing)")
+        level1_start = time.time()
+        basic_processor = PrivacyProcessor(use_ai_analyzer=False)
+        level1_result = basic_processor.sanitize(message)
+        level1_time = time.time() - level1_start
+        
+        level2_start = time.time()
+        ai_analyzer = AIPrivacyAnalyzer()
+        ai_result = ai_analyzer.analyze_and_anonymize(message)
+        level2_time = time.time() - level2_start
+        
+        level3_start = time.time()
+        context = self.multi_ai_coordinator.analyze_request_type(message)
+        selected_service = self.multi_ai_coordinator.select_optimal_service(context)
+        service_scores = self.multi_ai_coordinator._calculate_current_scores(context)
+        level3_time = time.time() - level3_start
+        
+        total_time = time.time() - analysis_start
+        
+        if json_output:
+            return {
+                'metadata': metadata,
+                'original_message': message,
+                'level1_basic_filter': {
+                    'processing_time_seconds': level1_time,
+                    'entities_detected': [
+                        {
+                            'type': entity.entity_type,
+                            'text': entity.text,
+                            'start': entity.start,
+                            'end': entity.end
+                        } for entity in level1_result.entities
+                    ],
+                    'sanitized_text': level1_result.sanitized_text
+                },
+                'level2_ai_privacy': {
+                    'processing_time_seconds': level2_time,
+                    'detections': [
+                        {
+                            'privacy_type': d.privacy_type,
+                            'original_text': d.original_text,
+                            'replacement_text': d.replacement_text,
+                            'confidence': d.confidence,
+                            'reasoning': d.reasoning
+                        } for d in ai_result['detections']
+                    ],
+                    'anonymized_text': ai_result['anonymized_text']
+                },
+                'level3_multi_ai_coordination': {
+                    'processing_time_seconds': level3_time,
+                    'request_type': context.request_type.value,
+                    'privacy_sensitive': context.privacy_sensitive,
+                    'estimated_complexity': context.estimated_complexity,
+                    'selected_service': selected_service,
+                    'service_scores': service_scores
+                },
+                'final_output': {
+                    'selected_service': selected_service,
+                    'final_prompt': ai_result['anonymized_text'] if ai_result['detections'] else message,
+                    'privacy_protected': bool(ai_result['detections'])
+                },
+                'timing_summary': {
+                    'level1_seconds': level1_time,
+                    'level2_seconds': level2_time,
+                    'level3_seconds': level3_time,
+                    'total_seconds': total_time,
+                    'processing_speed_chars_per_second': len(message) / total_time if total_time > 0 else 0
+                }
+            }
+        else:
+            self._analyze_all_filter_levels(message)
+            
+            analysis_time = time.time() - analysis_start
+            print(self.colored_text("🔬 ANALYSIS METRICS:", 'cyan'))
+            print(f"   ⏱️  Total Analysis Time: {analysis_time:.3f}s")
+            print(f"   🚀 Processing Speed: {len(message)/analysis_time:.1f} chars/second")
+            print(f"   💾 Memory Impact: Minimal (stateless processing)")
 
     def _analyze_character_types(self, text):
         """Analyze character composition of input text"""
@@ -797,6 +912,20 @@ class PrivacyTerminal:
         special = len(text) - letters - digits - spaces
         
         return f"Letters: {letters}, Digits: {digits}, Spaces: {spaces}, Special: {special}"
+    
+    def _get_character_types_dict(self, text):
+        """Get character composition as dictionary"""
+        letters = sum(c.isalpha() for c in text)
+        digits = sum(c.isdigit() for c in text)
+        spaces = sum(c.isspace() for c in text)
+        special = len(text) - letters - digits - spaces
+        
+        return {
+            'letters': letters,
+            'digits': digits,
+            'spaces': spaces,
+            'special': special
+        }
 
 def main():
     """Main entry point"""
