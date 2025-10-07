@@ -193,4 +193,4 @@ If you encounter any issues or have questions:
 - [ ] Multiple AI provider support
 - [ ] Advanced context preservation
 - [ ] Browser extension
-- [ ] Mobile app
+- [ ] Mobile app# PrivacyAI
