@@ -44,7 +44,7 @@ class PrivacyTerminal:
         
         # Settings
         self.show_ai_response = True
-        self.current_ai_service = self.ai_manager.default_service
+        self.current_ai_service = 'auto'  # Let coordinator choose optimal service
         self.system_prompt = None
         self.use_multi_ai_coordination = True  # Default to new coordination system
         
@@ -240,41 +240,118 @@ class PrivacyTerminal:
                 print(f"     Confidence: {detection['confidence']:.2f}")
             
             print()
-            print(self.colored_text("   🛡️  ANONYMIZED VERSION:", 'purple'))
+            print(self.colored_text("   🛡️  ANONYMIZED PROMPT (sent to Gemini):", 'purple'))
+            print(self.colored_text("   " + "─" * 60, 'purple'))
             print(f"   \"{self.colored_text(privacy_info['anonymized_text'], 'purple')}\"")
+            print(self.colored_text("   " + "─" * 60, 'purple'))
+            print(self.colored_text("   ☁️  This is what Gemini will receive (NO personal data!)", 'purple'))
         else:
             print(self.colored_text("   ✅ No privacy concerns detected", 'purple'))
+            print(self.colored_text("   📤 Original prompt will be sent to Gemini", 'purple'))
         print()
         
         # Step 3: Multi-Service Processing
-        print(self.colored_text("⚙️  STEP 3: MULTI-SERVICE AI PROCESSING", 'yellow'))
+        print(self.colored_text("⚙️  STEP 3: MAIN AI SERVICE SELECTION & PROCESSING", 'yellow'))
         ai_info = coordination_result['ai_response']
         coord_info = coordination_result['coordination_info']
         
-        print(self.colored_text(f"   🎯 Privacy Analysis Service: {coord_info['privacy_service'].upper()}", 'yellow'))
-        print(self.colored_text(f"   🤖 Main AI Service: {coord_info['main_ai_service'].upper()}", 'yellow'))
-        print(self.colored_text(f"   ⏱️  Total Processing Time: {coord_info['processing_time']:.2f}s", 'yellow'))
+        print()
+        print(self.colored_text("   ┌─────────────────────────────────────────────────┐", 'yellow'))
+        main_service = coord_info['main_ai_service'].upper()
+        service_emoji = "🚀" if main_service == "GEMINI" else "🏠"
+        
+        # Show fallback status if applicable
+        if ai_info.get('used_fallback', False):
+            print(self.colored_text(f"   │  ⚠️  FALLBACK MODE: {service_emoji} {main_service:^15} │", 'yellow'))
+            print(self.colored_text(f"   │  (Gemini unavailable - using local model)      │", 'yellow'))
+        else:
+            print(self.colored_text(f"   │  SELECTED MAIN AI: {service_emoji} {main_service:^20} │", 'yellow'))
+        
+        print(self.colored_text("   └─────────────────────────────────────────────────┘", 'yellow'))
         print()
         
-        # Show what each service would receive/provide
-        print(self.colored_text("📤 SERVICE INTERACTION DETAILS:", 'blue'))
-        print(self.colored_text(f"   🔒 LM Studio (Privacy): Analyzed original text for PII", 'blue'))
-        print(self.colored_text(f"   🤖 {coord_info['main_ai_service'].upper()} (Main AI): Received anonymized text", 'blue'))
-        print(f"   📥 Input: \"{self.colored_text(privacy_info['anonymized_text'], 'white')}\"")
-        print(f"   📤 Output: \"{self.colored_text(ai_info['sanitized_response'][:100], 'white')}...\"")
+        # Show different breakdown based on whether anonymization was used
+        anonymization_used = ai_info.get('anonymization_applied', True)
+        
+        print(self.colored_text(f"   📊 Service Breakdown:", 'yellow'))
+        
+        if main_service == "GEMINI":
+            print(self.colored_text(f"      🔒 Privacy Analysis → LM STUDIO (Local)", 'purple'))
+            print(self.colored_text(f"      🚀 Main AI Response → GEMINI (Cloud API)", 'cyan'))
+            print(self.colored_text(f"         ✓ Sanitized prompt sent to Gemini cloud", 'cyan'))
+            print(self.colored_text(f"         ✓ Your personal data NEVER sent to cloud", 'cyan'))
+        else:
+            # LM Studio fallback mode
+            if ai_info.get('used_fallback', False):
+                print(self.colored_text(f"      ⚠️  Gemini API Failed → Using Local Fallback", 'yellow'))
+                print(self.colored_text(f"      🏠 Main AI Response → LM STUDIO (Local)", 'cyan'))
+                print(self.colored_text(f"         ✓ Original prompt sent to local model", 'cyan'))
+                print(self.colored_text(f"         ✓ No anonymization needed (all local)", 'cyan'))
+                print(self.colored_text(f"         ✓ Generated locally by LM Studio", 'green'))
+            else:
+                print(self.colored_text(f"      🔒 Privacy Analysis → LM STUDIO (Local)", 'purple'))
+                print(self.colored_text(f"      🏠 Main AI Response → LM STUDIO (Local)", 'cyan'))
+                print(self.colored_text(f"         ✓ All processing done locally", 'cyan'))
+        
+        print(self.colored_text(f"      ⏱️  Total Time: {coord_info['processing_time']:.2f}s", 'yellow'))
         print()
         
-        # Step 4: Response Restoration
-        print(self.colored_text("🔄 STEP 4: PRIVACY RESTORATION", 'cyan'))
-        if privacy_info['session_map']:
-            print(self.colored_text("   📋 Restoring personal information in response:", 'cyan'))
-            for replacement, original in privacy_info['session_map'].items():
-                print(f"   • {self.colored_text(replacement, 'yellow')} → {self.colored_text(original, 'white')}")
+        # Show what Gemini received and returned (RAW)
+        if main_service == "GEMINI":
+            print(self.colored_text("📥 WHAT GEMINI RECEIVED (anonymized prompt):", 'cyan'))
+            print(self.colored_text("   " + "─" * 60, 'cyan'))
+            print(f"   {self.colored_text(privacy_info['anonymized_text'], 'cyan')}")
+            print(self.colored_text("   " + "─" * 60, 'cyan'))
+            print()
+            
+            print(self.colored_text("📤 RAW RESPONSE FROM GEMINI (with placeholders):", 'yellow'))
+            print(self.colored_text("   " + "─" * 60, 'yellow'))
+            print(f"   {self.colored_text(ai_info['sanitized_response'], 'yellow')}")
+            print(self.colored_text("   " + "─" * 60, 'yellow'))
+            print(self.colored_text("   ⚠️  Contains placeholders like PERSON_1, EMAIL_1, etc.", 'yellow'))
+            print()
+        elif ai_info.get('used_fallback', False):
+            # Fallback mode - local processing
+            print(self.colored_text("📥 WHAT LM STUDIO RECEIVED (original prompt):", 'cyan'))
+            print(self.colored_text("   " + "─" * 60, 'cyan'))
+            print(f"   {self.colored_text(coordination_result['original_prompt'], 'cyan')}")
+            print(self.colored_text("   " + "─" * 60, 'cyan'))
+            print()
+            
+            print(self.colored_text("📤 RESPONSE FROM LM STUDIO (local):", 'yellow'))
+            print(self.colored_text("   " + "─" * 60, 'yellow'))
+            print(f"   {self.colored_text(ai_info['sanitized_response'], 'yellow')}")
+            print(self.colored_text("   " + "─" * 60, 'yellow'))
             print()
         
-        print(self.colored_text("✅ FINAL RESPONSE:", 'green'))
-        print(self.colored_text("=" * 20, 'green'))
+        # Step 4: Response Restoration
+        print(self.colored_text("🔄 STEP 4: PRIVACY RESTORATION", 'green'))
+        if anonymization_used and privacy_info['session_map']:
+            print(self.colored_text("   📋 Restoring personal information in Gemini's response:", 'green'))
+            print()
+            for replacement, original in privacy_info['session_map'].items():
+                print(f"   {self.colored_text(replacement, 'yellow')} → {self.colored_text(original, 'green')}")
+            print()
+            print(self.colored_text("   ✅ Replacements applied to final response", 'green'))
+            print()
+        elif not anonymization_used:
+            print(self.colored_text("   ℹ️  No restoration needed (local processing used original prompt)", 'green'))
+            print()
+        else:
+            print(self.colored_text("   ✅ No personal information to restore", 'green'))
+            print()
+        
+        print(self.colored_text("✅ FINAL RESPONSE (with your real information):", 'green'))
+        
+        # Add indicator if generated locally
+        if main_service == "LM_STUDIO":
+            print(self.colored_text("🏠 Generated by: LM STUDIO (LOCAL MODEL)", 'green'))
+        else:
+            print(self.colored_text("🚀 Generated by: GEMINI (CLOUD API) + Privacy Restoration", 'green'))
+        
+        print(self.colored_text("=" * 70, 'green'))
         print(f"{self.colored_text(ai_info['final_response'], 'white')}")
+        print(self.colored_text("=" * 70, 'green'))
         print()
         
         # Show coordination summary

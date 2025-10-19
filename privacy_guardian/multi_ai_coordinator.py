@@ -70,26 +70,27 @@ class MultiAICoordinator:
         self.privacy_processor = PrivacyProcessor()
         
         # Service capabilities (can be learned over time)
+        # Gemini is STRONGLY PREFERRED - LM Studio only used as fallback
         self.service_capabilities = {
             'lm_studio': ServiceCapabilities(
                 privacy_analysis=0.95,      # Excellent for privacy
-                code_generation=0.90,       # Excellent for code
-                creative_writing=0.60,      # Good for creative tasks
-                general_chat=0.70,          # Good for chat
-                technical_analysis=0.85,    # Very good for technical
-                reasoning=0.75,             # Good reasoning
+                code_generation=0.60,       # Fallback only
+                creative_writing=0.40,      # Fallback only
+                general_chat=0.50,          # Fallback only
+                technical_analysis=0.60,    # Fallback only
+                reasoning=0.55,             # Fallback only
                 response_time_avg=2.5,      # Fast local response
                 reliability=0.90            # Very reliable when running
             ),
             'gemini': ServiceCapabilities(
                 privacy_analysis=0.50,      # Basic privacy understanding
-                code_generation=0.85,       # Very good for code
-                creative_writing=0.95,      # Excellent for creative
-                general_chat=0.90,          # Excellent for chat
-                technical_analysis=0.80,    # Good for technical
-                reasoning=0.95,             # Excellent reasoning
+                code_generation=0.95,       # PREFERRED for code
+                creative_writing=0.99,      # PREFERRED for creative
+                general_chat=0.99,          # PREFERRED for chat
+                technical_analysis=0.95,    # PREFERRED for technical
+                reasoning=0.99,             # PREFERRED for reasoning
                 response_time_avg=3.2,      # Cloud response time
-                reliability=0.95            # Very reliable cloud service
+                reliability=0.99            # Highly reliable cloud service
             )
         }
         
@@ -183,9 +184,7 @@ class MultiAICoordinator:
                 time_score * 0.1              # 10% speed
             )
             
-            # Bonus for privacy-sensitive requests
-            if context.privacy_sensitive and service == 'lm_studio':
-                total_score += 0.2  # LM Studio bonus for privacy
+            # No bonus - Gemini is always preferred unless it fails
             
             scores[service] = total_score
         
@@ -197,11 +196,11 @@ class MultiAICoordinator:
         """
         Process request with full multi-AI coordination.
         
-        This is the main method that:
-        1. Analyzes the request type
-        2. Performs privacy analysis (always with LM Studio)
-        3. Routes main request to optimal service
-        4. Provides detailed processing information
+        Flow:
+        1. Always prefer Gemini API (cloud)
+        2. Anonymize prompt before sending to Gemini
+        3. If Gemini fails, fallback to LM Studio with ORIGINAL prompt (no anonymization)
+        4. Clearly indicate when using local fallback
         
         Args:
             prompt: User's prompt
@@ -218,45 +217,64 @@ class MultiAICoordinator:
         if preferred_service:
             context.user_preference = preferred_service
         
-        # Step 2: Always do privacy analysis with LM Studio (most capable)
+        # Step 2: Always do privacy analysis with LM Studio (for Gemini usage)
         privacy_result = self.privacy_analyzer.analyze_and_anonymize(prompt)
         
-        # Step 3: Select optimal service for main AI response
+        # Step 3: Select optimal service for main AI response (should be Gemini)
         selected_service = self.select_optimal_service(context)
         
-        # Step 4: Generate AI response with selected service
+        # Track if we used fallback and whether we used anonymization
+        used_fallback = False
+        used_anonymization = True
+        
+        # Step 4: Try Gemini first with anonymized prompt
         try:
-            ai_response = self.ai_manager.generate_response(
-                privacy_result['anonymized_text'],
-                system_prompt=system_prompt,
-                service=selected_service
-            )
-            
-            # Update metrics
-            self.service_metrics[selected_service]['requests'] += 1
-            
-        except Exception as e:
-            print(f"Primary service {selected_service} failed: {e}")
-            
-            # Try fallback service
-            fallback_service = 'gemini' if selected_service == 'lm_studio' else 'lm_studio'
-            try:
+            if selected_service == 'gemini':
+                # Use anonymized text for Gemini
                 ai_response = self.ai_manager.generate_response(
                     privacy_result['anonymized_text'],
                     system_prompt=system_prompt,
-                    service=fallback_service
+                    service='gemini'
                 )
-                selected_service = fallback_service  # Update to reflect actual service used
-                self.service_metrics[fallback_service]['requests'] += 1
+                self.service_metrics['gemini']['requests'] += 1
+            else:
+                # If LM Studio selected (rare), use original prompt
+                ai_response = self.ai_manager.generate_response(
+                    prompt,
+                    system_prompt=system_prompt,
+                    service='lm_studio'
+                )
+                used_anonymization = False
+                self.service_metrics['lm_studio']['requests'] += 1
+            
+        except Exception as e:
+            print(f"⚠️  Primary service {selected_service} failed: {e}")
+            print(f"🔄 Falling back to local LM Studio with original prompt (no anonymization needed)")
+            
+            # Fallback to LM Studio with ORIGINAL prompt (no anonymization)
+            try:
+                ai_response = self.ai_manager.generate_response(
+                    prompt,  # Use original prompt for local processing
+                    system_prompt=system_prompt,
+                    service='lm_studio'
+                )
+                selected_service = 'lm_studio'
+                used_fallback = True
+                used_anonymization = False
+                self.service_metrics['lm_studio']['requests'] += 1
             except Exception as fallback_error:
                 self.service_metrics[selected_service]['failures'] += 1
                 raise Exception(f"Both services failed. Primary: {e}, Fallback: {fallback_error}")
         
-        # Step 5: De-sanitize response
-        final_response = self.privacy_processor.desanitize(
-            ai_response,
-            privacy_result['session_map']
-        )
+        # Step 5: De-sanitize response only if we used anonymization
+        if used_anonymization and privacy_result['session_map']:
+            final_response = self.privacy_processor.desanitize(
+                ai_response,
+                privacy_result['session_map']
+            )
+        else:
+            # No anonymization was used, return as-is
+            final_response = ai_response
         
         processing_time = time.time() - start_time
         
@@ -270,7 +288,7 @@ class MultiAICoordinator:
             },
             'privacy_protection': {
                 'original_text': privacy_result['original_text'],
-                'anonymized_text': privacy_result['anonymized_text'],
+                'anonymized_text': privacy_result['anonymized_text'] if used_anonymization else prompt,
                 'detections': [
                     {
                         'original': d.original_text,
@@ -278,20 +296,25 @@ class MultiAICoordinator:
                         'type': d.privacy_type,
                         'confidence': d.confidence
                     } for d in privacy_result['detections']
-                ],
-                'session_map': privacy_result['session_map'],
-                'ai_powered': privacy_result['ai_powered']
+                ] if used_anonymization else [],
+                'session_map': privacy_result['session_map'] if used_anonymization else {},
+                'ai_powered': privacy_result['ai_powered'],
+                'anonymization_used': used_anonymization
             },
             'ai_response': {
                 'service_used': selected_service,
                 'sanitized_response': ai_response,
-                'final_response': final_response
+                'final_response': final_response,
+                'used_fallback': used_fallback,
+                'anonymization_applied': used_anonymization
             },
             'coordination_info': {
                 'processing_time': processing_time,
-                'privacy_service': 'lm_studio',  # Always use LM Studio for privacy
+                'privacy_service': 'lm_studio' if used_anonymization else 'none',
                 'main_ai_service': selected_service,
-                'service_scores': self._calculate_current_scores(context)
+                'service_scores': self._calculate_current_scores(context),
+                'used_fallback': used_fallback,
+                'fallback_reason': 'Gemini API unavailable' if used_fallback else None
             }
         }
     

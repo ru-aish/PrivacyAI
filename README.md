@@ -20,10 +20,42 @@ A privacy-first AI gateway that sanitizes sensitive data before sending prompts 
 3. **Hybrid Detector**: Combines both approaches for comprehensive coverage
 4. **Privacy Processor**: Main orchestrator for sanitization and de-sanitization
 
-### Data Flow
+### Data Flow with Gemini Integration
 
 ```
-User Input → Detect Entities → Generate Placeholders → Send to AI → De-sanitize Response → Return to User
+┌─────────────┐
+│ User Input  │  "My name is Alice, email: alice@email.com"
+│  (with PII) │
+└──────┬──────┘
+       ↓
+┌──────────────────────┐
+│  Privacy Analysis    │  Detects: "Alice" (name), "alice@email.com" (email)
+│    (LM Studio)       │  Creates: PERSON_1, EMAIL_ADDRESS_1
+└──────┬───────────────┘
+       ↓
+┌──────────────────────┐
+│ Sanitized Prompt     │  "My name is PERSON_1, email: EMAIL_ADDRESS_1"
+│  (PII Removed)       │
+└──────┬───────────────┘
+       ↓
+┌──────────────────────┐
+│    GEMINI API 🚀     │  Gemini ONLY sees anonymized version
+│  (Cloud Service)     │  Generates response with placeholders
+└──────┬───────────────┘
+       ↓
+┌──────────────────────┐
+│ Privacy Restoration  │  PERSON_1 → Alice
+│    (Local)           │  EMAIL_ADDRESS_1 → alice@email.com
+└──────┬───────────────┘
+       ↓
+┌──────────────────────┐
+│  Final Response      │  "Hello Alice! I've sent info to alice@email.com"
+│   (to User)          │
+└──────────────────────┘
+
+✅ Your personal data NEVER sent to cloud
+✅ Gemini generates contextually-aware responses
+✅ Original information restored in final output
 ```
 
 ## 🚀 Quick Start
