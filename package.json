@@ -3,5 +3,8 @@
   "name": "privacyai-monorepo",
   "workspaces": [
     "packages/*"
-  ]
+  ],
+  "scripts": {
+    "setup": "bash scripts/setup.sh"
+  }
 }

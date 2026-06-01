@@ -1,17 +1,14 @@
 # PrivacyAI
 
-PrivacyAI is now organized around one main product: a JavaScript privacy SDK that sanitizes prompts locally, sends only redacted text to an OpenAI-compatible model, then restores the response on the client.
+PrivacyAI is a privacy SDK first.
 
-## What lives where
+## One-command setup
 
-```text
-privacyai/
-├── packages/sdk/          # Main product: installable JS SDK
-├── apps/service-gateway/  # Python wrapper service and legacy AI gateway
-├── apps/web-demo/         # Browser demo UI
-├── docs/                  # Architecture and legacy docs
-└── examples/              # Small usage examples
+```bash
+npm run setup
 ```
+
+Script: [scripts/setup.sh](scripts/setup.sh)
 
 ## Use the SDK
 
@@ -22,41 +19,24 @@ const result = await ask("My email is jane@example.com. Rewrite this safely.");
 console.log(result.finalText);
 ```
 
-The SDK supports:
-- local sanitization and restore
-- OpenAI-compatible APIs
-- Ollama
-- LM Studio
-- env-based configuration
+## Use the web UI
 
-## Run the service gateway
-
-The Python app under `apps/service-gateway` is the thin service/demo layer for people who want a hosted or local HTTP API.
+Start the Python gateway:
 
 ```bash
 cd apps/service-gateway
-pip install -r requirements.txt
 python app.py
 ```
 
-## Run the web demo
+## Use the service directly
 
-The browser demo lives in `apps/web-demo`. It is the UI surface, not the core product.
+The service lives in `apps/service-gateway`.
 
-## SDK package
+## References
 
-```bash
-cd packages/sdk
-npm test
-npm run test:e2e:ollama
-```
+- SDK: [packages/sdk/README.md](packages/sdk/README.md)
+- Service docs: [docs/service/README.md](docs/service/README.md)
+- Architecture: [docs/architecture.md](docs/architecture.md)
+- Examples: [examples/README.md](examples/README.md)
 
-## Design rule
-
-The repo is intentionally split by role:
-- `packages/sdk`: what developers import
-- `apps/service-gateway`: what runs as a service
-- `apps/web-demo`: what people click through in the browser
-
-Legacy writeups and migration notes live in `docs/legacy`.
-
+Legacy writeups are kept in `docs/legacy`.

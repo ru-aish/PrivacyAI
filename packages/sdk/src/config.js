@@ -13,10 +13,8 @@ const ENV_KEY_MAP = {
 };
 
 export function loadEnvFile(envFile = process.env.PRIVATE_AI_ENV_FILE || ".env", cwd = process.cwd()) {
-  const resolved = path.isAbsolute(envFile) ? envFile : path.join(cwd, envFile);
-  if (!fs.existsSync(resolved)) {
-    return {};
-  }
+  const resolved = resolveEnvFile(envFile, cwd);
+  if (!resolved) return {};
 
   const env = {};
   const lines = fs.readFileSync(resolved, "utf8").split(/\r?\n/);
@@ -29,6 +27,25 @@ export function loadEnvFile(envFile = process.env.PRIVATE_AI_ENV_FILE || ".env",
     env[key] = stripEnvQuotes(rawValue.trim());
   }
   return env;
+}
+
+function resolveEnvFile(envFile, cwd) {
+  if (path.isAbsolute(envFile) && fs.existsSync(envFile)) {
+    return envFile;
+  }
+
+  let current = cwd;
+  for (let depth = 0; depth < 4; depth += 1) {
+    const candidate = path.join(current, envFile);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+
+  return null;
 }
 
 export function configFromEnv(options = {}) {
