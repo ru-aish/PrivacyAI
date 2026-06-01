@@ -56,7 +56,7 @@ echo ""
 
 # Example 5: Using within the terminal
 echo "📋 Example 5: Using /prompt-analysis within terminal"
-echo "$ echo '/prompt-analysis my name is john' | python3 privacy_terminal.py"
+echo "$ echo '/prompt-analysis my name is john' | python3 cli/privacy_terminal.py"
 echo "(Note: This runs interactively, so output may vary)"
 echo ""
 

@@ -24,7 +24,7 @@ print('✅ Privacy analyzer accessible, AI available:', result)
 "
 
 echo "🖥️  Testing terminal startup..."
-timeout 5s python privacy_terminal.py > /dev/null 2>&1 || echo "✅ Terminal starts correctly"
+timeout 5s python cli/privacy_terminal.py > /dev/null 2>&1 || echo "✅ Terminal starts correctly"
 
 echo ""
 echo "🎉 ALL SYSTEMS OPERATIONAL!"

@@ -11,8 +11,8 @@ echo "🔒 Your data is sanitized BEFORE being sent to cloud"
 echo ""
 
 # Check if we're in the right directory
-if [ ! -f "privacy_terminal.py" ]; then
-    echo "❌ Error: privacy_terminal.py not found"
+if [ ! -f "cli/privacy_terminal.py" ]; then
+    echo "❌ Error: cli/privacy_terminal.py not found"
     echo "💡 Please run this script from the privacy-guardian-gateway directory"
     exit 1
 fi
@@ -105,4 +105,4 @@ echo "  python3 test_gemini_integration.py       # Automated test suite"
 echo ""
 
 # Launch the terminal interface
-python3 privacy_terminal.py
+python3 cli/privacy_terminal.py

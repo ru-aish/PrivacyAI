@@ -16,9 +16,11 @@ from security_config import security, security_middleware, input_validation_midd
 # Load environment variables
 load_dotenv()
 
-app = Flask(__name__, 
-           template_folder='templates',
-           static_folder='static')
+app = Flask(
+    __name__,
+    template_folder=os.path.join(os.path.dirname(__file__), '..', 'web-demo', 'templates'),
+    static_folder=os.path.join(os.path.dirname(__file__), '..', 'web-demo', 'static'),
+)
 
 # Configure Flask with security settings
 app.config['SECRET_KEY'] = security.SECRET_KEY

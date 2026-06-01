@@ -7,7 +7,7 @@
 cd privacy-guardian-gateway
 
 # Run the interactive terminal
-python privacy_terminal.py
+python cli/privacy_terminal.py
 # OR use the launcher script
 ./run_terminal.sh
 ```

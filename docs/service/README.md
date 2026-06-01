@@ -16,7 +16,7 @@ This folder contains detailed documentation for the Privacy Guardian Gateway sys
 
 ## Quick Navigation
 
-- **Getting Started**: See main [README.md](../README.md) in project root
+- **Getting Started**: See main [README.md](../../README.md) in project root
 - **Installation**: See [DEPLOYMENT.md](DEPLOYMENT.md)
 - **API Usage**: See [API_DOCS.md](API_DOCS.md)
 - **Terminal Usage**: See [TERMINAL_README.md](TERMINAL_README.md)
