@@ -83,10 +83,38 @@ function normalizeSessionMap(value) {
   return sessionMap;
 }
 
+const VAGUE_STANDINS = new Set([
+  "api key",
+  "api-key",
+  "api",
+  "phone number",
+  "phone",
+  "email address",
+  "email",
+  "password",
+  "secret",
+  "token",
+  "credit card",
+  "ssn",
+  "sensitive info",
+  "sensitive information",
+  "personal information"
+]);
+
 async function enforceSafeResult(originalText, parsed, detector) {
   let safePrompt = parsed.safe_prompt;
   const sessionMap = fixSessionMapOrientation(originalText, safePrompt, parsed.session_map);
   const typeCounts = {};
+
+  for (const [dummy, original] of Object.entries({ ...sessionMap })) {
+    if (!isVagueStandIn(dummy)) continue;
+
+    const replacement = createUniqueDummy("API_KEY", (typeCounts.API_KEY || 0) + 1, safePrompt, sessionMap);
+    typeCounts.API_KEY = (typeCounts.API_KEY || 0) + 1;
+    delete sessionMap[dummy];
+    sessionMap[replacement] = original;
+    safePrompt = replaceAll(safePrompt, dummy, replacement);
+  }
 
   for (const [dummy, original] of Object.entries(sessionMap)) {
     if (safePrompt.includes(original)) {
@@ -166,6 +194,10 @@ function createUniqueDummy(type, index, safePrompt, sessionMap) {
 
 function replaceAll(text, search, replacement) {
   return text.split(search).join(replacement);
+}
+
+function isVagueStandIn(value) {
+  return VAGUE_STANDINS.has(String(value).trim().toLowerCase());
 }
 
 function normalizeSanitizerResult(originalText, parsed, privacyResponse, source) {

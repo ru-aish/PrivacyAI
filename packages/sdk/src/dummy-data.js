@@ -52,7 +52,7 @@ export function generateDummy(type, index = 1) {
     case "URL":
       return `https://example.com/resource/${slot}`;
     case "API_KEY":
-      return `sk_dummy_${slot}_redacted`;
+      return `gsk_dummy_${slot}_redacted`;
     case "AWS_ACCESS_KEY":
       return `AKIADUMMY${String(slot).padStart(8, "0")}KEY`;
     case "ZIP":

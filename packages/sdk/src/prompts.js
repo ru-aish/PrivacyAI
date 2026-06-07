@@ -25,6 +25,19 @@ Use your best judgment to achieve both simultaneously.
 
 You are not answering the user. You are preparing a safe version of their message for another AI.
 
+Important: safe_prompt and every dummy stand-in will be shown verbatim to the downstream AI. Write replacements that read naturally in the sentence and keep the user's task clear.
+
+Stand-in quality rules:
+- Use concrete realistic fake values, not category labels.
+- Never use vague placeholders like "API key", "phone number", "email address", "password", "token", or "sensitive info" as the stand-in text.
+- Good API key stand-in: "gsk_dummy_redacted_1" or "sk_dummy_1_redacted"
+- Bad API key stand-in: "API key"
+- Good email stand-in: "contact1@example.com"
+- Bad email stand-in: "email"
+- Good phone stand-in: "+1 (555) 010-0001"
+- Bad phone stand-in: "phone number"
+- Keep the user's wording and structure as close as possible. Only replace the sensitive substrings.
+
 Return ONLY valid JSON with this exact shape:
 {
   "safe_prompt": "the user message rewritten with dummy stand-ins instead of sensitive values",
@@ -38,6 +51,7 @@ Rules:
 - session_map keys are dummy values used in safe_prompt.
 - session_map values are the original sensitive substrings from the user message.
 - every dummy stand-in in safe_prompt must exist as a key in session_map.
+- dummy stand-ins must be concrete values that fit naturally in the sentence.
 - do not include explanations outside the JSON.`;
 
 /** @deprecated Use PRIVACY_SANITIZER_PROMPT. Kept for backwards compatibility. */

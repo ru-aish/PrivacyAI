@@ -103,6 +103,28 @@ test("ai sanitizer redacts AWS and stripe-style secrets when local AI returns JS
   assert.equal(result.sessionMap.sk_dummy_1_redacted, "sk_live_abc123def456");
 });
 
+test("enforcement replaces vague stand-ins like API key with concrete dummy values", async () => {
+  const leakedKey = "848a71e823beb08e73a65f358c9b223b015e45bc";
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({
+      safe_prompt: "I want to use the Groq API. The API key I have is API key. Please tell me how to add this to the environment variables.",
+      session_map: {
+        "API key": leakedKey
+      }
+    }),
+    loadEnv: false
+  });
+
+  const result = await sanitizer.sanitize(
+    `now i want to use the groq so this is the api can you tell me how to add this in the env? api: ${leakedKey}`
+  );
+
+  assert.doesNotMatch(result.sanitizedText, /API key I have is API key/i);
+  assert.doesNotMatch(result.sanitizedText, new RegExp(leakedKey));
+  assert.match(result.sanitizedText, /gsk_dummy_1_redacted/);
+  assert.equal(result.sessionMap.gsk_dummy_1_redacted, leakedKey);
+});
+
 test("enforcement strips leaked api keys even when local AI returns bad JSON mapping", async () => {
   const leakedKey = "848a71e823beb08e73a65f358c9b223b015e45bc";
   const sanitizer = new PrivacySanitizer({

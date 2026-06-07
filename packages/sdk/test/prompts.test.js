@@ -6,6 +6,8 @@ test("privacy sanitizer prompt requires JSON output", () => {
   assert.match(PRIVACY_SANITIZER_PROMPT, /privacy-preserving intermediary/);
   assert.match(PRIVACY_SANITIZER_PROMPT, /safe_prompt/);
   assert.match(PRIVACY_SANITIZER_PROMPT, /session_map/);
+  assert.match(PRIVACY_SANITIZER_PROMPT, /shown verbatim to the downstream AI/);
+  assert.match(PRIVACY_SANITIZER_PROMPT, /Never use vague placeholders like "API key"/);
 });
 
 test("main ask call sends only the safe prompt unless system override is provided", async () => {
