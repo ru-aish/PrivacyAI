@@ -8,17 +8,21 @@ PrivacyAI has two user-facing layers:
 ## Flow
 
 ```text
-prompt -> local privacy detection -> redaction -> provider call -> response restore
+user prompt
+  -> local AI privacy pass (system prompt + JSON output)
+  -> safe_prompt + session_map
+  -> task AI call (fresh context, no system prompt)
+  -> local restore using session_map
 ```
 
 ## Package roles
 
-- `packages/sdk`: the main library people install and import
+- `packages/sdk`: local AI sanitization is the core product
 - `apps/web-demo`: browser demo powered directly by the SDK
 
 ## Why this split
 
-- SDK users want one or two import lines.
+- SDK users want privacy handled by a local AI intermediary.
 - Demo users want a visible UI to try the product quickly.
 
 The repo keeps those paths separate so the demo does not become the product.

@@ -3,7 +3,6 @@ import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { OllamaProvider } from "./providers/ollama.js";
 import { PrivacySanitizer } from "./sanitizer.js";
 import { restore } from "./redactor.js";
-import { DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
 
 export class PrivateAI {
   constructor(options = {}) {
@@ -32,7 +31,7 @@ export class PrivateAI {
 
   async ask(prompt, options = {}) {
     const sanitized = await this.sanitize(prompt);
-    const messages = buildMessages(sanitized.sanitizedText, options);
+    const messages = buildTaskMessages(sanitized.sanitizedText, options);
     const modelResponse = await this.provider.chat({
       model: options.model || this.config.model,
       messages,
@@ -58,13 +57,14 @@ export function createClient(options = {}) {
   return new PrivateAI(options);
 }
 
-function buildMessages(sanitizedPrompt, options) {
-  const system = options.system || DEFAULT_SYSTEM_PROMPT;
+function buildTaskMessages(sanitizedPrompt, options) {
+  const messages = [{ role: "user", content: sanitizedPrompt }];
 
-  return [
-    { role: "system", content: system },
-    { role: "user", content: sanitizedPrompt }
-  ];
+  if (options.system) {
+    messages.unshift({ role: "system", content: options.system });
+  }
+
+  return messages;
 }
 
 function createProvider(config) {

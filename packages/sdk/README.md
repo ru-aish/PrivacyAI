@@ -62,7 +62,7 @@ OPENAI_MODEL=gpt-4.1-mini
 import { PrivateAI, ask, sanitize, inspect, createClient } from "@privacy-ai/sdk";
 ```
 
-- `ask(prompt, options?)`: sanitize, call model, restore dummy stand-ins in the response.
+- `ask(prompt, options?)`: local AI builds a safe prompt + session map, task AI answers in a fresh context, then values are restored locally.
 - `sanitize(prompt, options?)`: only run the local privacy sanitizer.
 - `inspect(prompt, options?)`: return sanitizer output without calling a model.
 - `PrivateAI.fromEnv()`: create a client from `.env` and process env.
