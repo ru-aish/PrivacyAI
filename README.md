@@ -8,7 +8,7 @@ PrivacyAI is a privacy SDK first.
 npm run setup
 ```
 
-The setup script installs Node dependencies, walks you through an AI provider menu (Ollama, LM Studio, OpenAI, Gemini, or custom), tests the connection, writes `.env`, and runs a quick SDK smoke test.
+The setup script installs Node dependencies, walks you through an AI provider menu (Ollama, LM Studio, OpenAI, Gemini, or custom), tests the connection, and writes `.env`.
 
 Optional Python service gateway:
 

@@ -6,8 +6,7 @@
     "packages/*"
   ],
   "scripts": {
-    "setup": "bash scripts/setup.sh",
-    "smoke": "node --experimental-strip-types 1.ts"
+    "setup": "bash scripts/setup.sh"
   },
   "dependencies": {
     "@privacy-ai/sdk": "workspace:*"

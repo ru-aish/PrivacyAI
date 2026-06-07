@@ -5,7 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 LIB_DIR="$ROOT_DIR/scripts/lib"
 WITH_SERVICE=0
-SKIP_SMOKE_TEST=0
 
 source "$LIB_DIR/ui.sh"
 source "$LIB_DIR/providers.sh"
@@ -15,9 +14,6 @@ parse_args() {
     case "$1" in
       --with-service)
         WITH_SERVICE=1
-        ;;
-      --skip-smoke-test)
-        SKIP_SMOKE_TEST=1
         ;;
       --provider)
         shift
@@ -72,28 +68,6 @@ setup_python_service() {
   return 1
 }
 
-run_smoke_test() {
-  if [[ "$SKIP_SMOKE_TEST" -eq 1 ]]; then
-    return 0
-  fi
-
-  local smoke_file="$ROOT_DIR/1.ts"
-  if [[ ! -f "$smoke_file" ]]; then
-    return 0
-  fi
-
-  ui_log ""
-  ui_log "Running quick SDK smoke test (1.ts)..."
-
-  if node --experimental-strip-types "$smoke_file"; then
-    ui_log "✓ SDK smoke test passed."
-    return 0
-  fi
-
-  ui_log "SDK smoke test failed. Your .env is saved; check provider settings and retry."
-  return 1
-}
-
 main() {
   parse_args "$@"
 
@@ -121,8 +95,6 @@ main() {
   else
     ui_log "Optional service gateway: npm run setup -- --with-service"
   fi
-
-  run_smoke_test
 }
 
 main "$@"
