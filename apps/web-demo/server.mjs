@@ -68,6 +68,7 @@ function privacyItemsFromResult(result) {
 function providerLabel() {
   if (config.provider === "ollama") return "Ollama";
   if (config.baseURL.includes("generativelanguage.googleapis.com")) return "Gemini";
+  if (config.baseURL.includes("api.groq.com")) return "Groq";
   if (config.baseURL.includes("api.openai.com")) return "OpenAI";
   if (config.baseURL.includes("1234")) return "LM Studio";
   return config.provider || "Custom";

@@ -1,5 +1,6 @@
 import { createDetectorPipeline } from "./detectors/index.js";
 import { redact } from "./redactor.js";
+import { generateDummy } from "./dummy-data.js";
 import { PRIVACY_SANITIZER_PROMPT } from "./prompts.js";
 import { PrivacyGuardianError } from "./errors.js";
 
@@ -32,7 +33,8 @@ export class AiSanitizer {
 
     const parsed = parseSanitizerJson(response.text);
     if (parsed) {
-      return normalizeSanitizerResult(text, parsed, response);
+      const enforced = await enforceSafeResult(text, parsed, this.fallbackDetector);
+      return normalizeSanitizerResult(text, enforced, response, "ai-sanitizer");
     }
 
     const detections = await this.fallbackDetector.detect(text);
@@ -81,7 +83,92 @@ function normalizeSessionMap(value) {
   return sessionMap;
 }
 
-function normalizeSanitizerResult(originalText, parsed, privacyResponse) {
+async function enforceSafeResult(originalText, parsed, detector) {
+  let safePrompt = parsed.safe_prompt;
+  const sessionMap = fixSessionMapOrientation(originalText, safePrompt, parsed.session_map);
+  const typeCounts = {};
+
+  for (const [dummy, original] of Object.entries(sessionMap)) {
+    if (safePrompt.includes(original)) {
+      safePrompt = replaceAll(safePrompt, original, dummy);
+    }
+  }
+
+  const detections = await detector.detect(originalText);
+  for (const detection of detections) {
+    if (!safePrompt.includes(detection.value)) continue;
+
+    let dummy = findDummyForOriginal(sessionMap, detection.value);
+    if (!dummy) {
+      typeCounts[detection.type] = (typeCounts[detection.type] || 0) + 1;
+      dummy = createUniqueDummy(detection.type, typeCounts[detection.type], safePrompt, sessionMap);
+      sessionMap[dummy] = detection.value;
+    }
+
+    safePrompt = replaceAll(safePrompt, detection.value, dummy);
+  }
+
+  return {
+    safe_prompt: safePrompt,
+    session_map: sessionMap
+  };
+}
+
+function fixSessionMapOrientation(originalText, safePrompt, sessionMap) {
+  const fixed = {};
+
+  for (const [key, value] of Object.entries(sessionMap)) {
+    const keyInOriginal = originalText.includes(key);
+    const valueInOriginal = originalText.includes(value);
+    const keyInSafe = safePrompt.includes(key);
+    const valueInSafe = safePrompt.includes(value);
+
+    if (valueInOriginal && keyInSafe) {
+      fixed[key] = value;
+      continue;
+    }
+
+    if (keyInOriginal && valueInSafe) {
+      fixed[value] = key;
+      continue;
+    }
+
+    if (keyInOriginal) {
+      const dummy = valueInSafe ? value : key;
+      const original = keyInOriginal ? key : value;
+      if (dummy !== original) {
+        fixed[dummy] = original;
+      }
+      continue;
+    }
+
+    fixed[key] = value;
+  }
+
+  return fixed;
+}
+
+function findDummyForOriginal(sessionMap, original) {
+  return Object.entries(sessionMap).find(([, value]) => value === original)?.[0];
+}
+
+function createUniqueDummy(type, index, safePrompt, sessionMap) {
+  let dummy = generateDummy(type, index);
+  let slot = index;
+
+  while (safePrompt.includes(dummy) || Object.hasOwn(sessionMap, dummy)) {
+    slot += 1;
+    dummy = generateDummy(type, slot);
+  }
+
+  return dummy;
+}
+
+function replaceAll(text, search, replacement) {
+  return text.split(search).join(replacement);
+}
+
+function normalizeSanitizerResult(originalText, parsed, privacyResponse, source) {
   const detections = Object.entries(parsed.session_map).map(([replacement, value]) => {
     const start = originalText.indexOf(value);
     return {
@@ -90,7 +177,7 @@ function normalizeSanitizerResult(originalText, parsed, privacyResponse) {
       start: start === -1 ? 0 : start,
       end: start === -1 ? value.length : start + value.length,
       confidence: 0.9,
-      source: "ai-sanitizer",
+      source,
       replacement
     };
   });
@@ -101,7 +188,7 @@ function normalizeSanitizerResult(originalText, parsed, privacyResponse) {
     sessionMap: parsed.session_map,
     detections,
     privacyModelText: privacyResponse.text,
-    privacySource: "ai-sanitizer"
+    privacySource: source
   };
 }
 

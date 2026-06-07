@@ -43,6 +43,15 @@ const PROVIDERS = {
     model: "gemini-2.5-flash",
     needsApiKey: true
   },
+  groq: {
+    name: "groq",
+    label: "Groq",
+    type: "openai-compatible",
+    baseURL: "https://api.groq.com/openai/v1",
+    apiKey: "",
+    model: "llama-3.3-70b-versatile",
+    needsApiKey: true
+  },
   custom: {
     name: "custom",
     label: "Custom",
@@ -59,6 +68,7 @@ const MENU = [
   { key: "lmstudio", label: "LM Studio (local)" },
   { key: "openai", label: "OpenAI (cloud)" },
   { key: "gemini", label: "Gemini (cloud)" },
+  { key: "groq", label: "Groq (cloud)" },
   { key: "custom", label: "Custom" }
 ];
 

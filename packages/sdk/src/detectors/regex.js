@@ -37,8 +37,25 @@ const PATTERNS = [
   },
   {
     type: "API_KEY",
+    confidence: 0.93,
+    regex: /\bgsk_[A-Za-z0-9]{20,}\b/g
+  },
+  {
+    type: "API_KEY",
     confidence: 0.92,
     regex: /\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_]{8,}\b/g
+  },
+  {
+    type: "API_KEY",
+    confidence: 0.9,
+    regex: /\bapi\s*:?\s*([a-f0-9]{32,64})\b/gi,
+    valueGroup: 1
+  },
+  {
+    type: "API_KEY",
+    confidence: 0.88,
+    regex: /\bapi\s*key\b[^.\n]{0,60}?\b([a-f0-9]{32,64})\b/gi,
+    valueGroup: 1
   },
   {
     type: "AWS_ACCESS_KEY",
