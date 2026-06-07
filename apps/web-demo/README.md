@@ -1,8 +1,22 @@
-# Web Demo
+# PrivacyAI Web Demo
 
-This folder holds the browser demo UI.
+Browser demo for `@privacy-ai/sdk`.
 
-It is intentionally separate from the SDK so the demo does not become the product.
+## Run
 
-The gateway in `apps/service-gateway` serves these assets.
+From the repo root:
 
+```bash
+npm run setup
+npm run demo
+```
+
+Or from this folder:
+
+```bash
+pnpm dev
+```
+
+Open `http://localhost:3000`.
+
+The demo server imports the SDK directly and uses the root `.env` provider config.

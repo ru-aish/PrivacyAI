@@ -6,7 +6,8 @@
     "packages/*"
   ],
   "scripts": {
-    "setup": "bash scripts/setup.sh"
+    "setup": "bash scripts/setup.sh",
+    "demo": "pnpm --filter @privacy-ai/web-demo dev"
   },
   "dependencies": {
     "@privacy-ai/sdk": "workspace:*"
