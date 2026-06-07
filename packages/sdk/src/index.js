@@ -4,6 +4,8 @@ export { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 export { OllamaProvider } from "./providers/ollama.js";
 export { restore, redact } from "./redactor.js";
 export { configFromEnv, loadEnvFile } from "./config.js";
+export { DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
+export { generateDummy } from "./dummy-data.js";
 export { PrivacyGuardianError, ProviderError } from "./errors.js";
 
 import { PrivateAI } from "./client.js";

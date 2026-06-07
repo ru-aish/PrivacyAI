@@ -13,13 +13,14 @@ const client = new PrivateAI({
   loadEnv: false
 });
 
-const result = await client.ask(
-  "local.e2e@example.com",
-  {
-    maxTokens: 1024,
-    temperature: 0,
-    system: "Reply with exactly: [EMAIL_1]"
-  }
+const result = await client.ask("local.e2e@example.com", {
+  maxTokens: 1024,
+  temperature: 0,
+  system: "Reply with exactly the email address shown in the user message."
+});
+
+const dummyEmail = Object.keys(result.sessionMap).find(
+  (key) => result.sessionMap[key] === "local.e2e@example.com"
 );
 
 console.log(JSON.stringify({
@@ -27,16 +28,17 @@ console.log(JSON.stringify({
   sanitizedText: result.sanitizedText,
   modelText: result.modelText,
   finalText: result.finalText,
+  dummyEmail,
   detections: result.detections.map((detection) => ({
     type: detection.type,
     replacement: detection.replacement
   }))
 }, null, 2));
 
-assert.match(result.sanitizedText, /\[EMAIL_1\]/);
+assert.ok(dummyEmail);
 assert.doesNotMatch(result.sanitizedText, /local\.e2e@example\.com/);
-assert.equal(result.sessionMap["[EMAIL_1]"], "local.e2e@example.com");
+assert.match(result.sanitizedText, new RegExp(dummyEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+assert.equal(result.sessionMap[dummyEmail], "local.e2e@example.com");
 assert.equal(result.provider.model, model);
 assert.ok(result.modelText.length > 0);
-assert.match(result.modelText, /\[EMAIL_1\]/);
 assert.match(result.finalText, /local\.e2e@example\.com/);

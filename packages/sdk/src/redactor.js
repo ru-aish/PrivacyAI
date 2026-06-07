@@ -1,11 +1,13 @@
+import { generateDummy } from "./dummy-data.js";
+
 export function redact(text, detections) {
   const sessionMap = {};
   const typeCounts = {};
   const replacements = detections.map((detection) => {
     typeCounts[detection.type] = (typeCounts[detection.type] || 0) + 1;
-    const placeholder = `[${detection.type}_${typeCounts[detection.type]}]`;
-    sessionMap[placeholder] = detection.value;
-    return { ...detection, replacement: placeholder };
+    const dummy = generateDummy(detection.type, typeCounts[detection.type]);
+    sessionMap[dummy] = detection.value;
+    return { ...detection, replacement: dummy };
   });
 
   let sanitizedText = text;
@@ -26,9 +28,13 @@ export function redact(text, detections) {
 
 export function restore(text, sessionMap) {
   let restored = text;
-  for (const [placeholder, value] of Object.entries(sessionMap)) {
-    restored = restored.split(placeholder).join(value);
+  const replacements = Object.entries(sessionMap).sort(
+    ([left], [right]) => right.length - left.length
+  );
+
+  for (const [dummy, value] of replacements) {
+    restored = restored.split(dummy).join(value);
   }
+
   return restored;
 }
-

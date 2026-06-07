@@ -3,6 +3,7 @@ import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { OllamaProvider } from "./providers/ollama.js";
 import { PrivacySanitizer } from "./sanitizer.js";
 import { restore } from "./redactor.js";
+import { DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
 
 export class PrivateAI {
   constructor(options = {}) {
@@ -58,12 +59,7 @@ export function createClient(options = {}) {
 }
 
 function buildMessages(sanitizedPrompt, options) {
-  const system = options.system || [
-    "You are a helpful assistant inside a privacy-preserving SDK.",
-    "The user prompt may contain placeholders such as [EMAIL_1], [PHONE_1], or [PERSON_1].",
-    "Treat placeholders as the real private values, but never invent or reveal the original private values.",
-    "Preserve placeholder tokens exactly when referring to private data."
-  ].join(" ");
+  const system = options.system || DEFAULT_SYSTEM_PROMPT;
 
   return [
     { role: "system", content: system },
