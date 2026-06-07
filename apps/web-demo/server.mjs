@@ -2,15 +2,14 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { PrivateAI, configFromEnv } from "@privacy-ai/sdk";
+import { PrivateAI, configFromEnv, loadEnvFile } from "@privacy-ai/sdk";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(__dirname, "public");
 const ROOT_DIR = path.resolve(__dirname, "../..");
-const PORT = Number(process.env.WEB_DEMO_PORT || 3000);
-
-const client = new PrivateAI({ cwd: ROOT_DIR, envFile: ".env" });
-const config = configFromEnv({ cwd: ROOT_DIR, envFile: ".env" });
+const HOST = process.env.WEB_DEMO_HOST || "127.0.0.1";
+const REQUESTED_PORT = Number(process.env.WEB_DEMO_PORT || 3000);
+const MAX_PORT_ATTEMPTS = 20;
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -19,6 +18,23 @@ const MIME_TYPES = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml"
 };
+
+function ensureEnvExists() {
+  const env = loadEnvFile(".env", ROOT_DIR);
+  if (Object.keys(env).length === 0) {
+    console.error("");
+    console.error("No .env file found.");
+    console.error("Run setup first:");
+    console.error("  npm run setup");
+    console.error("");
+    process.exit(1);
+  }
+}
+
+ensureEnvExists();
+
+const client = new PrivateAI({ cwd: ROOT_DIR, envFile: ".env" });
+const config = configFromEnv({ cwd: ROOT_DIR, envFile: ".env" });
 
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
@@ -37,7 +53,7 @@ function readBody(req) {
 
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-      } catch (error) {
+      } catch {
         reject(new Error("Invalid JSON body."));
       }
     });
@@ -168,7 +184,56 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => {
-  console.log(`PrivacyAI web demo running at http://localhost:${PORT}`);
+function listenOnPort(port) {
+  return new Promise((resolve, reject) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      reject(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolve(port);
+    };
+
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, HOST);
+  });
+}
+
+async function listenWithFallback(startPort) {
+  for (let offset = 0; offset < MAX_PORT_ATTEMPTS; offset += 1) {
+    const port = startPort + offset;
+    try {
+      return await listenOnPort(port);
+    } catch (error) {
+      if (error?.code !== "EADDRINUSE") {
+        throw error;
+      }
+    }
+  }
+
+  throw new Error(
+    `No free port found between ${startPort} and ${startPort + MAX_PORT_ATTEMPTS - 1}. ` +
+      `Stop the other process or set WEB_DEMO_PORT.`
+  );
+}
+
+async function main() {
+  const port = await listenWithFallback(REQUESTED_PORT);
+  const url = `http://${HOST}:${port}`;
+
+  console.log(`PrivacyAI web demo running at ${url}`);
+  if (port !== REQUESTED_PORT) {
+    console.log(`Port ${REQUESTED_PORT} was busy, using ${port} instead.`);
+  }
   console.log(`Provider: ${providerLabel()} (${config.model})`);
+  console.log("Press Ctrl+C to stop.");
+}
+
+main().catch((error) => {
+  console.error("");
+  console.error(error instanceof Error ? error.message : "Failed to start web demo.");
+  console.error("");
+  process.exit(1);
 });

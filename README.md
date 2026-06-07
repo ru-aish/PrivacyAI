@@ -10,7 +10,7 @@ npm run setup
 
 The setup script installs Node dependencies, walks you through an AI provider menu (Ollama, LM Studio, OpenAI, Gemini, or custom), tests the connection, and writes `.env`.
 
-Script: [scripts/setup.sh](scripts/setup.sh)
+Script: [scripts/setup.mjs](scripts/setup.mjs) (works on macOS, Windows, and Linux)
 
 ## Use the SDK
 
