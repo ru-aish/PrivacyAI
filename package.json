@@ -1,10 +1,15 @@
 {
   "private": true,
   "name": "privacyai-monorepo",
+  "type": "module",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "setup": "bash scripts/setup.sh"
+    "setup": "bash scripts/setup.sh",
+    "smoke": "node --experimental-strip-types 1.ts"
+  },
+  "dependencies": {
+    "@privacy-ai/sdk": "workspace:*"
   }
 }
