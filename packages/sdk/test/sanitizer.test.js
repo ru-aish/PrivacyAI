@@ -50,6 +50,18 @@ test("client ask sanitizes before calling provider and restores final text", asy
   assert.equal(result.finalText, "I will email alice@example.com with a concise update.");
 });
 
+test("sanitizer redacts AWS and stripe-style secrets in complex prompts", async () => {
+  const sanitizer = new PrivacySanitizer();
+  const result = await sanitizer.sanitize(
+    "I keep forgetting my AWS key AKIA4QW7J2KEXAMPLE and my backup key sk_live_abc123def456. Can you make a mnemonic for me?"
+  );
+
+  assert.doesNotMatch(result.sanitizedText, /AKIA4QW7J2KEXAMPLE/);
+  assert.doesNotMatch(result.sanitizedText, /sk_live_abc123def456/);
+  assert.ok(Object.keys(result.sessionMap).length >= 2);
+  assert.match(result.sanitizedText, /sk_dummy_1_redacted|AKIADUMMY/);
+});
+
 test("sanitizer handles contextual names, locations, short phones, IPs, and JSON fields", async () => {
   const sanitizer = new PrivacySanitizer();
   const result = await sanitizer.sanitize(
