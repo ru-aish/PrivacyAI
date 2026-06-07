@@ -5,6 +5,8 @@ import { DEFAULT_SYSTEM_PROMPT, PrivateAI } from "../src/index.js";
 test("default system prompt is the privacy intermediary prompt", () => {
   assert.match(DEFAULT_SYSTEM_PROMPT, /privacy-preserving intermediary/);
   assert.match(DEFAULT_SYSTEM_PROMPT, /dummy data/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /dummy stand-ins/);
+  assert.match(DEFAULT_SYSTEM_PROMPT, /Operational rules/);
 });
 
 test("client uses the default system prompt when none is provided", async () => {
