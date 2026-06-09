@@ -86,58 +86,31 @@ function normalizeSessionMap(value) {
 const VAGUE_STANDINS = new Set([
   "api key",
   "api-key",
-  "api",
   "phone number",
-  "phone",
   "email address",
-  "email",
-  "password",
-  "secret",
-  "token",
-  "credit card",
-  "ssn",
+  "credit card number",
   "sensitive info",
   "sensitive information",
   "personal information"
 ]);
 
 async function enforceSafeResult(originalText, parsed, detector) {
-  let safePrompt = parsed.safe_prompt;
-  const sessionMap = fixSessionMapOrientation(originalText, safePrompt, parsed.session_map);
-  const typeCounts = {};
+  let sessionMap = fixSessionMapOrientation(originalText, parsed.safe_prompt, parsed.session_map);
+  sessionMap = removeInvalidSessionMapEntries(originalText, sessionMap);
+  sessionMap = fixVagueStandInKeys(sessionMap, originalText);
 
-  for (const [dummy, original] of Object.entries({ ...sessionMap })) {
-    if (!isVagueStandIn(dummy)) continue;
-
-    const replacement = createUniqueDummy("API_KEY", (typeCounts.API_KEY || 0) + 1, safePrompt, sessionMap);
-    typeCounts.API_KEY = (typeCounts.API_KEY || 0) + 1;
-    delete sessionMap[dummy];
-    sessionMap[replacement] = original;
-    safePrompt = replaceAll(safePrompt, dummy, replacement);
-  }
-
-  for (const [dummy, original] of Object.entries(sessionMap)) {
-    if (safePrompt.includes(original)) {
-      safePrompt = replaceAll(safePrompt, original, dummy);
-    }
-  }
-
+  const typeCounts = countSessionMapTypes(sessionMap);
   const detections = await detector.detect(originalText);
   for (const detection of detections) {
-    if (!safePrompt.includes(detection.value)) continue;
+    if (findDummyForOriginal(sessionMap, detection.value)) continue;
 
-    let dummy = findDummyForOriginal(sessionMap, detection.value);
-    if (!dummy) {
-      typeCounts[detection.type] = (typeCounts[detection.type] || 0) + 1;
-      dummy = createUniqueDummy(detection.type, typeCounts[detection.type], safePrompt, sessionMap);
-      sessionMap[dummy] = detection.value;
-    }
-
-    safePrompt = replaceAll(safePrompt, detection.value, dummy);
+    typeCounts[detection.type] = (typeCounts[detection.type] || 0) + 1;
+    const dummy = createUniqueDummy(detection.type, typeCounts[detection.type], originalText, sessionMap);
+    sessionMap[dummy] = detection.value;
   }
 
   return {
-    safe_prompt: safePrompt,
+    safe_prompt: rebuildSafePrompt(originalText, sessionMap),
     session_map: sessionMap
   };
 }
@@ -161,12 +134,24 @@ function fixSessionMapOrientation(originalText, safePrompt, sessionMap) {
       continue;
     }
 
-    if (keyInOriginal) {
-      const dummy = valueInSafe ? value : key;
-      const original = keyInOriginal ? key : value;
-      if (dummy !== original) {
-        fixed[dummy] = original;
+    if (keyInOriginal && valueInOriginal) {
+      if (looksLikeSecret(value) && !looksLikeSecret(key)) {
+        fixed[key] = value;
+      } else if (looksLikeSecret(key) && !looksLikeSecret(value)) {
+        fixed[value] = key;
+      } else {
+        fixed[key] = value;
       }
+      continue;
+    }
+
+    if (valueInOriginal) {
+      fixed[key] = value;
+      continue;
+    }
+
+    if (keyInOriginal) {
+      fixed[value] = key;
       continue;
     }
 
@@ -176,15 +161,84 @@ function fixSessionMapOrientation(originalText, safePrompt, sessionMap) {
   return fixed;
 }
 
+function removeInvalidSessionMapEntries(originalText, sessionMap) {
+  const cleaned = {};
+
+  for (const [dummy, original] of Object.entries(sessionMap)) {
+    if (dummy === original) continue;
+    if (!originalText.includes(original)) continue;
+    cleaned[dummy] = original;
+  }
+
+  return cleaned;
+}
+
+function fixVagueStandInKeys(sessionMap, originalText) {
+  const fixed = {};
+  let vagueCount = 0;
+
+  for (const [dummy, original] of Object.entries(sessionMap)) {
+    if (!isVagueStandIn(dummy)) {
+      fixed[dummy] = original;
+      continue;
+    }
+
+    vagueCount += 1;
+    const replacement = createUniqueDummy("API_KEY", vagueCount, originalText, { ...fixed, ...sessionMap });
+    fixed[replacement] = original;
+  }
+
+  return fixed;
+}
+
+function rebuildSafePrompt(originalText, sessionMap) {
+  let safePrompt = originalText;
+  const entries = Object.entries(sessionMap)
+    .filter(([dummy, original]) => dummy && original && dummy !== original)
+    .sort((a, b) => b[1].length - a[1].length);
+
+  for (const [dummy, original] of entries) {
+    safePrompt = replaceAll(safePrompt, original, dummy);
+  }
+
+  return safePrompt;
+}
+
+function countSessionMapTypes(sessionMap) {
+  const counts = {};
+  for (const original of Object.values(sessionMap)) {
+    const type = inferSecretType(original);
+    counts[type] = (counts[type] || 0) + 1;
+  }
+  return counts;
+}
+
+function inferSecretType(value) {
+  if (/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(value)) return "EMAIL";
+  if (/\bgsk_[A-Za-z0-9]{8,}\b/.test(value)) return "API_KEY";
+  if (/\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_]{8,}\b/.test(value)) return "API_KEY";
+  if (/\b(?:AKIA|ASIA)[A-Z0-9]{12,20}\b/.test(value)) return "AWS_ACCESS_KEY";
+  if (/\b[a-f0-9]{32,64}\b/i.test(value)) return "API_KEY";
+  return "API_KEY";
+}
+
+function looksLikeSecret(value) {
+  return (
+    /[0-9a-f]{16,}/i.test(value) ||
+    /^(?:gsk_|sk_|pk_|AKIA)/.test(value) ||
+    /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(value)
+  );
+}
+
 function findDummyForOriginal(sessionMap, original) {
   return Object.entries(sessionMap).find(([, value]) => value === original)?.[0];
 }
 
-function createUniqueDummy(type, index, safePrompt, sessionMap) {
+function createUniqueDummy(type, index, sourceText, sessionMap) {
   let dummy = generateDummy(type, index);
   let slot = index;
 
-  while (safePrompt.includes(dummy) || Object.hasOwn(sessionMap, dummy)) {
+  while (sourceText.includes(dummy) || Object.hasOwn(sessionMap, dummy)) {
     slot += 1;
     dummy = generateDummy(type, slot);
   }

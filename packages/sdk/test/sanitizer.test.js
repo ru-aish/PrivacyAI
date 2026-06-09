@@ -78,7 +78,7 @@ test("client ask uses local AI first, then sends safe prompt without system cont
 
   assert.equal(calls.length, 2);
   assert.equal(calls[1].messages.length, 1);
-  assert.equal(calls[1].messages[0].content, "Please email contact1@example.com.");
+  assert.equal(calls[1].messages[0].content, "Please email Alex Morgan at contact1@example.com.");
   assert.equal(result.finalText, "I will email alice@example.com with a concise update.");
 });
 
@@ -150,4 +150,28 @@ test("parseSanitizerJson extracts safe prompt and session map", () => {
   const parsed = parseSanitizerJson(`{"safe_prompt":"safe text","session_map":{"dummy":"real"}}`);
   assert.equal(parsed.safe_prompt, "safe text");
   assert.deepEqual(parsed.session_map, { dummy: "real" });
+});
+
+test("enforcement keeps ordinary API wording and only redacts the credential value", async () => {
+  const leakedKey = "848a71e823beb08e73a65f358c9b223b015e45bc";
+  const original =
+    `so i wnat to configer the api of the grok can you do that for me using the write tools: api: ${leakedKey}`;
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({
+      safe_prompt:
+        "so i wnat to configer the gsk_dummy_1_redacted of the grok can you do that for me using the write tools: gsk_dummy_1_redacted: gsk_dummy_1_redacted",
+      session_map: {
+        gsk_dummy_1_redacted: "gsk_dummy_1_redacted"
+      }
+    }),
+    loadEnv: false
+  });
+
+  const result = await sanitizer.sanitize(original);
+
+  assert.match(result.sanitizedText, /configer the api of the grok/i);
+  assert.match(result.sanitizedText, /api:\s*gsk_dummy_1_redacted/);
+  assert.doesNotMatch(result.sanitizedText, /gsk_dummy_1_redacted:\s*gsk_dummy_1_redacted/);
+  assert.doesNotMatch(result.sanitizedText, new RegExp(leakedKey));
+  assert.equal(result.sessionMap.gsk_dummy_1_redacted, leakedKey);
 });

@@ -8,6 +8,8 @@ test("privacy sanitizer prompt requires JSON output", () => {
   assert.match(PRIVACY_SANITIZER_PROMPT, /session_map/);
   assert.match(PRIVACY_SANITIZER_PROMPT, /shown verbatim to the downstream AI/);
   assert.match(PRIVACY_SANITIZER_PROMPT, /Never use vague placeholders like "API key"/);
+  assert.match(PRIVACY_SANITIZER_PROMPT, /Do NOT replace the ordinary word "API"/);
+  assert.match(PRIVACY_SANITIZER_PROMPT, /session_map keys and values must never be identical/);
 });
 
 test("main ask call sends only the safe prompt unless system override is provided", async () => {
@@ -45,6 +47,6 @@ test("main ask call sends only the safe prompt unless system override is provide
   assert.match(calls[0].messages[1].content, /alice@example\.com/);
   assert.equal(calls[1].messages.length, 1);
   assert.equal(calls[1].messages[0].role, "user");
-  assert.equal(calls[1].messages[0].content, "Email contact1@example.com");
+  assert.equal(calls[1].messages[0].content, "Please email Alex Morgan at contact1@example.com.");
   assert.equal(result.finalText, "Reply sent to alice@example.com");
 });
