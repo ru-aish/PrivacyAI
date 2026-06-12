@@ -12,4 +12,10 @@ importers:
         specifier: workspace:*
         version: link:packages/sdk
 
+  apps/web-demo:
+    dependencies:
+      '@privacy-ai/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
+
   packages/sdk: {}

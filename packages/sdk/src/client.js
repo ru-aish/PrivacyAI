@@ -31,7 +31,7 @@ export class PrivateAI {
 
   async ask(prompt, options = {}) {
     const sanitized = await this.sanitize(prompt);
-    const messages = buildMessages(sanitized.sanitizedText, options);
+    const messages = buildTaskMessages(sanitized.sanitizedText, options);
     const modelResponse = await this.provider.chat({
       model: options.model || this.config.model,
       messages,
@@ -57,18 +57,14 @@ export function createClient(options = {}) {
   return new PrivateAI(options);
 }
 
-function buildMessages(sanitizedPrompt, options) {
-  const system = options.system || [
-    "You are a helpful assistant inside a privacy-preserving SDK.",
-    "The user prompt may contain placeholders such as [EMAIL_1], [PHONE_1], or [PERSON_1].",
-    "Treat placeholders as the real private values, but never invent or reveal the original private values.",
-    "Preserve placeholder tokens exactly when referring to private data."
-  ].join(" ");
+function buildTaskMessages(sanitizedPrompt, options) {
+  const messages = [{ role: "user", content: sanitizedPrompt }];
 
-  return [
-    { role: "system", content: system },
-    { role: "user", content: sanitizedPrompt }
-  ];
+  if (options.system) {
+    messages.unshift({ role: "system", content: options.system });
+  }
+
+  return messages;
 }
 
 function createProvider(config) {

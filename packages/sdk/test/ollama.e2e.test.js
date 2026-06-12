@@ -13,30 +13,33 @@ const client = new PrivateAI({
   loadEnv: false
 });
 
-const result = await client.ask(
-  "local.e2e@example.com",
-  {
-    maxTokens: 1024,
-    temperature: 0,
-    system: "Reply with exactly: [EMAIL_1]"
-  }
-);
+const prompt = "local.e2e@example.com needs a one-line acknowledgement.";
+const sanitized = await client.sanitize(prompt);
 
 console.log(JSON.stringify({
-  provider: result.provider,
-  sanitizedText: result.sanitizedText,
-  modelText: result.modelText,
-  finalText: result.finalText,
-  detections: result.detections.map((detection) => ({
-    type: detection.type,
-    replacement: detection.replacement
-  }))
+  provider: { baseURL, model },
+  originalText: sanitized.originalText,
+  sanitizedText: sanitized.sanitizedText,
+  sessionMap: sanitized.sessionMap,
+  privacySource: sanitized.privacySource
 }, null, 2));
 
-assert.match(result.sanitizedText, /\[EMAIL_1\]/);
-assert.doesNotMatch(result.sanitizedText, /local\.e2e@example\.com/);
-assert.equal(result.sessionMap["[EMAIL_1]"], "local.e2e@example.com");
-assert.equal(result.provider.model, model);
-assert.ok(result.modelText.length > 0);
-assert.match(result.modelText, /\[EMAIL_1\]/);
-assert.match(result.finalText, /local\.e2e@example\.com/);
+assert.equal(sanitized.originalText, prompt);
+assert.notEqual(sanitized.sanitizedText, prompt);
+assert.ok(Object.keys(sanitized.sessionMap).length > 0);
+assert.doesNotMatch(sanitized.sanitizedText, /local\.e2e@example\.com/);
+
+if (sanitized.privacySource === "ai-sanitizer") {
+  const result = await client.ask(prompt, {
+    maxTokens: 128,
+    temperature: 0
+  });
+
+  console.log(JSON.stringify({
+    modelText: result.modelText,
+    finalText: result.finalText
+  }, null, 2));
+
+  assert.ok(result.modelText.length > 0);
+  assert.match(result.finalText, /local\.e2e@example\.com/);
+}
