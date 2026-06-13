@@ -1,5 +1,6 @@
 import { ProviderError } from "../errors.js";
 import { normalizeBaseURL } from "../config.js";
+import { getFetch } from "../fetch.js";
 
 export class OllamaProvider {
   constructor(options = {}) {
@@ -8,7 +9,7 @@ export class OllamaProvider {
     this.timeoutMs = options.timeoutMs || 60000;
     this.numCtx = options.numCtx || 4096;
     this.think = options.think ?? false;
-    this.fetch = options.fetch || globalThis.fetch;
+    this.fetch = getFetch(options.fetch);
 
     if (!this.fetch) {
       throw new ProviderError("A fetch implementation is required. Use Node 18+ or pass fetch.");
