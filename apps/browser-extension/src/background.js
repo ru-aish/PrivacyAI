@@ -1,6 +1,7 @@
 import { createBrowserClient, localSanitize } from "@privacy-ai/sdk/browser";
 import { getEffectiveConfig, hasRemoteProvider, PROVIDER_PRESETS } from "./config.js";
 
+
 let privateClient = null;
 
 console.log("PrivacyAI background service worker loaded");
@@ -59,16 +60,60 @@ async function sanitizeText(text) {
   }
 }
 
+async function injectPageBridge(tabId) {
+  if (!tabId) return false;
+
+  await chrome.scripting.executeScript({
+    target: { tabId, allFrames: true },
+    world: "MAIN",
+    files: ["page-bridge-main.js"]
+  });
+
+  return true;
+}
+
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "inject-page-bridge") {
+    (async () => {
+      try {
+        const success = await injectPageBridge(sender.tab?.id);
+        sendResponse({ success });
+      } catch (error) {
+        console.error("PrivacyAI page bridge injection failed:", error);
+        sendResponse({ success: false, error: error.message });
+      }
+    })();
+    return true;
+  }
+
   if (request.action === "ping") {
     sendResponse({ success: true, message: "PrivacyAI background is running" });
     return false;
   }
 
   if (request.action === "sanitize") {
+    console.log("PrivacyAI: received sanitize request", {
+      length: request.text?.length,
+      from: sender.tab?.url || "unknown"
+    });
+
     (async () => {
       try {
         const result = await sanitizeText(request.text);
+        console.log("PrivacyAI: sanitize complete", {
+          source: result.privacySource || "local-regex",
+          preview: result.sanitizedText?.slice(0, 80)
+        });
+
+        if (request.submitToPage && sender.tab?.id) {
+          await chrome.scripting.executeScript({
+            target: { tabId: sender.tab.id, allFrames: true },
+            world: "MAIN",
+            func: (text) => window.__privacyAiSubmit?.(text),
+            args: [result.sanitizedText]
+          });
+        }
+
         sendResponse({ success: true, result });
       } catch (error) {
         console.error("PrivacyAI sanitization failed:", error);

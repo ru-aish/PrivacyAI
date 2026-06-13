@@ -1,138 +1,163 @@
+const EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+
+function quickLocalSanitize(text) {
+  const sessionMap = {};
+  let sanitizedText = text;
+  let index = 0;
+
+  for (const match of text.matchAll(EMAIL_REGEX)) {
+    index += 1;
+    const dummy = `contact${index}@example.com`;
+    sessionMap[dummy] = match[0];
+    sanitizedText = sanitizedText.replace(match[0], dummy);
+  }
+
+  return { originalText: text, sanitizedText, sessionMap, privacySource: "content-regex-fallback" };
+}
+
 let shieldEnabled = true;
 let currentSessionMap = {};
+let observerStarted = false;
 
 chrome.storage.local.get(['shieldEnabled'], (data) => {
   if (data.shieldEnabled !== undefined) {
     shieldEnabled = data.shieldEnabled;
   }
+  postToPage('shield-state', { value: shieldEnabled });
 });
 
 chrome.storage.onChanged.addListener((changes) => {
   if (changes.shieldEnabled) {
     shieldEnabled = changes.shieldEnabled.newValue;
+    postToPage('shield-state', { value: shieldEnabled });
   }
 });
 
-let isSanitizing = false;
+document.documentElement.setAttribute('data-privacyai', 'active');
+requestPageBridge();
 
-function sendBackgroundMessage(message) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve(response);
-    });
+function postToPage(type, payload = {}) {
+  window.postMessage({ source: 'privacyai-content', type, ...payload }, '*');
+}
+
+function requestPageBridge() {
+  chrome.runtime.sendMessage({ action: 'inject-page-bridge' }, (response) => {
+    if (chrome.runtime.lastError) {
+      console.error('PrivacyAI failed to inject page bridge:', chrome.runtime.lastError.message);
+      return;
+    }
+    postToPage('shield-state', { value: shieldEnabled });
+    if (response?.success) {
+      console.log('PrivacyAI page bridge injected');
+    }
   });
 }
 
-sendBackgroundMessage({ action: 'ping' })
-  .then((response) => console.log("PrivacyAI connected:", response?.message))
-  .catch((error) => {
-    console.error(
-      "PrivacyAI cannot reach background worker:",
-      error.message,
-      "If testing a local HTML file, enable 'Allow access to file URLs' on chrome://extensions, or use http://localhost:3333/mock-chat.html"
-    );
+function mountBadgeHost() {
+  return document.body || document.documentElement;
+}
+
+function showBadge(text) {
+  let badge = document.getElementById('privacyai-badge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'privacyai-badge';
+    badge.style.cssText = [
+      'position:fixed',
+      'bottom:12px',
+      'right:12px',
+      'z-index:2147483647',
+      'padding:6px 10px',
+      'border-radius:6px',
+      'background:#111',
+      'color:#fff',
+      'font:12px/1.4 sans-serif',
+      'box-shadow:0 2px 8px rgba(0,0,0,.25)'
+    ].join(';');
+    mountBadgeHost().appendChild(badge);
+  }
+  badge.textContent = text;
+}
+
+function startRestoreObserver() {
+  if (observerStarted || !document.body) return;
+  observerStarted = true;
+
+  const observer = new MutationObserver((mutations) => {
+    if (!shieldEnabled || Object.keys(currentSessionMap).length === 0) return;
+
+    for (const mutation of mutations) {
+      if (mutation.type === 'characterData') {
+        restoreTextNode(mutation.target);
+      } else if (mutation.type === 'childList') {
+        mutation.addedNodes.forEach((node) => {
+          if (node.nodeType === Node.TEXT_NODE) {
+            restoreTextNode(node);
+          } else if (node.nodeType === Node.ELEMENT_NODE) {
+            walkAndRestore(node);
+          }
+        });
+      }
+    }
   });
 
-document.addEventListener('keydown', async (e) => {
-  if (!shieldEnabled) return;
-  const target = e.target;
-  const isInputOrTextarea = target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable;
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+}
 
-  if (!isInputOrTextarea) return;
-
-  if (e.key === 'Enter' && !e.shiftKey) {
-    if (isSanitizing) return;
-
-    const originalText = target.value || target.innerText;
-    if (!originalText || originalText.trim().length < 5) return;
-    if (originalText.includes('[EMAIL_')) return;
-
-    e.preventDefault();
-    e.stopImmediatePropagation();
-
-    isSanitizing = true;
-    console.log("PrivacyAI intercepting prompt:", originalText);
+function sendBackgroundMessage(message, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Background worker timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
 
     try {
-      const response = await sendBackgroundMessage({ action: 'sanitize', text: originalText });
+      chrome.runtime.sendMessage(message, (response) => {
+        clearTimeout(timer);
 
-      if (response && response.success && response.result) {
-        console.log("PrivacyAI sanitized prompt successfully.", response.result.sanitizedText);
-        const { sanitizedText, sessionMap } = response.result;
-        Object.assign(currentSessionMap, sessionMap);
-
-        if (target.isContentEditable) {
-          target.innerText = sanitizedText;
-          target.textContent = sanitizedText;
-        } else {
-          target.value = sanitizedText;
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
         }
 
-        target.dispatchEvent(new Event('input', { bubbles: true }));
-        target.dispatchEvent(new Event('change', { bubbles: true }));
-        target.blur();
-        target.focus();
-
-        setTimeout(() => {
-          const btn = document.getElementById('send-button');
-          if (btn) {
-            btn.click();
-          } else {
-            isSanitizing = true;
-            target.dispatchEvent(new KeyboardEvent('keydown', {
-              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, shiftKey: false
-            }));
-          }
-          setTimeout(() => { isSanitizing = false; }, 200);
-        }, 150);
-      } else {
-        console.error("PrivacyAI sanitization failed:", response?.error || "no response from background");
-        isSanitizing = false;
-      }
-    } catch (error) {
-      console.error("PrivacyAI sendMessage error:", error.message);
-      isSanitizing = false;
-    }
-  }
-}, true);
-
-
-const observer = new MutationObserver((mutations) => {
-  if (!shieldEnabled) return;
-  if (Object.keys(currentSessionMap).length === 0) return;
-
-  for (const mutation of mutations) {
-    if (mutation.type === 'characterData') {
-      restoreTextNode(mutation.target);
-    } else if (mutation.type === 'childList') {
-      mutation.addedNodes.forEach(node => {
-        if (node.nodeType === Node.TEXT_NODE) {
-          restoreTextNode(node);
-        } else if (node.nodeType === Node.ELEMENT_NODE) {
-          walkAndRestore(node);
-        }
+        resolve(response);
       });
+    } catch (error) {
+      clearTimeout(timer);
+      reject(error);
     }
-  }
-});
+  });
+}
 
-observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+async function requestSanitize(text) {
+  try {
+    const response = await sendBackgroundMessage({ action: 'sanitize', text });
+    if (response?.success && response.result) {
+      console.log("PrivacyAI sanitized via background.", response.result.sanitizedText);
+      return response.result;
+    }
+    throw new Error(response?.error || 'Background sanitization failed');
+  } catch (error) {
+    console.warn("PrivacyAI background sanitize unavailable, using in-page local regex:", error.message);
+    const result = quickLocalSanitize(text);
+    console.log("PrivacyAI sanitized locally.", result.sanitizedText);
+    return result;
+  }
+}
 
 function walkAndRestore(node) {
   const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null, false);
   let textNode;
   const nodesToUpdate = [];
-  while ((textNode = walker.nextNode())) { nodesToUpdate.push(textNode); }
+  while ((textNode = walker.nextNode())) {
+    nodesToUpdate.push(textNode);
+  }
   nodesToUpdate.forEach(restoreTextNode);
 }
 
 function restoreTextNode(node) {
   let text = node.nodeValue;
   if (!text) return;
+
   let changed = false;
   for (const [dummy, original] of Object.entries(currentSessionMap)) {
     if (text.includes(dummy)) {
@@ -140,5 +165,64 @@ function restoreTextNode(node) {
       changed = true;
     }
   }
-  if (changed) node.nodeValue = text;
+
+  if (changed) {
+    node.nodeValue = text;
+  }
 }
+
+function initializeContentScript() {
+  showBadge('PrivacyAI loading...');
+  startRestoreObserver();
+
+  sendBackgroundMessage({ action: 'ping' }, 5000)
+    .then((response) => {
+      console.log("PrivacyAI connected:", response?.message);
+      showBadge('PrivacyAI connected');
+    })
+    .catch((error) => {
+      console.error("PrivacyAI cannot reach background worker:", error.message);
+      showBadge('PrivacyAI: background unreachable (local fallback only)');
+    });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initializeContentScript, { once: true });
+} else {
+  initializeContentScript();
+}
+
+window.addEventListener('message', async (event) => {
+  if (event.source !== window || !event.data || event.data.source !== 'privacyai-page') {
+    return;
+  }
+
+  if (event.data.type !== 'sanitize-request' || !shieldEnabled) {
+    return;
+  }
+
+  const originalText = String(event.data.text || '');
+  console.log("PrivacyAI intercepting prompt:", originalText);
+  showBadge('PrivacyAI sanitizing...');
+
+  try {
+    const response = await sendBackgroundMessage({
+      action: 'sanitize',
+      text: originalText,
+      submitToPage: true
+    });
+
+    if (!response?.success || !response.result) {
+      throw new Error(response?.error || 'Background sanitization failed');
+    }
+
+    const result = response.result;
+    Object.assign(currentSessionMap, result.sessionMap);
+    console.log("PrivacyAI sanitized via background.", result.sanitizedText);
+    showBadge('PrivacyAI ready');
+  } catch (error) {
+    console.error("PrivacyAI sanitization error:", error);
+    postToPage('sanitize-error');
+    showBadge('PrivacyAI error — refresh page');
+  }
+});
