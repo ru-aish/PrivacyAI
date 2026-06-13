@@ -36,6 +36,27 @@ chrome.storage.onChanged.addListener((changes) => {
 document.documentElement.setAttribute('data-privacyai', 'active');
 requestPageBridge();
 
+window.addEventListener('pageshow', () => requestPageBridge());
+
+let lastUrl = location.href;
+const navigationObserver = new MutationObserver(() => {
+  if (location.href !== lastUrl) {
+    lastUrl = location.href;
+    requestPageBridge();
+  }
+});
+
+function startNavigationObserver() {
+  if (!document.body) return;
+  navigationObserver.observe(document.body, { childList: true, subtree: true });
+}
+
+if (document.body) {
+  startNavigationObserver();
+} else {
+  document.addEventListener('DOMContentLoaded', startNavigationObserver, { once: true });
+}
+
 function postToPage(type, payload = {}) {
   window.postMessage({ source: 'privacyai-content', type, ...payload }, '*');
 }
@@ -144,17 +165,65 @@ async function requestSanitize(text) {
   }
 }
 
+const USER_MESSAGE_SELECTORS = [
+  '[data-message-author-role="user"]',
+  '.message.user',
+  '.user-query',
+  '.user-message',
+  '[data-testid="user-message"]'
+];
+
+const COMPOSER_SELECTORS = [
+  '#prompt-textarea',
+  'div.ql-editor',
+  'div.ProseMirror',
+  'rich-textarea',
+  'textarea#prompt-input',
+  '#prompt-input'
+];
+
+const ASSISTANT_MESSAGE_SELECTORS = [
+  '[data-message-author-role="model"]',
+  '[data-message-author-role="assistant"]',
+  '.message.ai',
+  '.model-response',
+  '[data-testid="conversation-turn"] [data-message-author-role="model"]'
+];
+
+function shouldRestoreNode(node) {
+  let element = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+  while (element) {
+    for (const selector of USER_MESSAGE_SELECTORS) {
+      if (element.matches?.(selector)) return false;
+    }
+    for (const selector of COMPOSER_SELECTORS) {
+      if (element.matches?.(selector)) return false;
+    }
+    for (const selector of ASSISTANT_MESSAGE_SELECTORS) {
+      if (element.matches?.(selector)) return true;
+    }
+    element = element.parentElement;
+  }
+  return false;
+}
+
 function walkAndRestore(node) {
+  if (!shouldRestoreNode(node)) return;
+
   const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT, null, false);
   let textNode;
   const nodesToUpdate = [];
   while ((textNode = walker.nextNode())) {
-    nodesToUpdate.push(textNode);
+    if (shouldRestoreNode(textNode)) {
+      nodesToUpdate.push(textNode);
+    }
   }
   nodesToUpdate.forEach(restoreTextNode);
 }
 
 function restoreTextNode(node) {
+  if (!shouldRestoreNode(node)) return;
+
   let text = node.nodeValue;
   if (!text) return;
 
@@ -208,8 +277,7 @@ window.addEventListener('message', async (event) => {
   try {
     const response = await sendBackgroundMessage({
       action: 'sanitize',
-      text: originalText,
-      submitToPage: true
+      text: originalText
     });
 
     if (!response?.success || !response.result) {
@@ -217,8 +285,9 @@ window.addEventListener('message', async (event) => {
     }
 
     const result = response.result;
-    Object.assign(currentSessionMap, result.sessionMap);
     console.log("PrivacyAI sanitized via background.", result.sanitizedText);
+    postToPage('submit-sanitized', { text: result.sanitizedText });
+    Object.assign(currentSessionMap, result.sessionMap);
     showBadge('PrivacyAI ready');
   } catch (error) {
     console.error("PrivacyAI sanitization error:", error);

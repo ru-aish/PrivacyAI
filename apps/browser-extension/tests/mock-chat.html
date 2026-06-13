@@ -47,26 +47,34 @@
 
     sendButton.addEventListener('click', handleSend);
 
+    function sendMessage(text) {
+      const trimmed = String(text || '').trim();
+      if (!trimmed) return;
+
+      const msgDiv = document.createElement('div');
+      msgDiv.className = 'message user';
+      msgDiv.innerText = trimmed;
+      const debugDiv = document.createElement('div');
+      debugDiv.className = 'debug';
+      debugDiv.innerText = `[Received: ${trimmed}]`;
+      msgDiv.appendChild(debugDiv);
+      chatHistory.appendChild(msgDiv);
+
+      input.value = '';
+      reactStateValue = '';
+    }
+
     document.addEventListener('privacyai-submit', (event) => {
       const text = String(event.detail?.text || '').trim();
       if (!text) return;
-      input.value = text;
-      reactStateValue = text;
-      handleSend();
+      sendMessage(text);
       event.preventDefault();
     }, true);
 
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        if (!e.defaultPrevented) {
-          e.preventDefault();
-
-          // In React, keydown usually fires AFTER input. But Playwright might fire keydown then input,
-          // OR our extension might prevent it.
-          setTimeout(() => {
-             handleSend();
-          }, 0);
-        }
+      if (e.key === 'Enter' && !e.shiftKey && !e.defaultPrevented && !window.__privacyAiSanitizing) {
+        e.preventDefault();
+        sendMessage(input.value || reactStateValue);
       }
     });
   </script>

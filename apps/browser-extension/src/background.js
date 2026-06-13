@@ -6,6 +6,12 @@ let privateClient = null;
 
 console.log("PrivacyAI background service worker loaded");
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'complete' && tabId) {
+    injectPageBridge(tabId).catch(() => {});
+  }
+});
+
 chrome.runtime.onInstalled.addListener(async () => {
   const data = await chrome.storage.local.get(["provider", "baseUrl"]);
   if (!data.provider && !data.baseUrl) {
@@ -104,15 +110,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           source: result.privacySource || "local-regex",
           preview: result.sanitizedText?.slice(0, 80)
         });
-
-        if (request.submitToPage && sender.tab?.id) {
-          await chrome.scripting.executeScript({
-            target: { tabId: sender.tab.id, allFrames: true },
-            world: "MAIN",
-            func: (text) => window.__privacyAiSubmit?.(text),
-            args: [result.sanitizedText]
-          });
-        }
 
         sendResponse({ success: true, result });
       } catch (error) {
