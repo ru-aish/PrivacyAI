@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mock AI Chat</title>
+</head>
+<body>
+  <h2>Mock AI Chat</h2>
+  <div id="chat-history"></div>
+  <textarea id="prompt-input" placeholder="Message AI..."></textarea>
+  <button id="send-button">Send</button>
+
+  <script>
+    const input = document.getElementById('prompt-input');
+    const sendButton = document.getElementById('send-button');
+    const chatHistory = document.getElementById('chat-history');
+
+    // This simulates exactly how a form works: it binds the value to a state immediately on input
+    let reactStateValue = "";
+    input.addEventListener('input', (e) => {
+      reactStateValue = e.target.value;
+    });
+
+    function handleSend() {
+      // It reads the framework state value!
+      const text = String(reactStateValue).trim();
+      if (!text) return;
+
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `message user`;
+      msgDiv.innerText = text;
+      const debugDiv = document.createElement('div');
+      debugDiv.className = 'debug';
+      debugDiv.innerText = `[Received: ${text}]`;
+      msgDiv.appendChild(debugDiv);
+      chatHistory.appendChild(msgDiv);
+
+      input.value = '';
+      reactStateValue = '';
+
+      setTimeout(() => {
+        const aiDiv = document.createElement('div');
+        aiDiv.className = `message ai`;
+        aiDiv.innerText = `Echo: ${text}`;
+        chatHistory.appendChild(aiDiv);
+      }, 500);
+    }
+
+    sendButton.addEventListener('click', handleSend);
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        if (!e.defaultPrevented) {
+          e.preventDefault();
+
+          // In React, keydown usually fires AFTER input. But Playwright might fire keydown then input,
+          // OR our extension might prevent it.
+          setTimeout(() => {
+             handleSend();
+          }, 0);
+        }
+      }
+    });
+  </script>
+</body>
+</html>

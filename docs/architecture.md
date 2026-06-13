@@ -1,28 +1,28 @@
 # Architecture
 
-PrivacyAI is split into three visible layers:
+PrivacyAI has two user-facing layers:
 
 1. `packages/sdk`
-2. `apps/service-gateway`
-3. `apps/web-demo`
+2. `apps/web-demo`
 
 ## Flow
 
 ```text
-prompt -> local privacy detection -> redaction -> provider call -> response restore
+user prompt
+  -> local AI privacy pass (system prompt + JSON output)
+  -> safe_prompt + session_map
+  -> task AI call (fresh context, no system prompt)
+  -> local restore using session_map
 ```
 
 ## Package roles
 
-- `packages/sdk`: the main library people install and import
-- `apps/service-gateway`: Python Flask wrapper for direct HTTP use
-- `apps/web-demo`: browser-facing demo UI
+- `packages/sdk`: local AI sanitization is the core product
+- `apps/web-demo`: browser demo powered directly by the SDK
 
 ## Why this split
 
-- SDK users want one or two import lines.
-- Service users want a simple endpoint.
-- Demo users want a visible UI.
+- SDK users want privacy handled by a local AI intermediary.
+- Demo users want a visible UI to try the product quickly.
 
-The repo keeps those paths separate so they do not blur into one another.
-
+The repo keeps those paths separate so the demo does not become the product.

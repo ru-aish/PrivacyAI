@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PrivacyAI Demo</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>PrivacyAI Demo</h1>
+            <p>Try the SDK in your browser — private data is redacted before it reaches the model.</p>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot"></span>
+                <span id="statusText">Checking status...</span>
+            </div>
+            <div class="provider-badge" id="providerBadge">Provider: loading...</div>
+        </div>
+
+        <div class="main-interface">
+            <div class="input-section">
+                <div class="input-group">
+                    <label for="systemPrompt">System Prompt (Optional):</label>
+                    <textarea id="systemPrompt" placeholder="Enter system instructions for the AI..."></textarea>
+                </div>
+
+                <div class="input-group">
+                    <label for="userMessage">Your Message:</label>
+                    <textarea id="userMessage" placeholder="Enter your message here. Emails, phone numbers, and names are protected automatically."></textarea>
+                </div>
+
+                <div class="button-group">
+                    <button id="sendButton" onclick="processMessage()">
+                        <span class="button-text">Send Message</span>
+                        <span class="loading-spinner" style="display: none;">...</span>
+                    </button>
+                    <button id="sanitizeOnlyButton" onclick="sanitizeOnly()">
+                        Preview Sanitization
+                    </button>
+                    <button id="testConnectionButton" onclick="testConnection()">
+                        Test AI Connection
+                    </button>
+                </div>
+            </div>
+
+            <div class="results-section" id="resultsSection" style="display: none;">
+                <h3>Results</h3>
+
+                <div class="result-box">
+                    <h4>Your Original Message</h4>
+                    <div class="result-content" id="originalMessage"></div>
+                </div>
+
+                <div class="result-box" id="sanitizedBox" style="display: none;">
+                    <h4>Sanitized Message (Dummy Data Sent to AI)</h4>
+                    <div class="result-content" id="sanitizedMessage"></div>
+                    <div class="privacy-items" id="privacyItems"></div>
+                </div>
+
+                <div class="result-box" id="aiResponseBox" style="display: none;">
+                    <h4>AI Response (With Dummy Stand-ins)</h4>
+                    <div class="result-content" id="aiResponse"></div>
+                </div>
+
+                <div class="result-box" id="finalResponseBox" style="display: none;">
+                    <h4>Final Response (Privacy Restored)</h4>
+                    <div class="result-content" id="finalResponse"></div>
+                </div>
+            </div>
+
+            <div class="error-section" id="errorSection" style="display: none;">
+                <h3>Error</h3>
+                <div class="error-content" id="errorMessage"></div>
+            </div>
+        </div>
+
+        <footer>
+            <p>Powered by <code>@privacy-ai/sdk</code></p>
+        </footer>
+    </div>
+
+    <script src="/js/app.js"></script>
+</body>
+</html>

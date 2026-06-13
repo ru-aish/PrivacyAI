@@ -37,6 +37,44 @@ const PATTERNS = [
   },
   {
     type: "API_KEY",
+    confidence: 0.93,
+    regex: /\bgsk_[A-Za-z0-9]{20,}\b/g
+  },
+  {
+    type: "API_KEY",
+    confidence: 0.92,
+    regex: /\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_]{8,}\b/g
+  },
+  {
+    type: "API_KEY",
+    confidence: 0.9,
+    regex: /\bapi\s*:?\s*([a-f0-9]{32,64})\b/gi,
+    valueGroup: 1
+  },
+  {
+    type: "API_KEY",
+    confidence: 0.88,
+    regex: /\bapi\s*key\b[^.\n]{0,60}?\b([a-f0-9]{32,64})\b/gi,
+    valueGroup: 1
+  },
+  {
+    type: "AWS_ACCESS_KEY",
+    confidence: 0.95,
+    regex: /\b(?:AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA)[A-Z0-9]{12,20}\b/g
+  },
+  {
+    type: "API_KEY",
+    confidence: 0.88,
+    regex: /\b(?:sk|pk|rk|xox[baprs]-|ghp_|gho_|github_pat_)[A-Za-z0-9_-]{8,}\b/g
+  },
+  {
+    type: "API_KEY",
+    confidence: 0.8,
+    regex: /\b(?:api[_-]?key|access[_-]?key|secret[_-]?key|auth[_-]?token)[:\s=]+['"]?([A-Za-z0-9_\-./+=]{12,})['"]?/gi,
+    valueGroup: 1
+  },
+  {
+    type: "API_KEY",
     confidence: 0.8,
     regex: /\b(?:sk|pk|api|key|token|secret)[-_]?[A-Za-z0-9]{16,}\b/g
   }
@@ -56,9 +94,11 @@ export class RegexDetector {
     const detections = [];
     for (const pattern of PATTERNS) {
       for (const match of text.matchAll(pattern.regex)) {
-        const value = match[0];
+        const value = pattern.valueGroup ? match[pattern.valueGroup] : match[0];
+        if (!value) continue;
+        const start = pattern.valueGroup ? match.index + match[0].indexOf(value) : match.index;
         if (pattern.validate && !pattern.validate(value)) continue;
-        detections.push(toDetection(pattern.type, value, match.index, pattern.confidence, "regex"));
+        detections.push(toDetection(pattern.type, value, start, pattern.confidence, "regex"));
       }
     }
 

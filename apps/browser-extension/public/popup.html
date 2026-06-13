@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 300px; padding: 15px; font-family: sans-serif; }
+    .toggle-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
+    .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 20px; }
+    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: white; transition: .4s; border-radius: 50%; }
+    input:checked + .slider { background-color: #2196F3; }
+    input:checked + .slider:before { transform: translateX(20px); }
+    .config-section { border-top: 1px solid #ccc; padding-top: 10px; }
+    .config-group { margin-bottom: 10px; }
+    .config-group label { display: block; font-size: 12px; margin-bottom: 4px; color: #555; }
+    .config-group input { width: 100%; padding: 4px; box-sizing: border-box; }
+    button { width: 100%; padding: 8px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    button:hover { background: #1976D2; }
+    #status { font-size: 11px; margin-top: 5px; color: green; text-align: center; height: 14px; }
+  </style>
+</head>
+<body>
+  <h3>PrivacyAI</h3>
+
+  <div class="toggle-container">
+    <span>Enable Shield</span>
+    <label class="switch">
+      <input type="checkbox" id="toggleShield" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="config-section">
+    <h4>Provider Settings</h4>
+    <div class="config-group">
+      <label>Provider Type</label>
+      <input type="text" id="provider" placeholder="openai-compatible" value="openai-compatible">
+    </div>
+    <div class="config-group">
+      <label>Model</label>
+      <input type="text" id="model" placeholder="gemini-1.5-flash" value="gemini-1.5-flash">
+    </div>
+    <div class="config-group">
+      <label>Base URL</label>
+      <input type="text" id="baseUrl" placeholder="https://generativelanguage.googleapis.com/v1beta/openai" value="https://generativelanguage.googleapis.com/v1beta/openai">
+    </div>
+    <div class="config-group">
+      <label>API Key</label>
+      <input type="password" id="apiKey" placeholder="AIzaSy...">
+    </div>
+    <button id="saveBtn">Save Config</button>
+    <div id="status"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
