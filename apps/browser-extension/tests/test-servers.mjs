@@ -2,6 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { mockAiSanitize } from "./mock-ai-sanitizer.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -67,21 +68,14 @@ export async function startTestServers() {
     lastApiRequest = { url: req.url, body };
 
     const userMessage = body.messages?.find((message) => message.role === "user")?.content || "";
-    const emailMatch = userMessage.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i);
-    const originalEmail = emailMatch?.[0] || "secret@example.com";
-    const safePrompt = userMessage.replace(originalEmail, "contact1@example.com");
+    const sanitized = mockAiSanitize(userMessage);
 
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({
       choices: [
         {
           message: {
-            content: JSON.stringify({
-              safe_prompt: safePrompt,
-              session_map: {
-                "contact1@example.com": originalEmail
-              }
-            })
+            content: JSON.stringify(sanitized)
           }
         }
       ]

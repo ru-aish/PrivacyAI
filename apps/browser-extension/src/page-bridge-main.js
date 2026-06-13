@@ -6,7 +6,6 @@
   window.__privacyAiBypassIntercept = false;
 
   let pendingTarget = null;
-  const EMAIL_REGEX = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 
   const EDITOR_SELECTORS = [
     '#prompt-textarea',
@@ -188,27 +187,6 @@
     return null;
   }
 
-  function quickLocalSanitize(text) {
-    let sanitizedText = text;
-    let index = 0;
-
-    for (const match of text.matchAll(EMAIL_REGEX)) {
-      index += 1;
-      const dummy = `contact${index}@example.com`;
-      sanitizedText = sanitizedText.replace(match[0], dummy);
-    }
-
-    return sanitizedText;
-  }
-
-  function replaceEditorText(editor, text) {
-    window.__privacyAiBypassIntercept = true;
-    setText(editor, text);
-    window.setTimeout(() => {
-      window.__privacyAiBypassIntercept = false;
-    }, 0);
-  }
-
   function beginSanitize(editor, text) {
     window.__privacyAiSanitizing = true;
     pendingTarget = editor;
@@ -278,11 +256,6 @@
     if (!originalText.trim() || originalText.trim().length < 5) return false;
     if (originalText.includes('[EMAIL_')) return false;
 
-    const quickText = quickLocalSanitize(originalText);
-    if (quickText !== originalText) {
-      replaceEditorText(editor, quickText);
-    }
-
     blockEvent(event);
     beginSanitize(editor, originalText);
     return true;
@@ -311,21 +284,6 @@
     if (!editor) return;
 
     interceptIfNeeded(event, editor);
-  });
-
-  installCaptureListener('input', (event) => {
-    if (!window.__privacyAiShieldEnabled || window.__privacyAiBypassIntercept) return;
-
-    const editor = resolveEditorFromEvent(event);
-    if (!editor) return;
-    if (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') return;
-    if (!editor.closest('.ql-container')?.__quill) return;
-
-    const originalText = readText(editor);
-    const quickText = quickLocalSanitize(originalText);
-    if (quickText !== originalText) {
-      replaceEditorText(editor, quickText);
-    }
   });
 
   document.addEventListener('click', (event) => {

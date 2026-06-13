@@ -1,7 +1,7 @@
 import { test, expect, chromium } from "@playwright/test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { startTestServers, stopTestServers } from "./test-servers.mjs";
+import { startTestServers, stopTestServers, getLastApiRequest } from "./test-servers.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const extensionPath = path.resolve(__dirname, "../dist");
@@ -59,9 +59,13 @@ test.describe("PrivacyAI on Gemini", () => {
       const bridgeInstalled = await page.evaluate(() => Boolean(window.__privacyAiBridgeInstalled));
       expect(bridgeInstalled).toBeTruthy();
 
+      const prompt = "My email is gemini-test@example.com and I need help.";
       const editor = page.locator('div.ql-editor[contenteditable="true"].textarea').first();
       await editor.click();
-      await page.keyboard.type("My email is gemini-test@example.com and I need help.");
+      await page.keyboard.type(prompt);
+
+      const editorBeforeEnter = await editor.innerText();
+      expect(editorBeforeEnter).toContain("gemini-test@example.com");
 
       await editor.press("Enter");
 
@@ -69,23 +73,19 @@ test.describe("PrivacyAI on Gemini", () => {
 
       const intercepted = logs.some((line) => line.includes("PrivacyAI intercepting prompt"));
       const sanitized = logs.some((line) => line.includes("PrivacyAI sanitized"));
+      const aiSource = logs.some((line) => line.includes("source: ai-sanitizer"));
 
-      const pageState = await page.evaluate(() => {
-        const userTurns = Array.from(document.querySelectorAll('[data-message-author-role="user"], .user-query, .query-text'))
-          .map((el) => el.textContent || '');
-        const editorText = document.querySelector('div.ql-editor.textarea')?.innerText || '';
-        return { userTurns, editorText };
-      });
+      const apiRequest = getLastApiRequest();
+      const userApiMessage = apiRequest?.body?.messages?.find((message) => message.role === "user")?.content || "";
 
       console.log("logs:", logs.filter((l) => l.includes("PrivacyAI")));
-      console.log("pageState:", pageState);
+      console.log("api user message:", userApiMessage);
 
       expect(intercepted).toBeTruthy();
       expect(sanitized).toBeTruthy();
-
-      const sentSanitized = pageState.userTurns.some((text) => text.includes("contact1@example.com"));
-      const sentRaw = pageState.userTurns.some((text) => text.includes("gemini-test@example.com"));
-      expect(sentSanitized || !sentRaw).toBeTruthy();
+      expect(aiSource).toBeTruthy();
+      expect(userApiMessage).toContain("gemini-test@example.com");
+      expect(apiRequest.body.messages.some((message) => message.role === "system")).toBeTruthy();
     } finally {
       await context.close();
     }

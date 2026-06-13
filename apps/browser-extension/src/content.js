@@ -153,7 +153,11 @@ async function requestSanitize(text) {
   try {
     const response = await sendBackgroundMessage({ action: 'sanitize', text });
     if (response?.success && response.result) {
-      console.log("PrivacyAI sanitized via background.", response.result.sanitizedText);
+      console.log(
+        "PrivacyAI sanitized via background.",
+        response.result.sanitizedText,
+        `(source: ${response.result.privacySource || "unknown"})`
+      );
       return response.result;
     }
     throw new Error(response?.error || 'Background sanitization failed');
@@ -285,7 +289,11 @@ window.addEventListener('message', async (event) => {
     }
 
     const result = response.result;
-    console.log("PrivacyAI sanitized via background.", result.sanitizedText);
+    console.log(
+      "PrivacyAI sanitized via background.",
+      result.sanitizedText,
+      `(source: ${result.privacySource || "unknown"})`
+    );
     postToPage('submit-sanitized', { text: result.sanitizedText });
     Object.assign(currentSessionMap, result.sessionMap);
     showBadge('PrivacyAI ready');
