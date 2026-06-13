@@ -7,7 +7,8 @@
     "build": "vite build",
     "dev": "vite",
     "serve:test": "node tests/serve.mjs",
-    "test:e2e": "playwright test"
+    "test:e2e": "npm run build && playwright test",
+    "test:e2e:loop": "node tests/run-loop.mjs"
   },
   "dependencies": {
     "@privacy-ai/sdk": "workspace:*"

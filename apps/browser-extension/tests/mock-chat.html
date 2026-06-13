@@ -22,8 +22,7 @@
     });
 
     function handleSend() {
-      // It reads the framework state value!
-      const text = String(reactStateValue).trim();
+      const text = String(input.value || reactStateValue).trim();
       if (!text) return;
 
       const msgDiv = document.createElement('div');
@@ -47,6 +46,15 @@
     }
 
     sendButton.addEventListener('click', handleSend);
+
+    document.addEventListener('privacyai-submit', (event) => {
+      const text = String(event.detail?.text || '').trim();
+      if (!text) return;
+      input.value = text;
+      reactStateValue = text;
+      handleSend();
+      event.preventDefault();
+    }, true);
 
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
