@@ -17,7 +17,22 @@ function quickLocalSanitize(text) {
 
 let shieldEnabled = true;
 let currentSessionMap = {};
+let restoreRegex = null;
 let observerStarted = false;
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function rebuildRestoreRegex() {
+  const keys = Object.keys(currentSessionMap).sort((a, b) => b.length - a.length);
+  if (keys.length === 0) {
+    restoreRegex = null;
+    return;
+  }
+
+  restoreRegex = new RegExp(keys.map(escapeRegExp).join("|"), "g");
+}
 
 chrome.storage.local.get(['shieldEnabled'], (data) => {
   if (data.shieldEnabled !== undefined) {
@@ -206,7 +221,7 @@ function shouldRestoreNode(node) {
     for (const selector of ASSISTANT_MESSAGE_SELECTORS) {
       if (element.matches?.(selector)) return true;
     }
-    element = element.parentElement;
+    element = element.parentElement || element.parentNode?.host;
   }
   return false;
 }
@@ -226,21 +241,14 @@ function walkAndRestore(node) {
 }
 
 function restoreTextNode(node) {
-  if (!shouldRestoreNode(node)) return;
+  if (!shouldRestoreNode(node) || !restoreRegex) return;
 
-  let text = node.nodeValue;
+  const text = node.nodeValue;
   if (!text) return;
 
-  let changed = false;
-  for (const [dummy, original] of Object.entries(currentSessionMap)) {
-    if (text.includes(dummy)) {
-      text = text.split(dummy).join(original);
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    node.nodeValue = text;
+  const restored = text.replace(restoreRegex, (match) => currentSessionMap[match] || match);
+  if (restored !== text) {
+    node.nodeValue = restored;
   }
 }
 
@@ -296,6 +304,7 @@ window.addEventListener('message', async (event) => {
     );
     postToPage('submit-sanitized', { text: result.sanitizedText });
     Object.assign(currentSessionMap, result.sessionMap);
+    rebuildRestoreRegex();
     showBadge('PrivacyAI ready');
   } catch (error) {
     console.error("PrivacyAI sanitization error:", error);

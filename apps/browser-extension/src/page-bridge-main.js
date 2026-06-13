@@ -1,4 +1,23 @@
 (() => {
+  const SUPPORTED_HOSTS = [
+    "chatgpt.com",
+    "chat.openai.com",
+    "claude.ai",
+    "gemini.google.com",
+    "perplexity.ai",
+    "copilot.microsoft.com",
+    "poe.com",
+    "127.0.0.1",
+    "localhost"
+  ];
+
+  function isSupportedChatSite() {
+    const host = location.hostname;
+    if (location.protocol === "file:") return true;
+    return SUPPORTED_HOSTS.some((supported) => host === supported || host.endsWith(`.${supported}`));
+  }
+
+  if (!isSupportedChatSite()) return;
   if (window.__privacyAiBridgeInstalled) return;
   window.__privacyAiBridgeInstalled = true;
   window.__privacyAiShieldEnabled = true;
@@ -254,7 +273,6 @@
 
     const originalText = readText(editor);
     if (!originalText.trim() || originalText.trim().length < 5) return false;
-    if (originalText.includes('[EMAIL_')) return false;
 
     blockEvent(event);
     beginSanitize(editor, originalText);

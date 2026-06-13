@@ -1,13 +1,14 @@
 import { createBrowserClient, localSanitize } from "@privacy-ai/sdk/browser";
 import { getEffectiveConfig, hasRemoteProvider, PROVIDER_PRESETS } from "./config.js";
+import { isSupportedChatUrl } from "./supported-sites.js";
 
 
 let privateClient = null;
 
 console.log("PrivacyAI background service worker loaded");
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.status === 'complete' && tabId) {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" && tabId && isSupportedChatUrl(tab.url)) {
     injectPageBridge(tabId).catch(() => {});
   }
 });
@@ -68,6 +69,9 @@ async function sanitizeText(text) {
 
 async function injectPageBridge(tabId) {
   if (!tabId) return false;
+
+  const tab = await chrome.tabs.get(tabId);
+  if (!isSupportedChatUrl(tab.url)) return false;
 
   await chrome.scripting.executeScript({
     target: { tabId, allFrames: true },
