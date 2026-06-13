@@ -2,7 +2,7 @@
 <html>
 <head>
   <style>
-    body { width: 300px; padding: 15px; font-family: sans-serif; }
+    body { width: 320px; padding: 15px; font-family: sans-serif; }
     .toggle-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
     .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
     .switch input { opacity: 0; width: 0; height: 0; }
@@ -14,9 +14,13 @@
     .config-group { margin-bottom: 10px; }
     .config-group label { display: block; font-size: 12px; margin-bottom: 4px; color: #555; }
     .config-group input { width: 100%; padding: 4px; box-sizing: border-box; }
-    button { width: 100%; padding: 8px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; }
-    button:hover { background: #1976D2; }
-    #status { font-size: 11px; margin-top: 5px; color: green; text-align: center; height: 14px; }
+    .preset-row { display: flex; gap: 8px; margin-bottom: 10px; }
+    .preset-row button { flex: 1; padding: 6px; background: #eee; color: #333; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .preset-row button:hover { background: #e0e0e0; }
+    button.primary { width: 100%; padding: 8px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    button.primary:hover { background: #1976D2; }
+    .note { font-size: 11px; color: #666; margin-bottom: 10px; line-height: 1.4; }
+    #status { font-size: 11px; margin-top: 5px; color: green; text-align: center; min-height: 14px; }
   </style>
 </head>
 <body>
@@ -32,23 +36,30 @@
 
   <div class="config-section">
     <h4>Provider Settings</h4>
+    <p class="note">Settings are saved in the extension, not from your repo <code>.env</code>. Pick a preset, set your model name, then click Save.</p>
+
+    <div class="preset-row">
+      <button type="button" id="presetOllama">Ollama</button>
+      <button type="button" id="presetLmStudio">LM Studio</button>
+    </div>
+
     <div class="config-group">
       <label>Provider Type</label>
-      <input type="text" id="provider" placeholder="openai-compatible" value="openai-compatible">
+      <input type="text" id="provider" placeholder="ollama or openai-compatible" value="ollama">
     </div>
     <div class="config-group">
       <label>Model</label>
-      <input type="text" id="model" placeholder="gemini-1.5-flash" value="gemini-1.5-flash">
+      <input type="text" id="model" placeholder="qwen3.5:2b" value="qwen3.5:2b">
     </div>
     <div class="config-group">
       <label>Base URL</label>
-      <input type="text" id="baseUrl" placeholder="https://generativelanguage.googleapis.com/v1beta/openai" value="https://generativelanguage.googleapis.com/v1beta/openai">
+      <input type="text" id="baseUrl" placeholder="http://127.0.0.1:11434" value="http://127.0.0.1:11434">
     </div>
     <div class="config-group">
       <label>API Key</label>
-      <input type="password" id="apiKey" placeholder="AIzaSy...">
+      <input type="password" id="apiKey" placeholder="ollama / lm-studio / your key" value="ollama">
     </div>
-    <button id="saveBtn">Save Config</button>
+    <button class="primary" id="saveBtn">Save Config</button>
     <div id="status"></div>
   </div>
 

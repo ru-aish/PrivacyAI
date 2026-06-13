@@ -15,7 +15,29 @@ chrome.storage.onChanged.addListener((changes) => {
 
 let isSanitizing = false;
 
-document.addEventListener('keydown', (e) => {
+function sendBackgroundMessage(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+        return;
+      }
+      resolve(response);
+    });
+  });
+}
+
+sendBackgroundMessage({ action: 'ping' })
+  .then((response) => console.log("PrivacyAI connected:", response?.message))
+  .catch((error) => {
+    console.error(
+      "PrivacyAI cannot reach background worker:",
+      error.message,
+      "If testing a local HTML file, enable 'Allow access to file URLs' on chrome://extensions, or use http://localhost:3333/mock-chat.html"
+    );
+  });
+
+document.addEventListener('keydown', async (e) => {
   if (!shieldEnabled) return;
   const target = e.target;
   const isInputOrTextarea = target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable;
@@ -35,56 +57,46 @@ document.addEventListener('keydown', (e) => {
     isSanitizing = true;
     console.log("PrivacyAI intercepting prompt:", originalText);
 
-    chrome.runtime.sendMessage({ action: 'sanitize', text: originalText }, (response) => {
-      if (chrome.runtime.lastError) console.error("SendMessage error:", chrome.runtime.lastError);
+    try {
+      const response = await sendBackgroundMessage({ action: 'sanitize', text: originalText });
 
       if (response && response.success && response.result) {
         console.log("PrivacyAI sanitized prompt successfully.", response.result.sanitizedText);
         const { sanitizedText, sessionMap } = response.result;
         Object.assign(currentSessionMap, sessionMap);
 
-        // Let's modify the VALUE and dispatch events FIRST
         if (target.isContentEditable) {
-            target.innerText = sanitizedText;
-            target.textContent = sanitizedText;
+          target.innerText = sanitizedText;
+          target.textContent = sanitizedText;
         } else {
-            target.value = sanitizedText;
+          target.value = sanitizedText;
         }
 
         target.dispatchEvent(new Event('input', { bubbles: true }));
         target.dispatchEvent(new Event('change', { bubbles: true }));
-
-        // Wait, what if the `keydown` event on the target ALREADY fired before our `document` capture caught it?
-        // Wait, `capture: true` catches it first. BUT did we use `capture: true` on document.addEventListener?!
-        // OH! We missed `true` at the end of `addEventListener` when rewriting!
-        // No, we have it at the very bottom: `}, true);`
-        // Let's double check. Yes.
-
-        // To absolutely force Playwright and the framework to see it:
-        // We will remove focus and refocus to trigger blur/focus states if needed
         target.blur();
         target.focus();
 
         setTimeout(() => {
-            const btn = document.getElementById('send-button');
-            if (btn) {
-                btn.click();
-            } else {
-                isSanitizing = true;
-                target.dispatchEvent(new KeyboardEvent('keydown', {
-                    key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, shiftKey: false
-                }));
-            }
-            setTimeout(() => { isSanitizing = false; }, 200);
+          const btn = document.getElementById('send-button');
+          if (btn) {
+            btn.click();
+          } else {
+            isSanitizing = true;
+            target.dispatchEvent(new KeyboardEvent('keydown', {
+              key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true, shiftKey: false
+            }));
+          }
+          setTimeout(() => { isSanitizing = false; }, 200);
         }, 150);
       } else {
-        setTimeout(() => {
-          isSanitizing = true;
-          target.dispatchEvent(new KeyboardEvent('keydown', {key: 'Enter', bubbles: true, cancelable: true}));
-          setTimeout(() => { isSanitizing = false; }, 100);
-        }, 100);
+        console.error("PrivacyAI sanitization failed:", response?.error || "no response from background");
+        isSanitizing = false;
       }
-    });
+    } catch (error) {
+      console.error("PrivacyAI sendMessage error:", error.message);
+      isSanitizing = false;
+    }
   }
 }, true);
 

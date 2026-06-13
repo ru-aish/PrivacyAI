@@ -7,6 +7,7 @@ export { configFromEnv, loadEnvFile } from "./config.js";
 export { PRIVACY_SANITIZER_PROMPT, DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
 export { AiSanitizer, parseSanitizerJson } from "./ai-sanitizer.js";
 export { generateDummy } from "./dummy-data.js";
+export { localSanitize } from "./local-sanitizer.js";
 export { PrivacyGuardianError, ProviderError } from "./errors.js";
 
 import { PrivateAI } from "./client.js";

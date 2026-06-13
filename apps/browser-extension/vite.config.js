@@ -17,6 +17,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
+      '@privacy-ai/sdk/browser': resolve(__dirname, '../../packages/sdk/src/browser.js'),
       'node:fs': resolve(__dirname, 'src/empty-module.js'),
       'node:path': resolve(__dirname, 'src/empty-module.js'),
     }

@@ -1,10 +1,21 @@
-export default {
-  readFileSync: () => { throw new Error("Not implemented in browser") },
-  existsSync: () => false
+const notAvailable = () => {
+  throw new Error("Node built-ins are not available in the browser extension");
 };
-export const join = () => "";
-export const dirname = () => "";
-export const isAbsolute = () => false;
 
-export const readFileSync = () => { throw new Error("Not implemented in browser") };
+const browserPath = {
+  join: (...parts) => parts.filter(Boolean).join("/"),
+  dirname: (value) => value.replace(/[/\\][^/\\]*$/, "") || ".",
+  isAbsolute: (value) => value.startsWith("/")
+};
+
+export default {
+  readFileSync: notAvailable,
+  existsSync: () => false,
+  ...browserPath
+};
+
+export const readFileSync = notAvailable;
 export const existsSync = () => false;
+export const join = browserPath.join;
+export const dirname = browserPath.dirname;
+export const isAbsolute = browserPath.isAbsolute;

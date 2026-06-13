@@ -6,6 +6,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
+    "serve:test": "node tests/serve.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {
