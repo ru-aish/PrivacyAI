@@ -519,13 +519,48 @@
     interceptIfNeeded(event, editor);
   });
 
+  function findEditorOnPage() {
+    for (const selector of EDITOR_SELECTORS) {
+      try {
+        const editor = document.querySelector(selector);
+        if (editor && isVisible(editor) && !isExcludedEditor(editor)) {
+          return editor;
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return null;
+  }
+
+  function findEditorForSendButton(button) {
+    let container = button.closest('form') || button.closest('div[role="presentation"]') || button.parentElement;
+    for (let depth = 0; depth < 8 && container; depth += 1) {
+      for (const selector of EDITOR_SELECTORS) {
+        try {
+          const editor = container.querySelector(selector);
+          if (editor && isVisible(editor) && !isExcludedEditor(editor)) {
+            return editor;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      container = container.parentElement;
+    }
+    return findEditorOnPage();
+  }
+
   document.addEventListener('click', (event) => {
     if (window.__privacyAiBypassIntercept) return;
 
     const button = event.target?.closest?.('button');
     if (!button || !matchesSendButton(button)) return;
 
-    const editor = resolveEditor(document.activeElement) || resolveEditorFromEvent(event);
+    let editor = resolveEditor(document.activeElement) || resolveEditorFromEvent(event);
+    if (!editor) {
+      editor = findEditorForSendButton(button);
+    }
     if (!editor) return;
 
     interceptIfNeeded(event, editor);

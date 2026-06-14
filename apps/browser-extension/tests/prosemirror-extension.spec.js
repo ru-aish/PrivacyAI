@@ -69,4 +69,47 @@ test.describe("PrivacyAI on ProseMirror mock", () => {
       await context.close();
     }
   });
+
+  test("submits sanitized prompt by clicking send button on ProseMirror editor", async () => {
+    const context = await chromium.launchPersistentContext("", {
+      channel: "chromium",
+      headless: false,
+      args: [
+        `--disable-extensions-except=${extensionPath}`,
+        `--load-extension=${extensionPath}`
+      ]
+    });
+
+    try {
+      const serviceWorker = await waitForServiceWorker(context);
+      await serviceWorker.evaluate((port) => chrome.storage.local.set({
+        shieldEnabled: true,
+        provider: "openai-compatible",
+        model: "test-model",
+        baseUrl: `http://127.0.0.1:${port}/v1`,
+        apiKey: "test-key"
+      }), apiPort);
+
+      const page = await context.newPage();
+      await page.goto(chatUrl, { waitUntil: "domcontentloaded" });
+
+      await expect(page.locator("html")).toHaveAttribute("data-privacyai", "active", { timeout: 15000 });
+
+      const editor = page.locator('#prompt-textarea');
+      await editor.click();
+      await page.keyboard.type("My email is click-prose@example.com and I need help.");
+
+      const sendButton = page.locator('button[data-testid="send-button"]');
+      await sendButton.click();
+
+      const userMessage = page.locator('.message.user').first();
+      await expect(userMessage).toBeVisible({ timeout: 20000 });
+
+      const sent = await userMessage.getAttribute('data-sent');
+      expect(sent).toContain('contact1@example.com');
+      expect(sent).not.toContain('click-prose@example.com');
+    } finally {
+      await context.close();
+    }
+  });
 });
