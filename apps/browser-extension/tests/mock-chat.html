@@ -64,12 +64,7 @@
       reactStateValue = '';
     }
 
-    document.addEventListener('privacyai-submit', (event) => {
-      const text = String(event.detail?.text || '').trim();
-      if (!text) return;
-      sendMessage(text);
-      event.preventDefault();
-    }, true);
+
 
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey && !e.defaultPrevented && !window.__privacyAiSanitizing) {

@@ -24,6 +24,132 @@
   window.__privacyAiSanitizing = false;
   window.__privacyAiBypassIntercept = false;
 
+  const originalToSanitizedMap = new Map();
+
+  // 1. Hook fetch
+  const originalFetch = window.fetch;
+  window.fetch = async function(resource, init) {
+    if (init && init.body && originalToSanitizedMap.size > 0) {
+      try {
+        let bodyModified = false;
+        let bodyStr = '';
+        
+        if (typeof init.body === 'string') {
+          bodyStr = init.body;
+        } else if (init.body instanceof Blob) {
+          bodyStr = await init.body.text();
+        } else if (init.body instanceof URLSearchParams) {
+          bodyStr = init.body.toString();
+        }
+        
+        if (bodyStr) {
+          for (const [orig, san] of originalToSanitizedMap.entries()) {
+            if (bodyStr.includes(orig)) {
+              bodyStr = bodyStr.replaceAll(orig, san);
+              bodyModified = true;
+            }
+            const escapedOrig = JSON.stringify(orig).slice(1, -1);
+            const escapedSan = JSON.stringify(san).slice(1, -1);
+            if (bodyStr.includes(escapedOrig)) {
+              bodyStr = bodyStr.replaceAll(escapedOrig, escapedSan);
+              bodyModified = true;
+            }
+          }
+          
+          if (bodyModified) {
+            console.log("PrivacyAI fetch interceptor sanitized request body!");
+            if (typeof init.body === 'string') {
+              init.body = bodyStr;
+            } else if (init.body instanceof Blob) {
+              init.body = new Blob([bodyStr], { type: init.body.type });
+            } else if (init.body instanceof URLSearchParams) {
+              init.body = new URLSearchParams(bodyStr);
+            }
+          }
+        }
+      } catch (err) {
+        console.error("PrivacyAI fetch intercept error:", err);
+      }
+    }
+    return originalFetch.call(this, resource, init);
+  };
+
+  // 2. Hook XMLHttpRequest
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function(body) {
+    if (body && originalToSanitizedMap.size > 0) {
+      try {
+        let bodyStr = '';
+        let bodyModified = false;
+        
+        if (typeof body === 'string') {
+          bodyStr = body;
+        }
+        
+        if (bodyStr) {
+          for (const [orig, san] of originalToSanitizedMap.entries()) {
+            if (bodyStr.includes(orig)) {
+              bodyStr = bodyStr.replaceAll(orig, san);
+              bodyModified = true;
+            }
+            const escapedOrig = JSON.stringify(orig).slice(1, -1);
+            const escapedSan = JSON.stringify(san).slice(1, -1);
+            if (bodyStr.includes(escapedOrig)) {
+              bodyStr = bodyStr.replaceAll(escapedOrig, escapedSan);
+              bodyModified = true;
+            }
+          }
+          
+          if (bodyModified) {
+            console.log("PrivacyAI XHR interceptor sanitized request body!");
+            body = bodyStr;
+          }
+        }
+      } catch (err) {
+        console.error("PrivacyAI XHR intercept error:", err);
+      }
+    }
+    return originalSend.call(this, body);
+  };
+
+  // 3. Hook WebSockets
+  const originalWebSocketSend = WebSocket.prototype.send;
+  WebSocket.prototype.send = function(data) {
+    if (data && originalToSanitizedMap.size > 0) {
+      try {
+        let dataStr = '';
+        let dataModified = false;
+        
+        if (typeof data === 'string') {
+          dataStr = data;
+        }
+        
+        if (dataStr) {
+          for (const [orig, san] of originalToSanitizedMap.entries()) {
+            if (dataStr.includes(orig)) {
+              dataStr = dataStr.replaceAll(orig, san);
+              dataModified = true;
+            }
+            const escapedOrig = JSON.stringify(orig).slice(1, -1);
+            const escapedSan = JSON.stringify(san).slice(1, -1);
+            if (dataStr.includes(escapedOrig)) {
+              dataStr = dataStr.replaceAll(escapedOrig, escapedSan);
+              dataModified = true;
+            }
+          }
+          
+          if (dataModified) {
+            console.log("PrivacyAI WebSocket interceptor sanitized data!");
+            data = dataStr;
+          }
+        }
+      } catch (err) {
+        console.error("PrivacyAI WebSocket intercept error:", err);
+      }
+    }
+    return originalWebSocketSend.call(this, data);
+  };
+
   let pendingTarget = null;
 
   const EDITOR_SELECTORS = [
@@ -218,6 +344,25 @@
     const editor = resolveEditor(target) || target;
     if (!editor) return;
 
+    editor.focus();
+
+    // 1. Try native atomic selection replacement (trusted event simulation)
+    let success = false;
+    try {
+      if (document.execCommand('selectAll', false, null)) {
+        success = document.execCommand('insertText', false, text);
+      }
+    } catch (e) {
+      console.warn("PrivacyAI: execCommand selectAll/insertText failed, trying fallbacks:", e);
+    }
+
+    if (success) {
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.dispatchEvent(new Event('change', { bubbles: true }));
+      return;
+    }
+
+    // 2. Fallbacks
     if (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') {
       setReactTextareaValue(editor, text);
       return;
@@ -269,6 +414,7 @@
     window.__privacyAiSanitizing = true;
     pendingTarget = editor;
     window.__privacyAiPendingTarget = editor;
+    window.__privacyAiPendingOriginalText = text;
 
     window.postMessage({
       source: 'privacyai-page',
@@ -398,6 +544,11 @@
     if (event.data.type === 'submit-sanitized') {
       const text = String(event.data.text || '');
       const target = pendingTarget || window.__privacyAiPendingTarget || document.activeElement;
+      const originalText = window.__privacyAiPendingOriginalText;
+      if (originalText) {
+        originalToSanitizedMap.set(originalText, text);
+        originalToSanitizedMap.set(originalText.trim(), text.trim());
+      }
       pendingTarget = null;
       submitSanitizedText(target, text);
       window.__privacyAiPendingTarget = null;
@@ -414,6 +565,11 @@
 
   window.__privacyAiSubmit = function submitSanitizedToPage(text) {
     const target = pendingTarget || window.__privacyAiPendingTarget || document.activeElement;
+    const originalText = window.__privacyAiPendingOriginalText;
+    if (originalText) {
+      originalToSanitizedMap.set(originalText, text);
+      originalToSanitizedMap.set(originalText.trim(), text.trim());
+    }
     submitSanitizedText(target, text);
     pendingTarget = null;
     window.__privacyAiPendingTarget = null;
