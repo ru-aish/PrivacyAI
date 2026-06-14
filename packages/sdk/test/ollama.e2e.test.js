@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PrivateAI } from "../src/index.js";
 
 const baseURL = process.env.PRIVATE_AI_BASE_URL || "http://127.0.0.1:11434";
-const model = process.env.PRIVATE_AI_MODEL || "qwen3.5:2b";
+const model = process.env.PRIVATE_AI_MODEL || "qwen2.5:0.5b";
 
 const client = new PrivateAI({
   apiKey: process.env.PRIVATE_AI_API_KEY || "ollama",
