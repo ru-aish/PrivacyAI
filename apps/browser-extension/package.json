@@ -1,0 +1,21 @@
+{
+  "name": "@privacy-ai/browser-extension",
+  "version": "0.1.0",
+  "description": "Privacy AI Browser Extension",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "vite",
+    "serve:test": "node tests/serve.mjs",
+    "test:e2e": "npm run build && playwright test",
+    "test:e2e:loop": "node tests/run-loop.mjs"
+  },
+  "dependencies": {
+    "@privacy-ai/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.42.1",
+    "@vitejs/plugin-react": "^4.2.1",
+    "vite": "^5.1.4"
+  }
+}

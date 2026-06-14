@@ -175,3 +175,22 @@ test("enforcement keeps ordinary API wording and only redacts the credential val
   assert.doesNotMatch(result.sanitizedText, new RegExp(leakedKey));
   assert.equal(result.sessionMap.gsk_dummy_1_redacted, leakedKey);
 });
+
+test("enforcement performs case-insensitive replacements to prevent PII leaks of emails", async () => {
+  const original = "My email is John.Smith@example.com. Send info to john.smith@example.com.";
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({
+      safe_prompt: "My email is contact1@example.com. Send info to contact1@example.com.",
+      session_map: {
+        "contact1@example.com": "john.smith@example.com"
+      }
+    }),
+    loadEnv: false
+  });
+
+  const result = await sanitizer.sanitize(original);
+
+  assert.doesNotMatch(result.sanitizedText, /john.smith@example.com/i);
+  assert.match(result.sanitizedText, /contact1@example.com/);
+  assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact1@example.com.");
+});

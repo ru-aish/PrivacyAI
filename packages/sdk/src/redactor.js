@@ -22,7 +22,8 @@ export function redact(text, detections) {
     originalText: text,
     sanitizedText,
     detections: replacements,
-    sessionMap
+    sessionMap,
+    privacySource: "local-regex"
   };
 }
 

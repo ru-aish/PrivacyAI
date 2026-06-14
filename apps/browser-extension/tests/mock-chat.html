@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mock AI Chat</title>
+</head>
+<body>
+  <h2>Mock AI Chat</h2>
+  <div id="chat-history"></div>
+  <textarea id="prompt-input" placeholder="Message AI..."></textarea>
+  <button id="send-button">Send</button>
+
+  <script>
+    const input = document.getElementById('prompt-input');
+    const sendButton = document.getElementById('send-button');
+    const chatHistory = document.getElementById('chat-history');
+
+    // This simulates exactly how a form works: it binds the value to a state immediately on input
+    let reactStateValue = "";
+    input.addEventListener('input', (e) => {
+      reactStateValue = e.target.value;
+    });
+
+    function handleSend() {
+      const text = String(input.value || reactStateValue).trim();
+      if (!text) return;
+
+      const msgDiv = document.createElement('div');
+      msgDiv.className = `message user`;
+      msgDiv.innerText = text;
+      const debugDiv = document.createElement('div');
+      debugDiv.className = 'debug';
+      debugDiv.innerText = `[Received: ${text}]`;
+      msgDiv.appendChild(debugDiv);
+      chatHistory.appendChild(msgDiv);
+
+      input.value = '';
+      reactStateValue = '';
+
+      setTimeout(() => {
+        const aiDiv = document.createElement('div');
+        aiDiv.className = `message ai`;
+        aiDiv.innerText = `Echo: ${text}`;
+        chatHistory.appendChild(aiDiv);
+      }, 500);
+    }
+
+    sendButton.addEventListener('click', handleSend);
+
+    function sendMessage(text) {
+      const trimmed = String(text || '').trim();
+      if (!trimmed) return;
+
+      const msgDiv = document.createElement('div');
+      msgDiv.className = 'message user';
+      msgDiv.innerText = trimmed;
+      const debugDiv = document.createElement('div');
+      debugDiv.className = 'debug';
+      debugDiv.innerText = `[Received: ${trimmed}]`;
+      msgDiv.appendChild(debugDiv);
+      chatHistory.appendChild(msgDiv);
+
+      input.value = '';
+      reactStateValue = '';
+    }
+
+    document.addEventListener('privacyai-submit', (event) => {
+      const text = String(event.detail?.text || '').trim();
+      if (!text) return;
+      sendMessage(text);
+      event.preventDefault();
+    }, true);
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.defaultPrevented && !window.__privacyAiSanitizing) {
+        e.preventDefault();
+        sendMessage(input.value || reactStateValue);
+      }
+    });
+  </script>
+</body>
+</html>

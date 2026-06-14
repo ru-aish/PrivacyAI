@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body { width: 320px; padding: 15px; font-family: sans-serif; }
+    .toggle-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
+    .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 20px; }
+    .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: white; transition: .4s; border-radius: 50%; }
+    input:checked + .slider { background-color: #2196F3; }
+    input:checked + .slider:before { transform: translateX(20px); }
+    .config-section { border-top: 1px solid #ccc; padding-top: 10px; }
+    .config-group { margin-bottom: 10px; }
+    .config-group label { display: block; font-size: 12px; margin-bottom: 4px; color: #555; }
+    .config-group input { width: 100%; padding: 4px; box-sizing: border-box; }
+    .preset-row { display: flex; gap: 8px; margin-bottom: 10px; }
+    .preset-row button { flex: 1; padding: 6px; background: #eee; color: #333; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    .preset-row button:hover { background: #e0e0e0; }
+    button.primary { width: 100%; padding: 8px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    button.primary:hover { background: #1976D2; }
+    .note { font-size: 11px; color: #666; margin-bottom: 10px; line-height: 1.4; }
+    #status { font-size: 11px; margin-top: 5px; color: green; text-align: center; min-height: 14px; }
+  </style>
+</head>
+<body>
+  <h3>PrivacyAI</h3>
+
+  <div class="toggle-container">
+    <span>Enable Shield</span>
+    <label class="switch">
+      <input type="checkbox" id="toggleShield" checked>
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <div class="config-section">
+    <h4>Provider Settings</h4>
+    <p class="note">Settings are saved in the extension, not from your repo <code>.env</code>. Pick a preset, set your model name, then click Save.</p>
+
+    <div class="preset-row">
+      <button type="button" id="presetOllama">Ollama</button>
+      <button type="button" id="presetLmStudio">LM Studio</button>
+    </div>
+
+    <div class="config-group">
+      <label for="provider">Provider Type</label>
+      <input type="text" id="provider" placeholder="ollama or openai-compatible" value="ollama">
+    </div>
+    <div class="config-group">
+      <label for="model">Model</label>
+      <input type="text" id="model" placeholder="qwen3.5:2b" value="qwen3.5:2b">
+    </div>
+    <div class="config-group">
+      <label for="baseUrl">Base URL</label>
+      <input type="text" id="baseUrl" placeholder="http://127.0.0.1:11434" value="http://127.0.0.1:11434">
+    </div>
+    <div class="config-group">
+      <label for="apiKey">API Key</label>
+      <input type="password" id="apiKey" placeholder="ollama / lm-studio / your key" value="ollama">
+    </div>
+    <button class="primary" id="saveBtn">Save Config</button>
+    <div id="status"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

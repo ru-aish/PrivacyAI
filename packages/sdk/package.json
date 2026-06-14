@@ -5,7 +5,8 @@
   "type": "module",
   "main": "./src/index.js",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./browser": "./src/browser.js"
   },
   "scripts": {
     "test": "node --test test/env.test.js test/sanitizer.test.js test/prompts.test.js test/ai-sanitizer.test.js",

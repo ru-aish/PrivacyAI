@@ -41,10 +41,22 @@ function sendJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
+const MAX_BODY_BYTES = 1_000_000;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let size = 0;
+
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_BYTES) {
+        req.destroy();
+        reject(new Error("Request entity too large"));
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => {
       if (chunks.length === 0) {
         resolve({});
@@ -147,7 +159,8 @@ function serveStatic(req, res, url) {
   const requestPath = url.pathname === "/" ? "/index.html" : url.pathname;
   const filePath = path.normalize(path.join(PUBLIC_DIR, requestPath));
 
-  if (!filePath.startsWith(PUBLIC_DIR)) {
+  const safePublicDir = PUBLIC_DIR.endsWith(path.sep) ? PUBLIC_DIR : `${PUBLIC_DIR}${path.sep}`;
+  if (!filePath.startsWith(safePublicDir)) {
     sendJson(res, 403, { status: "error", error: "Forbidden." });
     return;
   }

@@ -13,6 +13,7 @@ export class AiSanitizer {
     this.provider = options.provider;
     this.model = options.privacyModel || options.model;
     this.systemPrompt = options.privacySystemPrompt || PRIVACY_SANITIZER_PROMPT;
+    this.privacyMaxTokens = options.privacyMaxTokens;
     this.fallbackDetector = createDetectorPipeline({ ...options, localDetectorEnabled: false });
   }
 
@@ -94,7 +95,25 @@ const VAGUE_STANDINS = new Set([
   "personal information"
 ]);
 
+function normalizeSessionMapCasing(originalText, sessionMap) {
+  const normalized = {};
+  const lowerOriginal = originalText.toLowerCase();
+
+  for (const [dummy, original] of Object.entries(sessionMap)) {
+    const index = lowerOriginal.indexOf(original.toLowerCase());
+    if (index !== -1) {
+      normalized[dummy] = originalText.slice(index, index + original.length);
+    } else {
+      normalized[dummy] = original;
+    }
+  }
+
+  return normalized;
+}
+
 async function enforceSafeResult(originalText, parsed, detector) {
+  parsed.session_map = normalizeSessionMapCasing(originalText, parsed.session_map);
+
   let sessionMap = fixSessionMapOrientation(originalText, parsed.safe_prompt, parsed.session_map);
   sessionMap = removeInvalidSessionMapEntries(originalText, sessionMap);
   sessionMap = fixVagueStandInKeys(sessionMap, originalText);
@@ -115,14 +134,20 @@ async function enforceSafeResult(originalText, parsed, detector) {
   };
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function fixSessionMapOrientation(originalText, safePrompt, sessionMap) {
   const fixed = {};
+  const lowerOriginal = originalText.toLowerCase();
+  const lowerSafe = safePrompt.toLowerCase();
 
   for (const [key, value] of Object.entries(sessionMap)) {
-    const keyInOriginal = originalText.includes(key);
-    const valueInOriginal = originalText.includes(value);
-    const keyInSafe = safePrompt.includes(key);
-    const valueInSafe = safePrompt.includes(value);
+    const keyInOriginal = lowerOriginal.includes(key.toLowerCase());
+    const valueInOriginal = lowerOriginal.includes(value.toLowerCase());
+    const keyInSafe = lowerSafe.includes(key.toLowerCase());
+    const valueInSafe = lowerSafe.includes(value.toLowerCase());
 
     if (valueInOriginal && keyInSafe) {
       fixed[key] = value;
@@ -163,10 +188,11 @@ function fixSessionMapOrientation(originalText, safePrompt, sessionMap) {
 
 function removeInvalidSessionMapEntries(originalText, sessionMap) {
   const cleaned = {};
+  const lowerOriginal = originalText.toLowerCase();
 
   for (const [dummy, original] of Object.entries(sessionMap)) {
     if (dummy === original) continue;
-    if (!originalText.includes(original)) continue;
+    if (!lowerOriginal.includes(original.toLowerCase())) continue;
     cleaned[dummy] = original;
   }
 
@@ -198,7 +224,9 @@ function rebuildSafePrompt(originalText, sessionMap) {
     .sort((a, b) => b[1].length - a[1].length);
 
   for (const [dummy, original] of entries) {
-    safePrompt = replaceAll(safePrompt, original, dummy);
+    const escaped = escapeRegExp(original);
+    const regex = new RegExp(escaped, "gi");
+    safePrompt = safePrompt.replace(regex, dummy);
   }
 
   return safePrompt;
@@ -238,7 +266,10 @@ function createUniqueDummy(type, index, sourceText, sessionMap) {
   let dummy = generateDummy(type, index);
   let slot = index;
 
-  while (sourceText.includes(dummy) || Object.hasOwn(sessionMap, dummy)) {
+  const lowerSource = sourceText.toLowerCase();
+  const lowerDummy = dummy.toLowerCase();
+
+  while (lowerSource.includes(lowerDummy) || Object.hasOwn(sessionMap, dummy)) {
     slot += 1;
     dummy = generateDummy(type, slot);
   }
@@ -279,6 +310,8 @@ function normalizeSanitizerResult(originalText, parsed, privacyResponse, source)
 }
 
 function extractJson(text) {
+  if (typeof text !== "string") return undefined;
+
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start === -1 || end === -1 || end <= start) return undefined;

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ProseMirror Mock (ChatGPT-like)</title>
+  <style>
+    #prompt-textarea { min-height: 80px; border: 1px solid #ccc; padding: 8px; }
+    #prompt-textarea p { margin: 0; }
+  </style>
+</head>
+<body>
+  <h2>ProseMirror Mock Chat</h2>
+  <div id="chat-history"></div>
+  <div id="prompt-textarea" contenteditable="true" data-id="request-textarea">
+    <p><br></p>
+  </div>
+  <button data-testid="send-button" disabled aria-label="Send prompt">Send</button>
+
+  <script>
+    const editor = document.getElementById('prompt-textarea');
+    const sendButton = document.querySelector('button[data-testid="send-button"]');
+    const chatHistory = document.getElementById('chat-history');
+    let reactStateText = '';
+
+    function readEditorText() {
+      return editor.innerText.replace(/\n$/, '');
+    }
+
+    function updateState() {
+      reactStateText = readEditorText();
+      sendButton.disabled = reactStateText.trim().length === 0;
+    }
+
+    editor.addEventListener('input', updateState);
+
+    editor.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' || event.shiftKey) return;
+      if (event.defaultPrevented) return;
+      event.preventDefault();
+      submitMessage();
+    });
+
+    function submitMessage() {
+      const text = reactStateText.trim();
+      if (!text) return;
+
+      const msgDiv = document.createElement('div');
+      msgDiv.className = 'message user';
+      msgDiv.dataset.sent = text;
+      msgDiv.textContent = text;
+      chatHistory.appendChild(msgDiv);
+
+      editor.innerHTML = '<p><br></p>';
+      reactStateText = '';
+      sendButton.disabled = true;
+    }
+
+    sendButton.addEventListener('click', () => {
+      if (sendButton.disabled) return;
+      submitMessage();
+    });
+
+    // Simulate ProseMirror ignoring naive DOM writes
+    const originalDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'textContent');
+    Object.defineProperty(editor, 'textContent', {
+      set(value) {
+        originalDescriptor.set.call(this, value);
+        setTimeout(() => {
+          if (!reactStateText && value) {
+            this.innerHTML = '<p><br></p>';
+          }
+        }, 0);
+      },
+      get() {
+        return originalDescriptor.get.call(this);
+      }
+    });
+  </script>
+</body>
+</html>

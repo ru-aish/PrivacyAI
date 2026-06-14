@@ -1,5 +1,6 @@
 import { ProviderError } from "../errors.js";
 import { normalizeBaseURL } from "../config.js";
+import { getFetch } from "../fetch.js";
 
 export class OpenAICompatibleProvider {
   constructor(options = {}) {
@@ -7,7 +8,7 @@ export class OpenAICompatibleProvider {
     this.baseURL = normalizeBaseURL(options.baseURL || "http://127.0.0.1:11434/v1");
     this.model = options.model || "qwen3.5:2b";
     this.timeoutMs = options.timeoutMs || 60000;
-    this.fetch = options.fetch || globalThis.fetch;
+    this.fetch = getFetch(options.fetch);
 
     if (!this.fetch) {
       throw new ProviderError("A fetch implementation is required. Use Node 18+ or pass fetch.");
