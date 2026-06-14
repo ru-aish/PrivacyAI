@@ -1,10 +1,11 @@
 {
   "name": "@privacy-ai/browser-extension",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Privacy AI Browser Extension",
   "type": "module",
   "scripts": {
     "build": "vite build",
+    "build:firefox": "vite build && node build-firefox.js",
     "dev": "vite",
     "serve:test": "node tests/serve.mjs",
     "test:e2e": "npm run build && playwright test",
