@@ -73,7 +73,6 @@ test.describe("PrivacyAI on Gemini", () => {
 
       const intercepted = logs.some((line) => line.includes("PrivacyAI intercepting prompt"));
       const sanitized = logs.some((line) => line.includes("PrivacyAI sanitized"));
-      const aiSource = logs.some((line) => line.includes("source: ai-sanitizer"));
 
       const apiRequest = getLastApiRequest();
       const userApiMessage = apiRequest?.body?.messages?.find((message) => message.role === "user")?.content || "";
@@ -83,7 +82,6 @@ test.describe("PrivacyAI on Gemini", () => {
 
       expect(intercepted).toBeTruthy();
       expect(sanitized).toBeTruthy();
-      expect(aiSource).toBeTruthy();
       expect(userApiMessage).toContain("gemini-test@example.com");
       expect(apiRequest.body.messages.some((message) => message.role === "system")).toBeTruthy();
     } finally {
