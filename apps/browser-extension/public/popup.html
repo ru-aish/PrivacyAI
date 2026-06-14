@@ -2,25 +2,55 @@
 <html>
 <head>
   <style>
-    body { width: 320px; padding: 15px; font-family: sans-serif; }
-    .toggle-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
+    body { width: 380px; padding: 15px; font-family: sans-serif; color: #333; }
+    h3 { margin-top: 0; margin-bottom: 15px; }
+    input, select, button { font-family: inherit; font-size: 12px; }
+    .toggle-container { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #eee; }
     .switch { position: relative; display: inline-block; width: 40px; height: 20px; }
     .switch input { opacity: 0; width: 0; height: 0; }
     .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 20px; }
     .slider:before { position: absolute; content: ""; height: 16px; width: 16px; left: 2px; bottom: 2px; background-color: white; transition: .4s; border-radius: 50%; }
     input:checked + .slider { background-color: #2196F3; }
     input:checked + .slider:before { transform: translateX(20px); }
-    .config-section { border-top: 1px solid #ccc; padding-top: 10px; }
+
+    .section-title { font-size: 14px; font-weight: bold; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+    .rescan-btn { font-size: 11px; padding: 3px 8px; cursor: pointer; background: #eee; border: 1px solid #ccc; border-radius: 4px; }
+    .rescan-btn:hover { background: #e0e0e0; }
+
+    #scanStatus { font-size: 12px; color: #666; font-style: italic; margin-bottom: 10px; display: none; }
+
+    /* Model Selection State - Side by Side */
+    #modelSelectionArea { display: none; margin-bottom: 15px; }
+    .provider-columns { display: flex; gap: 10px; }
+    .provider-col { flex: 1; border: 1px solid #ddd; border-radius: 6px; padding: 10px; background: #fafafa; }
+    .provider-col.disabled { opacity: 0.6; pointer-events: none; }
+    .provider-header { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-weight: bold; font-size: 13px; }
+    .provider-col select { width: 100%; padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+    .no-models-msg { font-size: 11px; color: #888; font-style: italic; }
+
+    /* Fallback State */
+    #noModelsArea { display: none; margin-bottom: 15px; padding: 10px; background: #fff3cd; border: 1px solid #ffe69c; border-radius: 4px; font-size: 12px; color: #664d03; }
+    #noModelsArea p { margin: 0 0 8px 0; }
+
+    .code-container { position: relative; margin-bottom: 8px; display: flex; align-items: center; }
+    .code-block { flex: 1; background: #2b2b2b; color: #f8f8f2; padding: 8px; border-radius: 4px 0 0 4px; font-family: monospace; font-size: 11px; overflow-x: auto; white-space: pre; border-right: 1px solid #444; }
+    .copy-btn { background: #444; color: #fff; border: none; padding: 8px 10px; border-radius: 0 4px 4px 0; cursor: pointer; font-size: 11px; font-weight: bold; height: 100%; box-sizing: border-box; }
+    .copy-btn:hover { background: #555; }
+
+    /* Advanced State */
+    .advanced-toggle { font-size: 12px; color: #2196F3; cursor: pointer; user-select: none; margin-top: 10px; display: inline-block; }
+    .advanced-toggle:hover { text-decoration: underline; }
+    #advancedArea { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px dashed #ccc; }
+    .warning { color: #d32f2f; font-size: 11px; margin-bottom: 10px; padding: 8px; background: #ffebee; border: 1px solid #ffcdd2; border-radius: 4px; line-height: 1.4; }
+
     .config-group { margin-bottom: 10px; }
     .config-group label { display: block; font-size: 12px; margin-bottom: 4px; color: #555; }
-    .config-group input { width: 100%; padding: 4px; box-sizing: border-box; }
-    .preset-row { display: flex; gap: 8px; margin-bottom: 10px; }
-    .preset-row button { flex: 1; padding: 6px; background: #eee; color: #333; border: 1px solid #ccc; border-radius: 4px; cursor: pointer; font-size: 12px; }
-    .preset-row button:hover { background: #e0e0e0; }
-    button.primary { width: 100%; padding: 8px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    .config-group input { width: 100%; padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+
+    button.primary { width: 100%; padding: 8px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; margin-top: 10px; }
     button.primary:hover { background: #1976D2; }
-    .note { font-size: 11px; color: #666; margin-bottom: 10px; line-height: 1.4; }
-    #status { font-size: 11px; margin-top: 5px; color: green; text-align: center; min-height: 14px; }
+
+    #status { font-size: 11px; margin-top: 8px; color: green; text-align: center; min-height: 14px; }
   </style>
 </head>
 <body>
@@ -34,13 +64,71 @@
     </label>
   </div>
 
-  <div class="config-section">
-    <h4>Provider Settings</h4>
-    <p class="note">Settings are saved in the extension, not from your repo <code>.env</code>. Pick a preset, set your model name, then click Save.</p>
+  <div class="section-title">
+    Local AI Provider
+    <button class="rescan-btn" id="rescanBtn">Rescan</button>
+  </div>
 
-    <div class="preset-row">
-      <button type="button" id="presetOllama">Ollama</button>
-      <button type="button" id="presetLmStudio">LM Studio</button>
+  <div id="scanStatus">Scanning for local models...</div>
+
+  <!-- State 1: Models discovered (Side by Side) -->
+  <div id="modelSelectionArea">
+    <div class="provider-columns">
+      <div class="provider-col" id="colOllama">
+        <label class="provider-header">
+          <input type="radio" name="providerSelect" value="ollama" id="radioOllama"> Ollama
+        </label>
+        <div id="ollamaSelectContainer">
+          <select id="modelSelectOllama"></select>
+        </div>
+        <div id="ollamaNoModels" class="no-models-msg" style="display:none;">No models found</div>
+      </div>
+
+      <div class="provider-col" id="colLmStudio">
+        <label class="provider-header">
+          <input type="radio" name="providerSelect" value="lmstudio" id="radioLmStudio"> LM Studio
+        </label>
+        <div id="lmStudioSelectContainer">
+          <select id="modelSelectLmStudio"></select>
+        </div>
+        <div id="lmStudioNoModels" class="no-models-msg" style="display:none;">No models found</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- State 2: No models found / Installation instructions -->
+  <div id="noModelsArea">
+    <p><strong id="noModelsTitle">No local models detected.</strong></p>
+    <p>To keep your data private, we strongly recommend running a local AI model with Ollama.</p>
+
+    <div id="installOllamaSection">
+      <p>1. Install Ollama:</p>
+      <div class="code-container">
+        <div class="code-block" id="codeInstall">curl -fsSL https://ollama.com/install.sh | sh</div>
+        <button class="copy-btn" data-target="codeInstall">Copy</button>
+      </div>
+      <p>2. Download recommended model:</p>
+    </div>
+
+    <div id="pullModelSection">
+      <p id="pullModelText" style="display:none;">Download recommended model:</p>
+      <div class="code-container">
+        <div class="code-block" id="codePull">ollama run ministral-3:3b</div>
+        <button class="copy-btn" data-target="codePull">Copy</button>
+      </div>
+    </div>
+    <p style="margin-bottom: 0;">Once running, click "Rescan".</p>
+  </div>
+
+  <!-- Save Button for normal flow -->
+  <button class="primary" id="saveBtn">Save Settings</button>
+  <div id="status"></div>
+
+  <!-- State 3: Custom / Advanced Configuration -->
+  <div class="advanced-toggle" id="advancedToggle">► Custom / Advanced Configuration</div>
+  <div id="advancedArea">
+    <div class="warning">
+      <strong>Warning:</strong> Entering a remote AI provider here defeats the entire local privacy purpose of this extension. Your raw text data will be sent to the remote provider. Only use this if you fully control the endpoint and have strict data controls.
     </div>
 
     <div class="config-group">
@@ -49,18 +137,16 @@
     </div>
     <div class="config-group">
       <label for="model">Model</label>
-      <input type="text" id="model" placeholder="qwen3.5:2b" value="qwen3.5:2b">
+      <input type="text" id="model" placeholder="custom-model" value="">
     </div>
     <div class="config-group">
       <label for="baseUrl">Base URL</label>
-      <input type="text" id="baseUrl" placeholder="http://127.0.0.1:11434" value="http://127.0.0.1:11434">
+      <input type="text" id="baseUrl" placeholder="http://127.0.0.1:11434" value="">
     </div>
     <div class="config-group">
       <label for="apiKey">API Key</label>
-      <input type="password" id="apiKey" placeholder="ollama / lm-studio / your key" value="ollama">
+      <input type="password" id="apiKey" placeholder="your key" value="">
     </div>
-    <button class="primary" id="saveBtn">Save Config</button>
-    <div id="status"></div>
   </div>
 
   <script src="popup.js"></script>
