@@ -28,7 +28,10 @@ try {
   manifest.browser_specific_settings = {
     gecko: {
       id: "shield@privacy-ai.org",
-      strict_min_version: "109.0"
+      strict_min_version: "140.0",
+      data_collection_permissions: {
+        required: ["none"]
+      }
     }
   };
   console.log('Added Firefox specific settings (Gecko ID)');
