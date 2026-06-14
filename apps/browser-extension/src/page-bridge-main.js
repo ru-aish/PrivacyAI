@@ -118,12 +118,23 @@
     return (editor.innerText || editor.textContent || '').replace(/\n$/, '');
   }
 
-  function setNativeValue(element, value) {
+  function setReactTextareaValue(element, value) {
+    const lastValue = element.value;
     const prototype = element instanceof HTMLTextAreaElement
       ? HTMLTextAreaElement.prototype
       : HTMLInputElement.prototype;
     const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
-    descriptor.set.call(element, value);
+    if (descriptor && descriptor.set) {
+      descriptor.set.call(element, value);
+    } else {
+      element.value = value;
+    }
+    const tracker = element._valueTracker;
+    if (tracker) {
+      tracker.setValue(lastValue);
+    }
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
   function setQuillText(element, text) {
@@ -135,13 +146,62 @@
     return true;
   }
 
+  function setProseMirrorText(editor, text) {
+    let pmView = editor.pmView;
+    if (!pmView) {
+      const pmKey = Object.keys(editor).find(key => key.startsWith('__prosemirror'));
+      if (pmKey) pmView = editor[pmKey];
+    }
+    if (pmView && pmView.state && pmView.dispatch) {
+      try {
+        const { state } = pmView;
+        const { schema } = state;
+        let contentNode;
+        if (schema.nodes.paragraph) {
+          contentNode = schema.nodes.paragraph.create(null, schema.text(text));
+        } else {
+          contentNode = schema.text(text);
+        }
+        const tr = state.tr.replaceWith(0, state.doc.content.size, contentNode);
+        pmView.dispatch(tr);
+        return true;
+      } catch (err) {
+        console.warn("Failed to update ProseMirror state directly:", err);
+      }
+    }
+    return false;
+  }
+
   function setContentEditableText(element, text) {
     element.focus();
 
-    document.execCommand('selectAll', false, null);
-    document.execCommand('delete', false, null);
+    const selection = window.getSelection();
+    if (selection) {
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch (e) {
+        // ignore
+      }
+    }
 
-    const inserted = document.execCommand('insertText', false, text);
+    let inserted = false;
+    try {
+      inserted = document.execCommand('delete', false, null) && document.execCommand('insertText', false, text);
+    } catch (e) {
+      // ignore
+    }
+
+    if (!inserted) {
+      try {
+        inserted = document.execCommand('insertText', false, text);
+      } catch (e) {
+        // ignore
+      }
+    }
+
     if (!inserted) {
       element.textContent = text;
     }
@@ -159,13 +219,12 @@
     if (!editor) return;
 
     if (editor.tagName === 'TEXTAREA' || editor.tagName === 'INPUT') {
-      setNativeValue(editor, text);
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
-      editor.dispatchEvent(new Event('change', { bubbles: true }));
+      setReactTextareaValue(editor, text);
       return;
     }
 
     if (setQuillText(editor, text)) return;
+    if (setProseMirrorText(editor, text)) return;
     setContentEditableText(editor, text);
   }
 
@@ -246,6 +305,16 @@
       const sendButton = findSendButton(editor);
       if (sendButton) {
         sendButton.click();
+      } else {
+        const enterEvent = new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true
+        });
+        editor.dispatchEvent(enterEvent);
       }
       window.setTimeout(() => {
         window.__privacyAiBypassIntercept = false;
