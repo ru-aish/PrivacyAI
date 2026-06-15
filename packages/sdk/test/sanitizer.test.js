@@ -194,3 +194,41 @@ test("enforcement performs case-insensitive replacements to prevent PII leaks of
   assert.match(result.sanitizedText, /contact1@example.com/);
   assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact1@example.com.");
 });
+
+test("ai sanitizer passes conversation context turns to the provider", async () => {
+  const calls = [];
+  const sanitizer = new PrivacySanitizer({
+    provider: {
+      async chat(request) {
+        calls.push(request);
+        return {
+          text: JSON.stringify({
+            safe_prompt: "Sanitized prompt",
+            session_map: {}
+          }),
+          raw: {},
+          provider: {}
+        };
+      }
+    },
+    loadEnv: false
+  });
+
+  const context = [
+    { role: "user", text: "What is my name?" },
+    { role: "assistant", text: "Your name is Alice." }
+  ];
+
+  await sanitizer.sanitize("Now sanitize my email: alice@example.com", { context });
+
+  assert.equal(calls.length, 1);
+  const messages = calls[0].messages;
+  assert.equal(messages.length, 4); // system, user turn, assistant turn, final user prompt
+  assert.equal(messages[0].role, "system");
+  assert.equal(messages[1].role, "user");
+  assert.equal(messages[1].content, "[CONTEXT] What is my name?");
+  assert.equal(messages[2].role, "assistant");
+  assert.equal(messages[2].content, "[CONTEXT] Your name is Alice.");
+  assert.equal(messages[3].role, "user");
+  assert.equal(messages[3].content, "Now sanitize my email: alice@example.com");
+});

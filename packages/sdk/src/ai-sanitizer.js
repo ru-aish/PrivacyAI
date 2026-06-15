@@ -17,17 +17,29 @@ export class AiSanitizer {
     this.fallbackDetector = createDetectorPipeline({ ...options, localDetectorEnabled: false });
   }
 
-  async sanitize(text) {
+  async sanitize(text, options = {}) {
     if (typeof text !== "string") {
       throw new TypeError("AiSanitizer.sanitize expects a string prompt.");
     }
 
+    const messages = [
+      { role: "system", content: this.systemPrompt }
+    ];
+
+    if (options.context && Array.isArray(options.context)) {
+      for (const turn of options.context) {
+        messages.push({
+          role: turn.role === "user" ? "user" : "assistant",
+          content: `[CONTEXT] ${turn.text}`
+        });
+      }
+    }
+
+    messages.push({ role: "user", content: text });
+
     const response = await this.provider.chat({
       model: this.model,
-      messages: [
-        { role: "system", content: this.systemPrompt },
-        { role: "user", content: text }
-      ],
+      messages: messages,
       temperature: 0,
       maxTokens: optionsMaxTokens(this)
     });
