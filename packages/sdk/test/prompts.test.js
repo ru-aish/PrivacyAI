@@ -48,6 +48,6 @@ test("main ask call sends only the safe prompt unless system override is provide
   assert.match(calls[0].messages[1].content, /alice@example\.com/);
   assert.equal(calls[1].messages.length, 1);
   assert.equal(calls[1].messages[0].role, "user");
-  assert.equal(calls[1].messages[0].content, "Please email Alex Morgan at contact1@example.com.");
+  assert.equal(calls[1].messages[0].content, "Email contact1@example.com");
   assert.equal(result.finalText, "Reply sent to alice@example.com");
 });

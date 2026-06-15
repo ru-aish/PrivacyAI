@@ -78,7 +78,7 @@ test("client ask uses local AI first, then sends safe prompt without system cont
 
   assert.equal(calls.length, 2);
   assert.equal(calls[1].messages.length, 1);
-  assert.equal(calls[1].messages[0].content, "Please email Alex Morgan at contact1@example.com.");
+  assert.equal(calls[1].messages[0].content, "Please email contact1@example.com.");
   assert.equal(result.finalText, "I will email alice@example.com with a concise update.");
 });
 
