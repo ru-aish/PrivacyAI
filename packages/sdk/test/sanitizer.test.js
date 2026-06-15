@@ -232,3 +232,22 @@ test("ai sanitizer passes conversation context turns to the provider", async () 
   assert.equal(messages[3].role, "user");
   assert.equal(messages[3].content, "Now sanitize my email: alice@example.com");
 });
+
+test("ai sanitizer handles realistic local developer prompts containing repository URLs and instruct model discussions", async () => {
+  const prompt1 = "see the repo of my : https://github.com/ru-aish/PrivacyAI. I'm Eleanor Vance and I want to run it locally with my custom model.";
+
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({
+      safe_prompt: "see the repo of my : https://github.com/ru-aish/PrivacyAI. I'm Alex Morgan and I want to run it locally with my custom model.",
+      session_map: {
+        "Alex Morgan": "Eleanor Vance"
+      }
+    }),
+    loadEnv: false
+  });
+
+  const result1 = await sanitizer.sanitize(prompt1);
+  assert.equal(result1.sanitizedText, "see the repo of my : https://example.com/resource/1 I'm Alex Morgan and I want to run it locally with my custom model.");
+  assert.equal(result1.sessionMap["Alex Morgan"], "Eleanor Vance");
+  assert.equal(result1.sessionMap["https://example.com/resource/1"], "https://github.com/ru-aish/PrivacyAI.");
+});

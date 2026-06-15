@@ -8,9 +8,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const extensionPath = path.resolve(__dirname, "../dist");
 
 const COMPLEX_SCENARIOS = [
-  "I'm Eleanor Vance, call me at 415-555-9821. Groq API key: gsk_live_secret_xyz99",
-  "I work at Harborview Systems. SSN 482-91-3307. Email priya.k@corp.net for follow-up.",
-  "I'm Marcus Chen. I work at Summit Analytics LLC. Phone (212) 555-4419. Key sk_test_billing_88aa01"
+  "see the repo of my : https://github.com/ru-aish/PrivacyAI. I'm Eleanor Vance and I want to run it locally with my custom model.",
+  "Write a python script to query my private API at https://api.mycompany-internal.net/v1 using API key sk_live_secret_xyz99. I work at Summit Analytics LLC.",
+  "I needed the instruct models which do not think. Thinking models are taking so much longer because they are smaller model and they overthink a lot. I'm Marcus Chen, and I want to configure Ollama on my dev machine."
 ];
 
 function buildVariedPrompt(seed) {
