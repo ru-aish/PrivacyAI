@@ -87,6 +87,7 @@ async function runPromptTest(page, prompt) {
   expect(apiRequest.body.messages.some((message) => message.role === "system")).toBeTruthy();
 
   expect(logs.some((line) => line.includes("PrivacyAI intercepting prompt"))).toBeTruthy();
+  expect(logs.some((line) => line.includes("source: ai-sanitizer"))).toBeTruthy();
 
   return { receivedText, expected, logs };
 }
