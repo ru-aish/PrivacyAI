@@ -7,7 +7,12 @@
   ],
   "scripts": {
     "setup": "node scripts/setup.mjs",
-    "demo": "pnpm --filter @privacy-ai/web-demo dev"
+    "demo": "pnpm --filter @privacy-ai/web-demo dev",
+    "test": "pnpm --filter @privacy-ai/sdk test",
+    "test:sdk": "pnpm --filter @privacy-ai/sdk test",
+    "test:extension": "pnpm --filter @privacy-ai/browser-extension test:e2e",
+    "build": "pnpm --filter @privacy-ai/browser-extension build",
+    "check": "pnpm run test:sdk && pnpm run build"
   },
   "dependencies": {
     "@privacy-ai/sdk": "workspace:*"

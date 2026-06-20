@@ -1,0 +1,89 @@
+[
+  {
+    "id": "oauth-prod-incident",
+    "prompt": "Debug https://github.com/ru-aish/PrivacyAI — getting ERR_CALLBACK_MISMATCH when connecting to https://api.oauth-provider.com/callback?code=abc123&state=xyz. The code is in apps/browser-extension/src/background.js.",
+    "context": [],
+    "mustKeep": [
+      "https://github.com/ru-aish/PrivacyAI",
+      "https://api.oauth-provider.com/callback?code=abc123&state=xyz",
+      "apps/browser-extension/src/background.js",
+      "ERR_CALLBACK_MISMATCH"
+    ],
+    "mustRedact": []
+  },
+  {
+    "id": "connection-string-with-credentials",
+    "prompt": "REDIS_URL=redis://:redispass@10.0.1.4:6379. Also need to check host 10.0.1.4.",
+    "context": [],
+    "mustKeep": [
+      "10.0.1.4",
+      "6379",
+      "REDIS_URL=redis://"
+    ],
+    "mustRedact": [
+      "redispass"
+    ],
+    "knownGaps": [
+      "redispass not caught by regex detector - needs URL_CREDENTIAL pattern or policy engine"
+    ]
+  },
+  {
+    "id": "code-block-preservation",
+    "prompt": "Check this code:\n```javascript\nconst url = 'https://api.example.com/callback?token=secret';\nconsole.log(url);\n```\nThe URL contains a token parameter.",
+    "context": [],
+    "mustKeep": [
+      "```javascript",
+      "https://api.example.com/callback?token=secret",
+      "console.log"
+    ],
+    "mustRedact": []
+  },
+  {
+    "id": "email-in-technical-context",
+    "prompt": "My email is alice@example.com. See the commit by alice@example.com in the repo.",
+    "context": [],
+    "mustKeep": [
+      "repo"
+    ],
+    "mustRedact": [
+      "alice@example.com"
+    ]
+  },
+  {
+    "id": "api-key-in-url",
+    "prompt": "Calling https://api.stripe.com/v1/charges with sk_live_abc123def456. The endpoint is /v1/charges.",
+    "context": [],
+    "mustKeep": [
+      "https://api.stripe.com/v1/charges",
+      "/v1/charges"
+    ],
+    "mustRedact": [
+      "sk_live_abc123def456"
+    ]
+  },
+  {
+    "id": "stack-trace-preservation",
+    "prompt": "Getting TypeError: Cannot read property 'x' of undefined\n    at Object.<anonymous> (/home/user/project/src/app.js:42:10)\n    at Module._compile (internal/modules/cjs/loader.js:778:30)",
+    "context": [],
+    "mustKeep": [
+      "TypeError: Cannot read property 'x' of undefined",
+      "/home/user/project/src/app.js:42:10",
+      "Module._compile"
+    ],
+    "mustRedact": []
+  },
+  {
+    "id": "multi-turn-context",
+    "prompt": "Now write a reply for John who works at Acme Corp.",
+    "context": [
+      { "role": "user", "text": "My name is John Doe and I work at Acme Corp." },
+      { "role": "assistant", "text": "Hello John, how can I help you today?" }
+    ],
+    "mustKeep": [
+      "Acme Corp"
+    ],
+    "mustRedact": [
+      "John Doe"
+    ]
+  }
+]

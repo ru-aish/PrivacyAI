@@ -66,7 +66,7 @@ export async function configureExtensionViaPopup(context, config = {}) {
   await popup.locator("#toggleShield").setChecked(Boolean(storedConfig.shieldEnabled));
 
   const providerField = popup.locator("#provider");
-  const advancedToggle = popup.locator("#advancedToggle");
+  const advancedToggle = popup.locator("[data-testid=\"advanced-config-toggle\"]");
   if ((await advancedToggle.count()) > 0 && !(await providerField.isVisible())) {
     await advancedToggle.click();
   }
@@ -76,7 +76,7 @@ export async function configureExtensionViaPopup(context, config = {}) {
   await popup.locator("#model").fill(storedConfig.model);
   await popup.locator("#baseUrl").fill(storedConfig.baseUrl);
   await popup.locator("#apiKey").fill(storedConfig.apiKey);
-  await popup.locator("#saveBtn").click();
+  await popup.locator("[data-testid=\"save-settings\"]").click();
   await expect(popup.locator("#status")).toContainText("Saved!", { timeout: 5000 });
 
   const stored = await serviceWorker.evaluate(() =>
