@@ -2,6 +2,8 @@ import { expect, chromium } from "@playwright/test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { PopupPage } from "./pages/popup-page.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const extensionPath = path.resolve(__dirname, "../dist");
 
@@ -65,19 +67,8 @@ export async function configureExtensionViaPopup(context, config = {}) {
   await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await popup.locator("#toggleShield").setChecked(Boolean(storedConfig.shieldEnabled));
 
-  const providerField = popup.locator("#provider");
-  const advancedToggle = popup.locator("#advancedToggle");
-  if ((await advancedToggle.count()) > 0 && !(await providerField.isVisible())) {
-    await advancedToggle.click();
-  }
-
-  await expect(providerField).toBeVisible({ timeout: 5000 });
-  await providerField.fill(storedConfig.provider);
-  await popup.locator("#model").fill(storedConfig.model);
-  await popup.locator("#baseUrl").fill(storedConfig.baseUrl);
-  await popup.locator("#apiKey").fill(storedConfig.apiKey);
-  await popup.locator("#saveBtn").click();
-  await expect(popup.locator("#status")).toContainText("Saved!", { timeout: 5000 });
+  const popupPage = new PopupPage(popup);
+  await popupPage.saveProviderConfig(storedConfig);
 
   const stored = await serviceWorker.evaluate(() =>
     chrome.storage.local.get(["shieldEnabled", "provider", "model", "baseUrl", "apiKey"])
