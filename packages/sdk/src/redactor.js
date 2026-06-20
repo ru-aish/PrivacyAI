@@ -1,28 +1,26 @@
-import { generateDummy } from "./dummy-data.js";
+import { classifyDetections } from "./policy/redaction-policy.js";
+import { buildRedactionPlan, applyRedactionPlan } from "./redaction-plan.js";
 
-export function redact(text, detections) {
-  const sessionMap = {};
-  const typeCounts = {};
-  const replacements = detections.map((detection) => {
-    typeCounts[detection.type] = (typeCounts[detection.type] || 0) + 1;
-    const dummy = generateDummy(detection.type, typeCounts[detection.type]);
-    sessionMap[dummy] = detection.value;
-    return { ...detection, replacement: dummy };
-  });
+export function redact(text, detections, options = {}) {
+  const decisions = classifyDetections(text, detections, options);
+  const plan = buildRedactionPlan(text, decisions);
+  const sanitizedText = applyRedactionPlan(plan);
 
-  let sanitizedText = text;
-  for (const detection of [...replacements].sort((a, b) => b.start - a.start)) {
-    sanitizedText =
-      sanitizedText.slice(0, detection.start) +
-      detection.replacement +
-      sanitizedText.slice(detection.end);
-  }
+  const formattedDetections = plan.replacements.map((r) => ({
+    type: r.type,
+    value: r.original,
+    start: r.start,
+    end: r.end,
+    confidence: 0.9,
+    source: "local-regex",
+    replacement: r.replacement
+  }));
 
   return {
     originalText: text,
     sanitizedText,
-    detections: replacements,
-    sessionMap,
+    detections: formattedDetections,
+    sessionMap: plan.sessionMap,
     privacySource: "local-regex"
   };
 }
