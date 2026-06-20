@@ -58,15 +58,15 @@
 
   <div class="toggle-container">
     <span>Enable Shield</span>
-    <label class="switch">
-      <input type="checkbox" id="toggleShield" checked>
+      <label class="switch">
+        <input type="checkbox" id="toggleShield" data-testid="shield-toggle" checked>
       <span class="slider"></span>
     </label>
   </div>
 
   <div class="section-title">
     Local AI Provider
-    <button class="rescan-btn" id="rescanBtn">Rescan</button>
+    <button class="rescan-btn" id="rescanBtn" data-testid="rescan-btn">Rescan</button>
   </div>
 
   <div id="scanStatus">Scanning for local models...</div>
@@ -76,7 +76,7 @@
     <div class="provider-columns">
       <div class="provider-col" id="colOllama">
         <label class="provider-header">
-          <input type="radio" name="providerSelect" value="ollama" id="radioOllama"> Ollama
+          <input type="radio" name="providerSelect" value="ollama" id="radioOllama" data-testid="radio-ollama"> Ollama
         </label>
         <div id="ollamaSelectContainer">
           <select id="modelSelectOllama"></select>
@@ -86,7 +86,7 @@
 
       <div class="provider-col" id="colLmStudio">
         <label class="provider-header">
-          <input type="radio" name="providerSelect" value="lmstudio" id="radioLmStudio"> LM Studio
+          <input type="radio" name="providerSelect" value="lmstudio" id="radioLmStudio" data-testid="radio-lmstudio"> LM Studio
         </label>
         <div id="lmStudioSelectContainer">
           <select id="modelSelectLmStudio"></select>
@@ -121,11 +121,11 @@
   </div>
 
   <!-- Save Button for normal flow -->
-  <button class="primary" id="saveBtn">Save Settings</button>
+  <button class="primary" id="saveBtn" data-testid="save-settings">Save Settings</button>
   <div id="status"></div>
 
   <!-- State 3: Custom / Advanced Configuration -->
-  <div class="advanced-toggle" id="advancedToggle">► Custom / Advanced Configuration</div>
+  <div class="advanced-toggle" id="advancedToggle" data-testid="advanced-config-toggle">► Custom / Advanced Configuration</div>
   <div id="advancedArea">
     <div class="warning">
       <strong>Warning:</strong> Entering a remote AI provider here defeats the entire local privacy purpose of this extension. Your raw text data will be sent to the remote provider. Only use this if you fully control the endpoint and have strict data controls.
@@ -133,19 +133,19 @@
 
     <div class="config-group">
       <label for="provider">Provider Type</label>
-      <input type="text" id="provider" placeholder="ollama or openai-compatible" value="ollama">
+      <input type="text" id="provider" data-testid="provider-input" placeholder="ollama or openai-compatible" value="ollama">
     </div>
     <div class="config-group">
       <label for="model">Model</label>
-      <input type="text" id="model" placeholder="custom-model" value="">
+      <input type="text" id="model" data-testid="model-input" placeholder="custom-model" value="">
     </div>
     <div class="config-group">
       <label for="baseUrl">Base URL</label>
-      <input type="text" id="baseUrl" placeholder="http://127.0.0.1:11434" value="">
+      <input type="text" id="baseUrl" data-testid="base-url-input" placeholder="http://127.0.0.1:11434" value="">
     </div>
     <div class="config-group">
       <label for="apiKey">API Key</label>
-      <input type="password" id="apiKey" placeholder="your key" value="">
+      <input type="password" id="apiKey" data-testid="api-key-input" placeholder="your key" value="">
     </div>
   </div>
 

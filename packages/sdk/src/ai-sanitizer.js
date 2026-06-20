@@ -3,6 +3,8 @@ import { redact } from "./redactor.js";
 import { generateDummy } from "./dummy-data.js";
 import { PRIVACY_SANITIZER_PROMPT } from "./prompts.js";
 import { PrivacyGuardianError } from "./errors.js";
+import { parseSanitizerJson } from "./parser/sanitizer-json.js";
+import { buildSanitizerMessages } from "./prompt-messages.js";
 
 export class AiSanitizer {
   constructor(options = {}) {
@@ -22,24 +24,15 @@ export class AiSanitizer {
       throw new TypeError("AiSanitizer.sanitize expects a string prompt.");
     }
 
-    const messages = [
-      { role: "system", content: this.systemPrompt }
-    ];
-
-    if (options.context && Array.isArray(options.context)) {
-      for (const turn of options.context) {
-        messages.push({
-          role: turn.role === "user" ? "user" : "assistant",
-          content: `[CONTEXT] ${turn.text}`
-        });
-      }
-    }
-
-    messages.push({ role: "user", content: text });
+    const messages = buildSanitizerMessages({
+      systemPrompt: this.systemPrompt,
+      text,
+      context: options.context
+    });
 
     const response = await this.provider.chat({
       model: this.model,
-      messages: messages,
+      messages,
       temperature: 0,
       maxTokens: optionsMaxTokens(this)
     });
@@ -64,37 +57,7 @@ function optionsMaxTokens(sanitizer) {
   return sanitizer.privacyMaxTokens || 2048;
 }
 
-export function parseSanitizerJson(text) {
-  const json = extractJson(text);
-  if (!json || typeof json.safe_prompt !== "string") {
-    return null;
-  }
-
-  const sessionMap = normalizeSessionMap(json.session_map);
-  if (!sessionMap) {
-    return null;
-  }
-
-  return {
-    safe_prompt: json.safe_prompt,
-    session_map: sessionMap
-  };
-}
-
-function normalizeSessionMap(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-
-  const sessionMap = {};
-  for (const [dummy, original] of Object.entries(value)) {
-    if (typeof dummy !== "string" || typeof original !== "string") continue;
-    if (!dummy || !original) continue;
-    sessionMap[dummy] = original;
-  }
-
-  return sessionMap;
-}
+export { parseSanitizerJson } from "./parser/sanitizer-json.js";
 
 const VAGUE_STANDINS = new Set([
   "api key",
@@ -129,7 +92,6 @@ async function enforceSafeResult(originalText, parsed, detector) {
   let sessionMap = fixSessionMapOrientation(originalText, parsed.safe_prompt, parsed.session_map);
   sessionMap = removeInvalidSessionMapEntries(originalText, sessionMap);
 
-  // Track key replacements for vague stand-in keys
   const keyReplacements = [];
   const fixedSessionMap = {};
   let vagueCount = 0;
@@ -147,7 +109,6 @@ async function enforceSafeResult(originalText, parsed, detector) {
   }
   sessionMap = fixedSessionMap;
 
-  // Apply vague key replacements to parsed.safe_prompt
   let safePromptBase = parsed.safe_prompt;
   for (const { oldKey, newKey } of keyReplacements) {
     const escaped = escapeRegExp(oldKey);
@@ -165,7 +126,6 @@ async function enforceSafeResult(originalText, parsed, detector) {
     sessionMap[dummy] = detection.value;
   }
 
-  // Determine if the LLM returned a mangled/invalid session map
   const llmMapKeys = Object.keys(parsed.session_map);
   const isMangledLlmMap = llmMapKeys.length > 0 && !llmMapKeys.some(key => {
     const val = parsed.session_map[key];
@@ -245,24 +205,6 @@ function removeInvalidSessionMapEntries(originalText, sessionMap) {
   return cleaned;
 }
 
-function fixVagueStandInKeys(sessionMap, originalText) {
-  const fixed = {};
-  let vagueCount = 0;
-
-  for (const [dummy, original] of Object.entries(sessionMap)) {
-    if (!isVagueStandIn(dummy)) {
-      fixed[dummy] = original;
-      continue;
-    }
-
-    vagueCount += 1;
-    const replacement = createUniqueDummy("API_KEY", vagueCount, originalText, { ...fixed, ...sessionMap });
-    fixed[replacement] = original;
-  }
-
-  return fixed;
-}
-
 function rebuildSafePrompt(originalText, sessionMap) {
   let safePrompt = originalText;
   const entries = Object.entries(sessionMap)
@@ -323,10 +265,6 @@ function createUniqueDummy(type, index, sourceText, sessionMap) {
   return dummy;
 }
 
-function replaceAll(text, search, replacement) {
-  return text.split(search).join(replacement);
-}
-
 function isVagueStandIn(value) {
   return VAGUE_STANDINS.has(String(value).trim().toLowerCase());
 }
@@ -353,17 +291,4 @@ function normalizeSanitizerResult(originalText, parsed, privacyResponse, source)
     privacyModelText: privacyResponse.text,
     privacySource: source
   };
-}
-
-function extractJson(text) {
-  if (typeof text !== "string") return undefined;
-
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) return undefined;
-  try {
-    return JSON.parse(text.slice(start, end + 1));
-  } catch {
-    return undefined;
-  }
 }

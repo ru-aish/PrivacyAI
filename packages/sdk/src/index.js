@@ -9,6 +9,8 @@ export { AiSanitizer, parseSanitizerJson } from "./ai-sanitizer.js";
 export { generateDummy } from "./dummy-data.js";
 export { localSanitize } from "./local-sanitizer.js";
 export { PrivacyGuardianError, ProviderError } from "./errors.js";
+export { buildSanitizerMessages } from "./prompt-messages.js";
+export { createRedactionPlan, applyRedactionPlan } from "./redaction/redaction-plan.js";
 
 import { PrivateAI } from "./client.js";
 
