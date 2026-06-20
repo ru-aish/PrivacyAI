@@ -25,8 +25,8 @@ export class BrowserPrivateAI {
       });
   }
 
-  async sanitize(prompt) {
-    return this.sanitizer.sanitize(prompt);
+  async sanitize(prompt, options = {}) {
+    return this.sanitizer.sanitize(prompt, options);
   }
 }
 

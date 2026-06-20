@@ -9,6 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let chatServer;
 let apiServer;
 let lastApiRequest = null;
+let apiRequests = [];
 let chatPort;
 let apiPort;
 
@@ -66,8 +67,10 @@ export async function startTestServers() {
     }
 
     lastApiRequest = { url: req.url, body };
+    apiRequests.push(lastApiRequest);
 
-    const userMessage = body.messages?.find((message) => message.role === "user")?.content || "";
+    const userMessages = body.messages?.filter((message) => message.role === "user") || [];
+    const userMessage = userMessages.at(-1)?.content || "";
     const sanitized = mockAiSanitize(userMessage);
 
     res.writeHead(200, { "content-type": "application/json" });
@@ -94,6 +97,15 @@ export async function startTestServers() {
 
 export function getLastApiRequest() {
   return lastApiRequest;
+}
+
+export function getApiRequests() {
+  return [...apiRequests];
+}
+
+export function resetApiRequests() {
+  lastApiRequest = null;
+  apiRequests = [];
 }
 
 export async function stopTestServers() {

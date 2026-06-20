@@ -1,39 +1,11 @@
-import { test, expect, chromium } from "@playwright/test";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { startTestServers, stopTestServers, getLastApiRequest } from "./test-servers.mjs";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const extensionPath = path.resolve(__dirname, "../dist");
-
-async function waitForServiceWorker(context) {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const workers = context.serviceWorkers();
-    if (workers.length > 0) {
-      return workers[0];
-    }
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  return context.waitForEvent("serviceworker", { timeout: 5000 });
-}
-
-async function configureExtension(context, apiPort) {
-  const page = await context.newPage();
-  await page.goto("about:blank");
-
-  const serviceWorker = await waitForServiceWorker(context);
-  await serviceWorker.evaluate((port) => {
-    return chrome.storage.local.set({
-      shieldEnabled: true,
-      provider: "openai-compatible",
-      model: "test-model",
-      baseUrl: `http://127.0.0.1:${port}/v1`,
-      apiKey: "test-key"
-    });
-  }, apiPort);
-
-  await page.close();
-}
+import { test, expect } from "@playwright/test";
+import { startTestServers, stopTestServers, getLastApiRequest, resetApiRequests } from "./test-servers.mjs";
+import {
+  closeExtensionContext,
+  configureExtensionViaPopup,
+  configureExtensionViaStorage,
+  launchExtensionContext
+} from "./extension-test-utils.mjs";
 
 test.describe("PrivacyAI browser extension", () => {
   let chatUrl;
@@ -49,18 +21,20 @@ test.describe("PrivacyAI browser extension", () => {
     await stopTestServers();
   });
 
+  test.beforeEach(() => {
+    resetApiRequests();
+  });
+
   test("intercepts Enter, calls AI sanitizer, and submits redacted prompt", async () => {
-    const context = await chromium.launchPersistentContext("", {
-      channel: "chromium",
-      headless: false,
-      args: [
-        `--disable-extensions-except=${extensionPath}`,
-        `--load-extension=${extensionPath}`
-      ]
-    });
+    const context = await launchExtensionContext();
 
     try {
-      await configureExtension(context, apiPort);
+      await configureExtensionViaStorage(context, {
+        provider: "custom",
+        model: "test-model",
+        baseUrl: `http://127.0.0.1:${apiPort}/v1`,
+        apiKey: "test-key"
+      });
 
       const page = await context.newPage();
       const logs = [];
@@ -87,16 +61,85 @@ test.describe("PrivacyAI browser extension", () => {
       const apiRequest = getLastApiRequest();
       expect(apiRequest).not.toBeNull();
       expect(apiRequest.url).toContain("/chat/completions");
+      expect(apiRequest.body.model).toBe("test-model");
       expect(apiRequest.body.messages.some((message) => message.role === "system")).toBeTruthy();
 
       expect(logs.some((line) => line.includes("PrivacyAI intercepting prompt"))).toBeTruthy();
       expect(logs.some((line) => line.includes("PrivacyAI sanitized via background"))).toBeTruthy();
       expect(logs.some((line) => line.includes("source: ai-sanitizer"))).toBeTruthy();
 
-      const userApiMessage = apiRequest.body.messages.find((message) => message.role === "user")?.content || "";
+      const userApiMessage = apiRequest.body.messages.at(-1)?.content || "";
       expect(userApiMessage).toBe(prompt);
     } finally {
-      await context.close();
+      await closeExtensionContext(context);
+    }
+  });
+
+  test("saves custom provider settings through popup and forwards conversation context", async () => {
+    const context = await launchExtensionContext();
+
+    try {
+      const stored = await configureExtensionViaPopup(context, {
+        provider: "custom",
+        model: "test-model",
+        baseUrl: `http://127.0.0.1:${apiPort}/v1`,
+        apiKey: "test-key"
+      });
+
+      expect(stored).toMatchObject({
+        shieldEnabled: true,
+        provider: "custom",
+        model: "test-model",
+        baseUrl: `http://127.0.0.1:${apiPort}/v1`,
+        apiKey: "test-key"
+      });
+
+      const page = await context.newPage();
+      await page.goto(chatUrl, { waitUntil: "domcontentloaded" });
+      await expect(page.locator("#privacyai-badge")).toHaveText("PrivacyAI connected", { timeout: 15000 });
+
+      await page.evaluate(() => {
+        const chatHistory = document.getElementById("chat-history");
+        const firstUser = document.createElement("div");
+        firstUser.className = "message user";
+        firstUser.innerText = "Earlier I said my email was alice.original@example.com.";
+
+        const firstAssistant = document.createElement("div");
+        firstAssistant.className = "message ai";
+        firstAssistant.innerText = "I can help Alice draft a reply.";
+
+        chatHistory.append(firstUser, firstAssistant);
+      });
+
+      const prompt = "Now write a concise reply for Alice.";
+      const promptInput = page.locator("#prompt-input");
+      await promptInput.fill(prompt);
+      await promptInput.press("Enter");
+
+      const userMessages = page.locator(".message.user");
+      await expect(userMessages).toHaveCount(2, { timeout: 20000 });
+
+      const apiRequest = getLastApiRequest();
+      expect(apiRequest).not.toBeNull();
+      expect(apiRequest.body.model).toBe("test-model");
+
+      const messages = apiRequest.body.messages;
+      expect(messages[0].role).toBe("system");
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: "user",
+            content: "[CONTEXT] Earlier I said my email was alice.original@example.com."
+          }),
+          expect.objectContaining({
+            role: "assistant",
+            content: "[CONTEXT] I can help Alice draft a reply."
+          })
+        ])
+      );
+      expect(messages.at(-1)).toMatchObject({ role: "user", content: prompt });
+    } finally {
+      await closeExtensionContext(context);
     }
   });
 });

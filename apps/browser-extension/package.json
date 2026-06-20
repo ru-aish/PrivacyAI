@@ -8,7 +8,8 @@
     "build:firefox": "vite build && node build-firefox.js",
     "dev": "vite",
     "serve:test": "node tests/serve.mjs",
-    "test:e2e": "npm run build && playwright test",
+    "test:e2e": "npm run build && node tests/run-playwright.mjs",
+    "test:e2e:foreground": "npm run build && PRIVACYAI_E2E_FOREGROUND=1 node tests/run-playwright.mjs",
     "test:e2e:loop": "node tests/run-loop.mjs"
   },
   "dependencies": {
