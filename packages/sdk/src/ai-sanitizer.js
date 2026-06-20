@@ -1,5 +1,7 @@
 import { createDetectorPipeline } from "./detectors/index.js";
 import { redact } from "./redactor.js";
+import { RedactionPlan, createRedactionPlan } from "./redaction-plan.js";
+import { shouldRedact } from "./policy/redaction-policy.js";
 import { generateDummy } from "./dummy-data.js";
 import { PRIVACY_SANITIZER_PROMPT } from "./prompts.js";
 import { PrivacyGuardianError } from "./errors.js";
@@ -129,7 +131,6 @@ async function enforceSafeResult(originalText, parsed, detector) {
   let sessionMap = fixSessionMapOrientation(originalText, parsed.safe_prompt, parsed.session_map);
   sessionMap = removeInvalidSessionMapEntries(originalText, sessionMap);
 
-  // Track key replacements for vague stand-in keys
   const keyReplacements = [];
   const fixedSessionMap = {};
   let vagueCount = 0;
@@ -147,7 +148,6 @@ async function enforceSafeResult(originalText, parsed, detector) {
   }
   sessionMap = fixedSessionMap;
 
-  // Apply vague key replacements to parsed.safe_prompt
   let safePromptBase = parsed.safe_prompt;
   for (const { oldKey, newKey } of keyReplacements) {
     const escaped = escapeRegExp(oldKey);
@@ -159,25 +159,58 @@ async function enforceSafeResult(originalText, parsed, detector) {
   const detections = await detector.detect(originalText);
   for (const detection of detections) {
     if (findDummyForOriginal(sessionMap, detection.value)) continue;
+    if (!shouldRedact(detection, { text: originalText })) continue;
 
     typeCounts[detection.type] = (typeCounts[detection.type] || 0) + 1;
     const dummy = createUniqueDummy(detection.type, typeCounts[detection.type], originalText, sessionMap);
     sessionMap[dummy] = detection.value;
   }
 
-  // Determine if the LLM returned a mangled/invalid session map
   const llmMapKeys = Object.keys(parsed.session_map);
   const isMangledLlmMap = llmMapKeys.length > 0 && !llmMapKeys.some(key => {
     const val = parsed.session_map[key];
     return val && originalText.toLowerCase().includes(val.toLowerCase()) && key !== val;
   });
 
-  const basePrompt = isMangledLlmMap ? originalText : safePromptBase;
+  const safePrompt = isMangledLlmMap
+    ? buildSafePromptFromPlan(originalText, sessionMap)
+    : buildSafePromptFromPlan(safePromptBase, sessionMap);
 
   return {
-    safe_prompt: rebuildSafePrompt(basePrompt, sessionMap),
+    safe_prompt: safePrompt,
     session_map: sessionMap
   };
+}
+
+function buildSafePromptFromPlan(baseText, sessionMap) {
+  const plan = new RedactionPlan(baseText);
+
+  for (const [dummy, original] of Object.entries(sessionMap)) {
+    if (dummy === original) continue;
+    if (!original) continue;
+
+    const lowerBase = baseText.toLowerCase();
+    const lowerOriginal = original.toLowerCase();
+    let searchIndex = 0;
+
+    while (searchIndex < baseText.length) {
+      const foundIndex = lowerBase.indexOf(lowerOriginal, searchIndex);
+      if (foundIndex === -1) break;
+
+      const end = foundIndex + original.length;
+
+      const existing = plan.findReplacement(foundIndex, end);
+      if (!existing) {
+        plan.addReplacement(foundIndex, end, original, dummy, "SENSITIVE", "session-map");
+      }
+
+      searchIndex = end;
+    }
+  }
+
+  plan.ensureProtectedSpans(plan.protectedSpans);
+
+  return plan.apply();
 }
 
 function escapeRegExp(value) {
