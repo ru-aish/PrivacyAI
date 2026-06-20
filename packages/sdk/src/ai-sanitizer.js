@@ -116,7 +116,32 @@ async function enforceSafeResult(originalText, parsed, detector) {
 
   let sessionMap = fixSessionMapOrientation(originalText, parsed.safe_prompt, parsed.session_map);
   sessionMap = removeInvalidSessionMapEntries(originalText, sessionMap);
-  sessionMap = fixVagueStandInKeys(sessionMap, originalText);
+
+  // Track key replacements for vague stand-in keys
+  const keyReplacements = [];
+  const fixedSessionMap = {};
+  let vagueCount = 0;
+
+  for (const [dummy, original] of Object.entries(sessionMap)) {
+    if (!isVagueStandIn(dummy)) {
+      fixedSessionMap[dummy] = original;
+      continue;
+    }
+
+    vagueCount += 1;
+    const replacement = createUniqueDummy("API_KEY", vagueCount, originalText, { ...fixedSessionMap, ...sessionMap });
+    fixedSessionMap[replacement] = original;
+    keyReplacements.push({ oldKey: dummy, newKey: replacement });
+  }
+  sessionMap = fixedSessionMap;
+
+  // Apply vague key replacements to parsed.safe_prompt
+  let safePromptBase = parsed.safe_prompt;
+  for (const { oldKey, newKey } of keyReplacements) {
+    const escaped = escapeRegExp(oldKey);
+    const regex = new RegExp(escaped, "gi");
+    safePromptBase = safePromptBase.replace(regex, newKey);
+  }
 
   const typeCounts = countSessionMapTypes(sessionMap);
   const detections = await detector.detect(originalText);
@@ -128,8 +153,17 @@ async function enforceSafeResult(originalText, parsed, detector) {
     sessionMap[dummy] = detection.value;
   }
 
+  // Determine if the LLM returned a mangled/invalid session map
+  const llmMapKeys = Object.keys(parsed.session_map);
+  const isMangledLlmMap = llmMapKeys.length > 0 && !llmMapKeys.some(key => {
+    const val = parsed.session_map[key];
+    return val && originalText.toLowerCase().includes(val.toLowerCase()) && key !== val;
+  });
+
+  const basePrompt = isMangledLlmMap ? originalText : safePromptBase;
+
   return {
-    safe_prompt: rebuildSafePrompt(originalText, sessionMap),
+    safe_prompt: rebuildSafePrompt(basePrompt, sessionMap),
     session_map: sessionMap
   };
 }
