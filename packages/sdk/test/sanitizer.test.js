@@ -233,7 +233,7 @@ test("ai sanitizer passes conversation context turns to the provider", async () 
   assert.equal(messages[3].content, "Now sanitize my email: alice@example.com");
 });
 
-test("ai sanitizer handles realistic local developer prompts containing repository URLs and instruct model discussions", async () => {
+test("ai sanitizer preserves URLs in real developer prompts while redacting personal names", async () => {
   const prompt1 = "see the repo of my : https://github.com/ru-aish/PrivacyAI. I'm Eleanor Vance and I want to run it locally with my custom model.";
 
   const sanitizer = new PrivacySanitizer({
@@ -247,7 +247,26 @@ test("ai sanitizer handles realistic local developer prompts containing reposito
   });
 
   const result1 = await sanitizer.sanitize(prompt1);
-  assert.equal(result1.sanitizedText, "see the repo of my : https://example.com/resource/1 I'm Alex Morgan and I want to run it locally with my custom model.");
+  assert.equal(result1.sanitizedText, "see the repo of my : https://github.com/ru-aish/PrivacyAI. I'm Alex Morgan and I want to run it locally with my custom model.");
   assert.equal(result1.sessionMap["Alex Morgan"], "Eleanor Vance");
-  assert.equal(result1.sessionMap["https://example.com/resource/1"], "https://github.com/ru-aish/PrivacyAI.");
+  assert.doesNotMatch(result1.sanitizedText, /Eleanor Vance/);
+  assert.match(result1.sanitizedText, /https:\/\/github\.com\/ru-aish\/PrivacyAI/);
+});
+
+test("protected URL spans are not corrupted by same value elsewhere", async () => {
+  const text = "REDIS_URL=redis://:redispass@10.0.1.4:6379. Preserve host 10.0.1.4.";
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({
+      safe_prompt: "REDIS_URL=redis://:API_KEY_1@10.0.1.4:6379. Preserve host 10.0.1.4.",
+      session_map: {
+        "API_KEY_1": "redispass"
+      }
+    }),
+    loadEnv: false
+  });
+
+  const result = await sanitizer.sanitize(text);
+  assert.match(result.sanitizedText, /redis:\/\/:[^@]+@10\.0\.1\.4:6379/);
+  assert.match(result.sanitizedText, /Preserve host 10\.0\.1\.4\./);
+  assert.ok(result.sessionMap["API_KEY_1"]);
 });

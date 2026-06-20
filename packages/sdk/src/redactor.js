@@ -1,30 +1,8 @@
-import { generateDummy } from "./dummy-data.js";
+import { RedactionPlan, createRedactionPlan } from "./redaction-plan.js";
 
 export function redact(text, detections) {
-  const sessionMap = {};
-  const typeCounts = {};
-  const replacements = detections.map((detection) => {
-    typeCounts[detection.type] = (typeCounts[detection.type] || 0) + 1;
-    const dummy = generateDummy(detection.type, typeCounts[detection.type]);
-    sessionMap[dummy] = detection.value;
-    return { ...detection, replacement: dummy };
-  });
-
-  let sanitizedText = text;
-  for (const detection of [...replacements].sort((a, b) => b.start - a.start)) {
-    sanitizedText =
-      sanitizedText.slice(0, detection.start) +
-      detection.replacement +
-      sanitizedText.slice(detection.end);
-  }
-
-  return {
-    originalText: text,
-    sanitizedText,
-    detections: replacements,
-    sessionMap,
-    privacySource: "local-regex"
-  };
+  const plan = createRedactionPlan(text, detections);
+  return plan.toResult("local-regex");
 }
 
 export function restore(text, sessionMap) {
@@ -39,3 +17,5 @@ export function restore(text, sessionMap) {
 
   return restored;
 }
+
+export { RedactionPlan, createRedactionPlan } from "./redaction-plan.js";

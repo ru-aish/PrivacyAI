@@ -49,14 +49,22 @@ export function generateDummy(type, index = 1) {
       return `000-00-${String(1000 + slot).slice(-4)}`;
     case "CREDIT_CARD":
       return `4111 1111 1111 ${String(1000 + slot).slice(-4)}`;
-    case "URL":
-      return `https://example.com/resource/${slot}`;
     case "API_KEY":
       return `gsk_dummy_${slot}_redacted`;
     case "AWS_ACCESS_KEY":
       return `AKIADUMMY${String(slot).padStart(8, "0")}KEY`;
     case "ZIP":
       return `${String(10000 + slot).slice(-5)}`;
+    case "URL_CREDENTIAL":
+      return `credential_${slot}`;
+    case "URL_QUERY_SECRET":
+      return `redacted_secret_${slot}`;
+    case "CONNECTION_STRING_CREDENTIAL":
+      return `user${slot}`;
+    case "MRN":
+      return `MRN-${String(10000 + slot).slice(-5)}`;
+    case "MEDICAL_ID":
+      return `MEDICAL-ID-${slot}`;
     default:
       return `SensitiveValue${slot}`;
   }
