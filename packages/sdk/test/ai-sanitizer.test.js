@@ -18,3 +18,63 @@ test("falls back to regex redaction when local AI JSON is invalid", async () => 
   assert.equal(result.sanitizedText, expected.sanitizedText);
   assert.equal(result.privacySource, "regex-fallback");
 });
+
+test("sanitizes conversation context before provider when provider is remote", async () => {
+  const calls = [];
+  const provider = {
+    baseURL: "https://api.openai.com/v1",
+    async chat(request) {
+      calls.push(request);
+      return {
+        text: JSON.stringify({
+          safe_prompt: "clean prompt",
+          session_map: {}
+        })
+      };
+    }
+  };
+
+  const sanitizer = new AiSanitizer({ provider, loadEnv: false, model: "mock-model" });
+  
+  const context = [
+    { role: "user", text: "My email is alice@example.com" }
+  ];
+  
+  await sanitizer.sanitize("Hello", { context });
+
+  assert.equal(calls.length, 1);
+  const contextMessage = calls[0].messages.find(m => m.content.includes("[CONTEXT]"));
+  assert.ok(contextMessage);
+  assert.match(contextMessage.content, /contact1@example.com/);
+  assert.doesNotMatch(contextMessage.content, /alice@example.com/);
+});
+
+test("does not sanitize conversation context before provider when provider is local", async () => {
+  const calls = [];
+  const provider = {
+    baseURL: "http://localhost:11434",
+    async chat(request) {
+      calls.push(request);
+      return {
+        text: JSON.stringify({
+          safe_prompt: "clean prompt",
+          session_map: {}
+        })
+      };
+    }
+  };
+
+  const sanitizer = new AiSanitizer({ provider, loadEnv: false, model: "mock-model" });
+  
+  const context = [
+    { role: "user", text: "My email is alice@example.com" }
+  ];
+  
+  await sanitizer.sanitize("Hello", { context });
+
+  assert.equal(calls.length, 1);
+  const contextMessage = calls[0].messages.find(m => m.content.includes("[CONTEXT]"));
+  assert.ok(contextMessage);
+  assert.match(contextMessage.content, /alice@example.com/);
+  assert.doesNotMatch(contextMessage.content, /contact1@example.com/);
+});

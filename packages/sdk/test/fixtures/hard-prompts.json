@@ -1,0 +1,26 @@
+[
+  {
+    "id": "oauth-prod-incident",
+    "prompt": "We had an incident with the oauth service. The callback url is https://api.example.com/callback?token=abc123secret456&tab=oauth. My email is bob@example.com.",
+    "context": [],
+    "mustRedact": ["abc123secret456", "bob@example.com"],
+    "mustKeep": ["https://api.example.com/callback", "tab=oauth"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  },
+  {
+    "id": "db-connection-debug",
+    "prompt": "Please connect using postgres://sam:supersecret@prod-db.internal:5432/acme and run the migrations.",
+    "context": [],
+    "mustRedact": ["supersecret"],
+    "mustKeep": ["postgres://", "prod-db.internal", "5432", "acme"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  },
+  {
+    "id": "redis-cli-command",
+    "prompt": "Connect to Redis using redis://:redispass@10.0.1.4:6379 and check keys.",
+    "context": [],
+    "mustRedact": ["redispass"],
+    "mustKeep": ["10.0.1.4", "6379", "redis://"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  }
+]
