@@ -64,7 +64,15 @@ export async function configureExtensionViaPopup(context, config = {}) {
 
   await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await popup.locator("#toggleShield").setChecked(Boolean(storedConfig.shieldEnabled));
-  await popup.locator("#provider").fill(storedConfig.provider);
+
+  const providerField = popup.locator("#provider");
+  const advancedToggle = popup.locator("#advancedToggle");
+  if ((await advancedToggle.count()) > 0 && !(await providerField.isVisible())) {
+    await advancedToggle.click();
+  }
+
+  await expect(providerField).toBeVisible({ timeout: 5000 });
+  await providerField.fill(storedConfig.provider);
   await popup.locator("#model").fill(storedConfig.model);
   await popup.locator("#baseUrl").fill(storedConfig.baseUrl);
   await popup.locator("#apiKey").fill(storedConfig.apiKey);
