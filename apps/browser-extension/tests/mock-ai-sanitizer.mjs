@@ -68,6 +68,14 @@ export function mockAiSanitize(userMessage) {
     safePrompt = replaceAll(safePrompt, match[0], dummy);
   }
 
+  let urlCount = 0;
+  for (const match of userMessage.matchAll(/\b(?:https?:\/\/|ftp:\/\/|www\.)[^\s<>"']+/gi)) {
+    urlCount += 1;
+    const dummy = `https://example.com/resource/${urlCount}`;
+    sessionMap[dummy] = match[0];
+    safePrompt = replaceAll(safePrompt, match[0], dummy);
+  }
+
   return {
     safe_prompt: safePrompt,
     session_map: sessionMap

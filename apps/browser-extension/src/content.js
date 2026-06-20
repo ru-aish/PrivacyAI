@@ -164,9 +164,46 @@ function sendBackgroundMessage(message, timeoutMs = 120000) {
   });
 }
 
+/**
+ * Extracts the last N conversation turns from the page DOM.
+ * Returns an array of { role: 'user'|'assistant', text } objects.
+ * We cap at 6 turns (3 user + 3 assistant) to keep the context window small.
+ */
+function extractConversationContext(maxTurns = 6) {
+  const turns = [];
+
+  // Try to find all message containers in document order
+  const allUserMsgs = Array.from(document.querySelectorAll(
+    USER_MESSAGE_SELECTORS.join(', ')
+  ));
+  const allAssistantMsgs = Array.from(document.querySelectorAll(
+    ASSISTANT_MESSAGE_SELECTORS.join(', ')
+  ));
+
+  // Merge and sort by DOM position so we preserve conversation order
+  const allMsgs = [
+    ...allUserMsgs.map(el => ({ el, role: 'user' })),
+    ...allAssistantMsgs.map(el => ({ el, role: 'assistant' }))
+  ].sort((a, b) => {
+    const pos = a.el.compareDocumentPosition(b.el);
+    return pos & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+  });
+
+  for (const { el, role } of allMsgs) {
+    const text = (el.innerText || el.textContent || '').trim();
+    if (text.length > 0 && text.length < 4000) {
+      turns.push({ role, text });
+    }
+  }
+
+  // Return only the last maxTurns turns
+  return turns.slice(-maxTurns);
+}
+
 async function requestSanitize(text) {
   try {
-    const response = await sendBackgroundMessage({ action: 'sanitize', text });
+    const context = extractConversationContext(6);
+    const response = await sendBackgroundMessage({ action: 'sanitize', text, context });
     if (response?.success && response.result) {
       console.log(
         "PrivacyAI sanitized via background.",
@@ -286,10 +323,13 @@ window.addEventListener('message', async (event) => {
   console.log("PrivacyAI intercepting prompt:", originalText);
   showBadge('PrivacyAI sanitizing...');
 
+  const conversationContext = extractConversationContext(6);
+
   try {
     const response = await sendBackgroundMessage({
       action: 'sanitize',
-      text: originalText
+      text: originalText,
+      context: conversationContext
     });
 
     if (!response?.success || !response.result) {

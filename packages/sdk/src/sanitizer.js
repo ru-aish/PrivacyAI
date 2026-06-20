@@ -5,7 +5,7 @@ export class PrivacySanitizer {
     this.sanitizer = options.sanitizer || new AiSanitizer(options);
   }
 
-  async sanitize(text) {
-    return this.sanitizer.sanitize(text);
+  async sanitize(text, options = {}) {
+    return this.sanitizer.sanitize(text, options);
   }
 }

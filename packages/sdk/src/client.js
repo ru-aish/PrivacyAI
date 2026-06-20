@@ -21,8 +21,8 @@ export class PrivateAI {
     return new PrivateAI({ ...configFromEnv(options), ...options });
   }
 
-  async sanitize(prompt) {
-    return this.sanitizer.sanitize(prompt);
+  async sanitize(prompt, options = {}) {
+    return this.sanitizer.sanitize(prompt, options);
   }
 
   async inspect(prompt) {

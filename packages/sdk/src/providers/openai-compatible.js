@@ -15,11 +15,41 @@ export class OpenAICompatibleProvider {
     }
   }
 
+  async resolveModel(requestedModel) {
+    const targetModel = requestedModel || this.model;
+    if (targetModel && targetModel !== "local-model") {
+      return targetModel;
+    }
+
+    try {
+      const res = await this.fetch(`${this.baseURL}/models`, {
+        method: "GET",
+        headers: {
+          authorization: `Bearer ${this.apiKey}`
+        }
+      });
+      if (res.ok) {
+        const json = await res.json();
+        if (json && json.data && json.data.length > 0) {
+          const firstModel = json.data[0].id;
+          console.log(`OpenAICompatibleProvider: resolved "local-model" to "${firstModel}"`);
+          return firstModel;
+        }
+      }
+    } catch (e) {
+      console.warn("OpenAICompatibleProvider: failed to auto-resolve model via /models", e);
+    }
+
+    return targetModel;
+  }
+
   async chat(request) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
+      const resolvedModel = await this.resolveModel(request.model || this.model);
+
       const response = await this.fetch(`${this.baseURL}/chat/completions`, {
         method: "POST",
         headers: {
@@ -27,7 +57,7 @@ export class OpenAICompatibleProvider {
           authorization: `Bearer ${this.apiKey}`
         },
         body: JSON.stringify({
-          model: request.model || this.model,
+          model: resolvedModel,
           messages: request.messages,
           temperature: request.temperature ?? 0.2,
           max_tokens: request.maxTokens,

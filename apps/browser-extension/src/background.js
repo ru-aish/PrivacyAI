@@ -43,7 +43,7 @@ async function getClient() {
   return privateClient;
 }
 
-async function sanitizeText(text) {
+async function sanitizeText(text, context) {
   const stored = await getStoredConfig();
   const config = getEffectiveConfig(stored);
 
@@ -57,9 +57,10 @@ async function sanitizeText(text) {
     console.log("PrivacyAI: sanitizing via API", {
       provider: config.provider,
       baseUrl: config.baseUrl,
-      model: config.model
+      model: config.model,
+      contextTurns: context?.length ?? 0
     });
-    return await client.sanitize(text);
+    return await client.sanitize(text, { context });
   } catch (error) {
     console.error("Sanitization error details:", error, error.details || error.message);
     console.log("PrivacyAI: API failed, falling back to local regex sanitization");
@@ -109,7 +110,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     (async () => {
       try {
-        const result = await sanitizeText(request.text);
+        const result = await sanitizeText(request.text, request.context);
         console.log("PrivacyAI: sanitize complete", {
           source: result.privacySource || "local-regex",
           preview: result.sanitizedText?.slice(0, 80)
