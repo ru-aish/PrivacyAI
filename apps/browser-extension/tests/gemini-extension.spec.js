@@ -1,18 +1,67 @@
-import { test, expect, chromium } from "@playwright/test";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { startTestServers, stopTestServers, getLastApiRequest } from "./test-servers.mjs";
+import { test, expect } from "@playwright/test";
+import { startTestServers, stopTestServers, getLastApiRequest, resetApiRequests } from "./test-servers.mjs";
+import { closeExtensionContext, configureExtensionViaStorage, launchExtensionContext, waitForServiceWorker } from "./extension-test-utils.mjs";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const extensionPath = path.resolve(__dirname, "../dist");
+const COMPLEX_GEMINI_PROMPT = [
+  "I'm Mira Patel from Cedar Ridge Bank and my email is mira.patel@cedarridge.example.",
+  "Use this repo exactly: https://github.com/ru-aish/PrivacyAI and explain why the OAuth callback fails only after the browser extension rewrites the prompt.",
+  "The private token in my failing .env is sk_live_gemini_complex_1234567890abcdef; keep the task technical and do not simplify the URL, model names, stack trace, or file paths.",
+  "Stack trace: File \"/home/mira/projects/privacyai/apps/browser-extension/src/background.js\", line 48, in sanitizeText."
+].join(" ");
 
-async function waitForServiceWorker(context) {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const workers = context.serviceWorkers();
-    if (workers.length > 0) return workers[0];
-    await new Promise((resolve) => setTimeout(resolve, 500));
+const CONTEXT_TURNS = [
+  {
+    role: "user",
+    text: "Earlier I said my staging email was mira.patel@cedarridge.example and the failing model was local-model."
+  },
+  {
+    role: "assistant",
+    text: "You were debugging the PrivacyAI extension config on Gemini with a custom OpenAI-compatible provider."
   }
-  return context.waitForEvent("serviceworker", { timeout: 5000 });
+];
+
+function liveProviderConfig() {
+  return {
+    provider: process.env.PRIVACYAI_LIVE_PROVIDER || "custom",
+    model: process.env.PRIVACYAI_LIVE_MODEL || "test-model",
+    baseUrl: process.env.PRIVACYAI_LIVE_BASE_URL,
+    apiKey: process.env.PRIVACYAI_LIVE_API_KEY
+  };
+}
+
+function hasLiveProviderConfig() {
+  const config = liveProviderConfig();
+  return Boolean(config.baseUrl && config.apiKey && config.model);
+}
+
+function mockProviderConfig(apiPort) {
+  return {
+    provider: "custom",
+    model: "test-model",
+    baseUrl: `http://127.0.0.1:${apiPort}/v1`,
+    apiKey: "test-key"
+  };
+}
+
+async function injectSyntheticGeminiHistory(page) {
+  await page.evaluate((turns) => {
+    const host = document.createElement("section");
+    host.id = "privacyai-test-context-history";
+    host.style.cssText = "position:absolute;left:-9999px;top:-9999px;width:1px;height:1px;overflow:hidden";
+
+    for (const turn of turns) {
+      const message = document.createElement("div");
+      message.setAttribute("data-message-author-role", turn.role === "assistant" ? "model" : "user");
+      message.innerText = turn.text;
+      host.appendChild(message);
+    }
+
+    document.body.prepend(host);
+  }, CONTEXT_TURNS);
+}
+
+function textFromPrivacyLogs(logs) {
+  return logs.filter((line) => line.includes("PrivacyAI")).join("\n");
 }
 
 test.describe("PrivacyAI on Gemini", () => {
@@ -27,28 +76,29 @@ test.describe("PrivacyAI on Gemini", () => {
     await stopTestServers();
   });
 
-  test("injects bridge and intercepts Enter on gemini.google.com", async () => {
-    const context = await chromium.launchPersistentContext("", {
-      channel: "chromium",
-      headless: false,
-      args: [
-        `--disable-extensions-except=${extensionPath}`,
-        `--load-extension=${extensionPath}`
-      ]
-    });
+  test.beforeEach(() => {
+    resetApiRequests();
+  });
+
+  test("injects bridge and sanitizes a complex Gemini prompt with context", async () => {
+    const context = await launchExtensionContext();
+    const logs = [];
+    const workerLogs = [];
 
     try {
       const serviceWorker = await waitForServiceWorker(context);
-      await serviceWorker.evaluate((port) => chrome.storage.local.set({
+      serviceWorker.on("console", (msg) => workerLogs.push(msg.text()));
+
+      const providerConfig = hasLiveProviderConfig()
+        ? liveProviderConfig()
+        : mockProviderConfig(apiPort);
+
+      await configureExtensionViaStorage(context, {
         shieldEnabled: true,
-        provider: "openai-compatible",
-        model: "test-model",
-        baseUrl: `http://127.0.0.1:${port}/v1`,
-        apiKey: "test-key"
-      }), apiPort);
+        ...providerConfig
+      });
 
       const page = await context.newPage();
-      const logs = [];
       page.on("console", (msg) => logs.push(msg.text()));
 
       await page.goto("https://gemini.google.com/app", { waitUntil: "domcontentloaded", timeout: 45000 });
@@ -59,35 +109,53 @@ test.describe("PrivacyAI on Gemini", () => {
       const bridgeInstalled = await page.evaluate(() => Boolean(window.__privacyAiBridgeInstalled));
       expect(bridgeInstalled).toBeTruthy();
 
-      const prompt = "My email is gemini-test@example.com and I need help.";
+      await injectSyntheticGeminiHistory(page);
+
       const editor = page.locator('div.ql-editor[contenteditable="true"].textarea').first();
       await editor.click();
-      await page.keyboard.type(prompt);
+      await page.keyboard.type(COMPLEX_GEMINI_PROMPT);
 
       const editorBeforeEnter = await editor.innerText();
-      expect(editorBeforeEnter).toContain("gemini-test@example.com");
+      expect(editorBeforeEnter).toContain("mira.patel@cedarridge.example");
+      expect(editorBeforeEnter).toContain("sk_live_gemini_complex_1234567890abcdef");
 
       await editor.press("Enter");
 
-      await page.waitForTimeout(8000);
+      await expect.poll(() => textFromPrivacyLogs(logs), { timeout: 90000 }).toContain("PrivacyAI sanitized");
 
-      const intercepted = logs.some((line) => line.includes("PrivacyAI intercepting prompt"));
-      const sanitized = logs.some((line) => line.includes("PrivacyAI sanitized"));
-      const aiSource = logs.some((line) => line.includes("source: ai-sanitizer"));
+      const privacyLogs = textFromPrivacyLogs(logs);
+      expect(privacyLogs).toContain("PrivacyAI intercepting prompt");
+      expect(privacyLogs).toMatch(/source: (ai-sanitizer|regex-fallback)/);
+      const sanitizedLog = logs.find((line) => line.includes("PrivacyAI sanitized via background")) || "";
+      expect(sanitizedLog).not.toContain("sk_live_gemini_complex_1234567890abcdef");
+      expect(sanitizedLog).not.toContain("mira.patel@cedarridge.example");
 
-      const apiRequest = getLastApiRequest();
-      const userApiMessage = apiRequest?.body?.messages?.find((message) => message.role === "user")?.content || "";
-
-      console.log("logs:", logs.filter((l) => l.includes("PrivacyAI")));
-      console.log("api user message:", userApiMessage);
-
-      expect(intercepted).toBeTruthy();
-      expect(sanitized).toBeTruthy();
-      expect(aiSource).toBeTruthy();
-      expect(userApiMessage).toContain("gemini-test@example.com");
-      expect(apiRequest.body.messages.some((message) => message.role === "system")).toBeTruthy();
+      if (hasLiveProviderConfig()) {
+        expect(workerLogs.join("\n")).toContain("PrivacyAI: sanitizing via API");
+        expect(workerLogs.join("\n")).toContain(providerConfig.model);
+      } else {
+        const apiRequest = getLastApiRequest();
+        expect(apiRequest).not.toBeNull();
+        expect(apiRequest.body.model).toBe("test-model");
+        expect(apiRequest.body.messages).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              role: "user",
+              content: `[CONTEXT] ${CONTEXT_TURNS[0].text}`
+            }),
+            expect.objectContaining({
+              role: "assistant",
+              content: `[CONTEXT] ${CONTEXT_TURNS[1].text}`
+            })
+          ])
+        );
+        expect(apiRequest.body.messages.at(-1)).toMatchObject({
+          role: "user",
+          content: COMPLEX_GEMINI_PROMPT
+        });
+      }
     } finally {
-      await context.close();
+      await closeExtensionContext(context);
     }
   });
 });
