@@ -1,0 +1,29 @@
+[
+  {
+    "id": "oauth-prod-incident",
+    "prompt": "I got an ERR_CALLBACK_MISMATCH error in apps/browser-extension/src/background.js. Here is my stripe key: sk_live_51NzABC123xyz789 and URL https://github.com/ru-aish/PrivacyAI",
+    "context": [
+      { "role": "user", "text": "Earlier I used alice@example.com" }
+    ],
+    "mustKeep": [
+      "https://github.com/ru-aish/PrivacyAI",
+      "apps/browser-extension/src/background.js",
+      "ERR_CALLBACK_MISMATCH"
+    ],
+    "mustRedact": [
+      "alice@example.com",
+      "sk_live_51NzABC123xyz789"
+    ]
+  },
+  {
+    "id": "aws-leak",
+    "prompt": "Can you check why connection fails with AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE at http://10.0.0.1:8080/deploy? Is it because of the bucket prefix?",
+    "mustKeep": [
+      "http://10.0.0.1:8080/deploy",
+      "AWS_ACCESS_KEY_ID"
+    ],
+    "mustRedact": [
+      "AKIAIOSFODNN7EXAMPLE"
+    ]
+  }
+]

@@ -1,9 +1,7 @@
-import { createBrowserClient, localSanitize } from "@privacy-ai/sdk/browser";
-import { getEffectiveConfig, hasRemoteProvider, PROVIDER_PRESETS } from "./config.js";
 import { isSupportedChatUrl } from "./supported-sites.js";
-
-
-let privateClient = null;
+import { initializeDefaultConfig } from "./background/config-store.js";
+import { sanitizeText, invalidateClientCache } from "./background/sanitize-service.js";
+import { injectPageBridge } from "./background/page-bridge-service.js";
 
 console.log("PrivacyAI background service worker loaded");
 
@@ -14,74 +12,8 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
-  const data = await chrome.storage.local.get(["provider", "baseUrl"]);
-  if (!data.provider && !data.baseUrl) {
-    await chrome.storage.local.set({
-      shieldEnabled: true,
-      ...PROVIDER_PRESETS.ollama
-    });
-    console.log("PrivacyAI: seeded default Ollama provider config");
-  }
+  await initializeDefaultConfig();
 });
-
-async function getStoredConfig() {
-  return chrome.storage.local.get(["provider", "model", "baseUrl", "apiKey"]);
-}
-
-async function getClient() {
-  if (!privateClient) {
-    const data = await getStoredConfig();
-    const config = getEffectiveConfig(data);
-
-    privateClient = createBrowserClient({
-      provider: config.provider,
-      model: config.model,
-      baseURL: config.baseUrl,
-      apiKey: config.apiKey
-    });
-  }
-  return privateClient;
-}
-
-async function sanitizeText(text, context) {
-  const stored = await getStoredConfig();
-  const config = getEffectiveConfig(stored);
-
-  if (!hasRemoteProvider(stored)) {
-    console.log("PrivacyAI: no provider configured, using local regex sanitization");
-    return localSanitize(text);
-  }
-
-  try {
-    const client = await getClient();
-    console.log("PrivacyAI: sanitizing via API", {
-      provider: config.provider,
-      baseUrl: config.baseUrl,
-      model: config.model,
-      contextTurns: context?.length ?? 0
-    });
-    return await client.sanitize(text, { context });
-  } catch (error) {
-    console.error("Sanitization error details:", error, error.details || error.message);
-    console.log("PrivacyAI: API failed, falling back to local regex sanitization");
-    return localSanitize(text);
-  }
-}
-
-async function injectPageBridge(tabId) {
-  if (!tabId) return false;
-
-  const tab = await chrome.tabs.get(tabId);
-  if (!isSupportedChatUrl(tab.url)) return false;
-
-  await chrome.scripting.executeScript({
-    target: { tabId, allFrames: true },
-    world: "MAIN",
-    files: ["page-bridge-main.js"]
-  });
-
-  return true;
-}
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "inject-page-bridge") {
@@ -126,7 +58,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === "updateConfig") {
-    privateClient = null;
+    invalidateClientCache();
     sendResponse({ success: true });
     return false;
   }
