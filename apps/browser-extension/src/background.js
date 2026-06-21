@@ -54,15 +54,15 @@ async function sanitizeText(text, context) {
 
   let contextToSend = context;
   const remoteMode = isRemoteProvider(stored);
-  const sanitizeContext = config.sanitizeContextBeforeProvider !== false;
+  const sanitizeContext = config.sanitizeContextBeforeProvider === true || (remoteMode && config.sanitizeContextBeforeProvider !== false);
 
-  if (remoteMode && sanitizeContext && Array.isArray(context) && context.length > 0) {
+  if (sanitizeContext && Array.isArray(context) && context.length > 0) {
     console.log("PrivacyAI: sanitizing context before sending to remote provider");
     contextToSend = await Promise.all(context.map(async (turn) => {
       const sanitized = await localSanitize(turn.text);
       return { ...turn, text: sanitized.sanitizedText };
     }));
-  } else if (remoteMode && Array.isArray(context) && context.length > 0) {
+  } else if (!sanitizeContext && remoteMode && Array.isArray(context) && context.length > 0) {
     console.warn("PrivacyAI: forwarding raw context to remote provider - enable sanitizeContextBeforeProvider for safety");
   }
 

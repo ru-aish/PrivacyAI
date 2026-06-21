@@ -172,7 +172,8 @@ test.describe("PrivacyAI on Gemini", () => {
         provider: "openai-compatible",
         model: "test-model",
         baseUrl: `http://127.0.0.1:${apiPort}/v1`,
-        apiKey: "remote-api-key"
+        apiKey: "remote-api-key",
+        sanitizeContextBeforeProvider: true
       });
 
       // Instead of relying on Gemini DOM which might not have context history locally
