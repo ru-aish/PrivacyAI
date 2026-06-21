@@ -3,8 +3,7 @@ import { getEffectiveConfig, hasRemoteProvider, isRemoteProvider, PROVIDER_PRESE
 import { isSupportedChatUrl } from "./supported-sites.js";
 
 
-let protectionHistory = [];
-const MAX_HISTORY = 50;
+const MAX_HISTORY = 20;
 
 function inferDetectionType(placeholder, originalValue) {
   if (placeholder.includes('EMAIL')) return 'email';
@@ -60,7 +59,7 @@ function buildProtectionSummary(result, site) {
   };
 }
 
-function recordProtection(result, siteUrl) {
+async function recordProtection(result, siteUrl) {
   try {
     let site = 'unknown';
     if (siteUrl) {
@@ -73,10 +72,16 @@ function recordProtection(result, siteUrl) {
     }
 
     const summary = buildProtectionSummary(result, site);
-    protectionHistory.unshift(summary);
-    if (protectionHistory.length > MAX_HISTORY) {
-      protectionHistory.pop();
+
+    const data = await chrome.storage.local.get(["protectionHistory"]);
+    let history = data.protectionHistory || [];
+    history.unshift(summary);
+
+    if (history.length > MAX_HISTORY) {
+      history = history.slice(0, MAX_HISTORY);
     }
+
+    await chrome.storage.local.set({ protectionHistory: history });
   } catch (error) {
     console.error("Failed to record protection:", error);
   }
@@ -221,22 +226,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 
   if (request.action === "getProtectionHistory") {
-    sendResponse({ success: true, history: protectionHistory });
-    return false;
+    chrome.storage.local.get(["protectionHistory"], (data) => {
+      sendResponse({ success: true, history: data.protectionHistory || [] });
+    });
+    return true;
   }
 
   if (request.action === "clearProtectionHistory") {
-    protectionHistory = [];
-    sendResponse({ success: true });
-    return false;
+    chrome.storage.local.set({ protectionHistory: [] }, () => {
+      sendResponse({ success: true });
+    });
+    return true;
   }
 
   if (request.action === "getRuntimeStatus") {
-    chrome.storage.local.get(["shieldEnabled"], (data) => {
+    chrome.storage.local.get(["shieldEnabled", "protectionHistory"], (data) => {
       sendResponse({
         success: true,
         shieldEnabled: data.shieldEnabled !== false,
-        totalProtections: protectionHistory.length
+        totalProtections: (data.protectionHistory || []).length
       });
     });
     return true;

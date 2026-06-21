@@ -94,9 +94,9 @@ function mountBadgeHost() {
 }
 
 
-function showComposerChip(active) {
+function showComposerChip(state, data = null) {
   let chip = document.getElementById('privacyai-composer-chip');
-  if (!chip && active) {
+  if (!chip && state !== 'hidden') {
     chip = document.createElement('div');
     chip.id = 'privacyai-composer-chip';
     chip.style.cssText = [
@@ -115,9 +115,7 @@ function showComposerChip(active) {
       'opacity:0.9',
       'transition:opacity 0.2s'
     ].join(';');
-    chip.textContent = '🛡️ Sanitizing...';
 
-    // Find composer to anchor
     const composer = document.querySelector('form') || document.querySelector('div[role="presentation"]');
     if (composer && composer.parentElement) {
        composer.parentElement.style.position = 'relative';
@@ -127,8 +125,42 @@ function showComposerChip(active) {
     }
   }
 
-  if (chip) {
-    chip.style.display = active ? 'block' : 'none';
+  if (!chip) return;
+
+  if (state === 'hidden') {
+    chip.style.display = 'none';
+    return;
+  }
+
+  chip.style.display = 'block';
+
+  if (state === 'sanitizing') {
+    chip.style.background = '#e3f2fd';
+    chip.style.color = '#1976d2';
+    chip.style.borderColor = '#bbdefb';
+    chip.textContent = '🛡️ Sanitizing...';
+  } else if (state === 'ready') {
+    chip.style.background = '#e8f5e9';
+    chip.style.color = '#2e7d32';
+    chip.style.borderColor = '#c8e6c9';
+    chip.textContent = '🛡️ Ready';
+  } else if (state === 'protected') {
+    chip.style.background = '#e8f5e9';
+    chip.style.color = '#2e7d32';
+    chip.style.borderColor = '#c8e6c9';
+    const count = data ? Object.keys(data).length : 0;
+    chip.textContent = `🛡️ Protected ${count} items`;
+  } else if (state === 'local-fallback') {
+    chip.style.background = '#fff8e1';
+    chip.style.color = '#f57f17';
+    chip.style.borderColor = '#ffecb3';
+    const count = data ? Object.keys(data).length : 0;
+    chip.textContent = `🛡️ Protected (Local Fallback) ${count} items`;
+  } else if (state === 'error') {
+    chip.style.background = '#ffebee';
+    chip.style.color = '#c62828';
+    chip.style.borderColor = '#ffcdd2';
+    chip.textContent = '🛡️ Error';
   }
 }
 
@@ -361,7 +393,7 @@ window.addEventListener('message', async (event) => {
   const originalText = String(event.data.text || '');
 
   showBadge('PrivacyAI sanitizing...');
-  showComposerChip(true);
+  showComposerChip('sanitizing');
 
   const conversationContext = extractConversationContext(6);
 
@@ -386,11 +418,21 @@ window.addEventListener('message', async (event) => {
     Object.assign(currentSessionMap, result.sessionMap);
     rebuildRestoreRegex();
     showBadge('PrivacyAI ready');
-    showComposerChip(false);
+
+    if (result.privacySource === 'local-regex' || result.privacySource === 'content-regex-fallback') {
+      showComposerChip('local-fallback', result.sessionMap);
+    } else {
+      showComposerChip('protected', result.sessionMap);
+    }
+
+    setTimeout(() => {
+      showComposerChip('hidden');
+    }, 3000);
   } catch (error) {
     console.error("PrivacyAI sanitization error:", error);
     postToPage('sanitize-error');
     showBadge('PrivacyAI error — refresh page');
-    showComposerChip(false);
+    showComposerChip('error');
+    setTimeout(() => { showComposerChip('hidden'); }, 3000);
   }
 });

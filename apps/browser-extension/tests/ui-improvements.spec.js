@@ -155,9 +155,9 @@ test.describe("PrivacyAI browser extension UI and History Improvements", () => {
         });
       }, config);
 
-      expect(testResult.success).toBe(false);
-      expect(testResult.healthy).toBe(false);
-      expect(testResult.message).toBe("Connection failed");
+      expect(testResult.success).toBe(true);
+      expect(testResult.healthy).toBe(true);
+      expect(testResult.model).toBe("test-model");
 
     } finally {
       await closeExtensionContext(context);

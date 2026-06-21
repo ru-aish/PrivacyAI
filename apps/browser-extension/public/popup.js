@@ -306,7 +306,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   function loadHistory() {
     chrome.runtime.sendMessage({ action: "getProtectionHistory" }, (response) => {
       if (!response || !response.history || response.history.length === 0) {
-        historyList.innerHTML = '<div class="no-history">No protections recorded yet.</div>';
+        historyList.innerHTML = '';
+        const noHistory = document.createElement('div');
+        noHistory.className = 'no-history';
+        noHistory.textContent = 'No protections recorded yet.';
+        historyList.appendChild(noHistory);
         return;
       }
 
@@ -317,27 +321,35 @@ document.addEventListener('DOMContentLoaded', async () => {
 
         const timeString = new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
-        let changesHtml = '';
+        const headerDiv = document.createElement('div');
+        headerDiv.className = 'history-item-header';
+
+        const siteSpan = document.createElement('span');
+        siteSpan.textContent = item.site || 'unknown';
+        const timeSpan = document.createElement('span');
+        timeSpan.textContent = timeString;
+
+        headerDiv.appendChild(siteSpan);
+        headerDiv.appendChild(timeSpan);
+
+        const previewDiv = document.createElement('div');
+        previewDiv.className = 'history-item-preview';
+        previewDiv.textContent = '"' + (item.cappedPreview || '') + '"';
+
+        const changesDiv = document.createElement('div');
+        changesDiv.className = 'history-item-changes';
+
         if (item.counts && Object.keys(item.counts).length > 0) {
-          const changeList = Object.entries(item.counts).map(([type, count]) => `${count} ${type}`).join(', ');
-          changesHtml = `<div class="history-item-changes">Masked: ${changeList}</div>`;
+          const changeList = Object.entries(item.counts).map(([type, count]) => count + ' ' + type).join(', ');
+          changesDiv.textContent = 'Masked: ' + changeList;
         } else {
-          changesHtml = `<div class="history-item-changes">No PII detected</div>`;
+          changesDiv.textContent = 'No PII detected';
         }
 
-        div.innerHTML = `
-          <div class="history-item-header">
-            <span>${item.site || 'unknown'}</span>
-            <span>${timeString}</span>
-          </div>
-          <div class="history-item-preview"></div>
-          ${changesHtml}
-        `;
+        div.appendChild(headerDiv);
+        div.appendChild(previewDiv);
+        div.appendChild(changesDiv);
 
-        const previewDiv = div.querySelector('.history-item-preview');
-        if (previewDiv) {
-          previewDiv.textContent = '"' + item.cappedPreview + '"';
-        }
         historyList.appendChild(div);
       });
     });
