@@ -3,6 +3,85 @@ import { getEffectiveConfig, hasRemoteProvider, isRemoteProvider, PROVIDER_PRESE
 import { isSupportedChatUrl } from "./supported-sites.js";
 
 
+let protectionHistory = [];
+const MAX_HISTORY = 50;
+
+function inferDetectionType(placeholder, originalValue) {
+  if (placeholder.includes('EMAIL')) return 'email';
+  if (placeholder.includes('PHONE')) return 'phone';
+  if (placeholder.includes('KEY') || placeholder.includes('TOKEN')) return 'credential';
+  if (placeholder.includes('NAME')) return 'name';
+  if (originalValue && originalValue.includes('@')) return 'email';
+  return 'pii';
+}
+
+function maskSensitiveValue(type, value) {
+  if (!value) return '';
+  value = String(value);
+  if (type === 'email') {
+    const parts = value.split('@');
+    if (parts.length === 2) {
+      return parts[0].charAt(0) + '***@' + parts[1];
+    }
+  } else if (type === 'phone' || type === 'credential') {
+    if (value.length > 4) {
+      return value.slice(0, 2) + '***' + value.slice(-2);
+    }
+    return '***';
+  } else if (type === 'name') {
+    return value.charAt(0) + '***';
+  }
+  return value.substring(0, 2) + '***';
+}
+
+function countByType(sessionMap) {
+  const counts = {};
+  for (const [placeholder, original] of Object.entries(sessionMap)) {
+    const type = inferDetectionType(placeholder, original);
+    counts[type] = (counts[type] || 0) + 1;
+  }
+  return counts;
+}
+
+function buildProtectionSummary(result, site) {
+  const maskedSessionMap = {};
+  for (const [placeholder, original] of Object.entries(result.sessionMap || {})) {
+    const type = inferDetectionType(placeholder, original);
+    maskedSessionMap[placeholder] = maskSensitiveValue(type, original);
+  }
+
+  return {
+    timestamp: Date.now(),
+    site: site,
+    privacySource: result.privacySource,
+    cappedPreview: result.sanitizedText ? result.sanitizedText.substring(0, 100) + (result.sanitizedText.length > 100 ? '...' : '') : '',
+    counts: countByType(result.sessionMap || {}),
+    maskedSessionMap: maskedSessionMap
+  };
+}
+
+function recordProtection(result, siteUrl) {
+  try {
+    let site = 'unknown';
+    if (siteUrl) {
+      try {
+        const urlObj = new URL(siteUrl);
+        site = urlObj.hostname;
+      } catch (e) {
+        site = siteUrl;
+      }
+    }
+
+    const summary = buildProtectionSummary(result, site);
+    protectionHistory.unshift(summary);
+    if (protectionHistory.length > MAX_HISTORY) {
+      protectionHistory.pop();
+    }
+  } catch (error) {
+    console.error("Failed to record protection:", error);
+  }
+}
+
 let privateClient = null;
 
 console.log("PrivacyAI background service worker loaded");
@@ -130,10 +209,91 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           preview: result.sanitizedText?.slice(0, 80)
         });
 
+        recordProtection(result, sender.tab?.url);
         sendResponse({ success: true, result });
       } catch (error) {
         console.error("PrivacyAI sanitization failed:", error);
         sendResponse({ success: false, error: error.message, details: error.details });
+      }
+    })();
+    return true;
+  }
+
+
+  if (request.action === "getProtectionHistory") {
+    sendResponse({ success: true, history: protectionHistory });
+    return false;
+  }
+
+  if (request.action === "clearProtectionHistory") {
+    protectionHistory = [];
+    sendResponse({ success: true });
+    return false;
+  }
+
+  if (request.action === "getRuntimeStatus") {
+    chrome.storage.local.get(["shieldEnabled"], (data) => {
+      sendResponse({
+        success: true,
+        shieldEnabled: data.shieldEnabled !== false,
+        totalProtections: protectionHistory.length
+      });
+    });
+    return true;
+  }
+
+  if (request.action === "testProvider") {
+    (async () => {
+      try {
+        const startTime = Date.now();
+        const config = getEffectiveConfig(request.config || {});
+        let url = "";
+        let isOllama = config.provider === "ollama";
+
+        if (isOllama) {
+          url = (config.baseUrl || "http://127.0.0.1:11434").replace(/\/$/, '') + "/api/tags";
+        } else {
+          url = (config.baseUrl || "http://127.0.0.1:1234/v1").replace(/\/$/, '') + "/models";
+        }
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+
+        const headers = {};
+        if (config.apiKey && config.apiKey !== "ollama" && config.apiKey !== "lm-studio" && config.apiKey !== "local") {
+          headers["Authorization"] = `Bearer ${config.apiKey}`;
+        }
+        const res = await fetch(url, { signal: controller.signal, headers });
+        clearTimeout(timeoutId);
+
+        if (!res.ok) {
+          throw new Error(`HTTP error! status: ${res.status}`);
+        }
+
+        const json = await res.json();
+        let models = [];
+        if (isOllama && json.models) {
+          models = json.models.map(m => m.name);
+        } else if (!isOllama && json.data) {
+          models = json.data.map(m => m.id);
+        }
+
+        sendResponse({
+          success: true,
+          healthy: true,
+          responseTime: Date.now() - startTime,
+          model: config.model,
+          availableModels: models,
+          message: "Connection successful"
+        });
+      } catch (error) {
+        sendResponse({
+          success: false,
+          healthy: false,
+          error: error.message || "Failed to connect to provider",
+          message: "Connection failed"
+        });
       }
     })();
     return true;

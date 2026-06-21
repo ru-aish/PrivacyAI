@@ -51,7 +51,32 @@
     button.primary:hover { background: #1976D2; }
 
     #status { font-size: 11px; margin-top: 8px; color: green; text-align: center; min-height: 14px; }
-  </style>
+
+    /* Dashboard and History */
+    .dashboard-card { background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 10px; margin-bottom: 15px; display: flex; justify-content: space-between; align-items: center; }
+    .stat-item { text-align: center; }
+    .stat-value { font-size: 16px; font-weight: bold; color: #2196F3; }
+    .stat-label { font-size: 10px; color: #6c757d; text-transform: uppercase; letter-spacing: 0.5px; }
+
+    .history-section { margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; }
+    .history-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+    .history-title { font-size: 13px; font-weight: bold; }
+    .clear-btn { font-size: 10px; color: #d32f2f; background: none; border: 1px solid #ffcdd2; padding: 2px 6px; border-radius: 4px; cursor: pointer; }
+    .clear-btn:hover { background: #ffebee; }
+
+    .history-list { max-height: 150px; overflow-y: auto; }
+    .history-item { background: #fafafa; border: 1px solid #eee; border-radius: 4px; padding: 8px; margin-bottom: 8px; font-size: 11px; }
+    .history-item-header { display: flex; justify-content: space-between; color: #666; margin-bottom: 4px; }
+    .history-item-preview { color: #333; font-style: italic; margin-bottom: 4px; word-break: break-word; }
+    .history-item-changes { color: #2e7d32; }
+    .no-history { color: #888; font-size: 11px; text-align: center; padding: 10px; font-style: italic; }
+
+    .test-conn-btn { font-size: 11px; padding: 3px 8px; cursor: pointer; background: #e3f2fd; color: #1976D2; border: 1px solid #bbdefb; border-radius: 4px; float: right; margin-top: -3px; }
+    .test-conn-btn:hover { background: #bbdefb; }
+    .health-status { font-size: 11px; margin-top: 8px; padding: 6px; border-radius: 4px; display: none; }
+    .health-success { background: #e8f5e9; color: #2e7d32; border: 1px solid #c8e6c9; }
+    .health-error { background: #ffebee; color: #c62828; border: 1px solid #ffcdd2; }
+</style>
 </head>
 <body>
   <h3>PrivacyAI</h3>
@@ -63,6 +88,18 @@
       <span class="slider"></span>
     </label>
   </div>
+
+  <div class="dashboard-card" id="dashboardCard">
+    <div class="stat-item">
+      <div class="stat-value" id="statStatus">ON</div>
+      <div class="stat-label">Shield</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-value" id="statProtections">0</div>
+      <div class="stat-label">Protections</div>
+    </div>
+  </div>
+
 
   <div class="section-title">
     Local AI Provider
@@ -120,12 +157,18 @@
     <p style="margin-bottom: 0;">Once running, click "Rescan".</p>
   </div>
 
+  <div id="healthStatus" class="health-status"></div>
   <!-- Save Button for normal flow -->
   <button class="primary" id="saveBtn">Save Settings</button>
   <div id="status"></div>
 
   <!-- State 3: Custom / Advanced Configuration -->
-  <div class="advanced-toggle" id="advancedToggle">► Custom / Advanced Configuration</div>
+
+  <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px;">
+    <div class="advanced-toggle" id="advancedToggle">► Custom / Advanced Configuration</div>
+    <button class="test-conn-btn" id="testConnBtn" style="display: none;">Test Connection</button>
+  </div>
+
   <div id="advancedArea">
     <div class="warning">
       <strong>Warning:</strong> Entering a remote AI provider here defeats the entire local privacy purpose of this extension. Your raw text data will be sent to the remote provider. Only use this if you fully control the endpoint and have strict data controls.
@@ -149,6 +192,18 @@
     </div>
   </div>
 
-  <script src="popup.js"></script>
+
+
+  <div class="history-section">
+    <div class="history-header">
+      <div class="history-title">Recent Protections</div>
+      <button class="clear-btn" id="clearHistoryBtn">Clear History</button>
+    </div>
+    <div class="history-list" id="historyList">
+      <div class="no-history">No protections recorded yet.</div>
+    </div>
+  </div>
+
+<script src="popup.js"></script>
 </body>
 </html>

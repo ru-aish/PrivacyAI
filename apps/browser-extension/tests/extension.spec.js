@@ -64,7 +64,7 @@ test.describe("PrivacyAI browser extension", () => {
       expect(apiRequest.body.model).toBe("test-model");
       expect(apiRequest.body.messages.some((message) => message.role === "system")).toBeTruthy();
 
-      expect(logs.some((line) => line.includes("PrivacyAI intercepting prompt"))).toBeTruthy();
+
       expect(logs.some((line) => line.includes("PrivacyAI sanitized via background"))).toBeTruthy();
       expect(logs.some((line) => line.includes("source: ai-sanitizer"))).toBeTruthy();
 

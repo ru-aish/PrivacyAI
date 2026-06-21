@@ -31,6 +31,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   const advancedArea = document.getElementById('advancedArea');
 
   // Load existing shield state
+
+  const testConnBtn = document.getElementById('testConnBtn');
+  const healthStatus = document.getElementById('healthStatus');
+  const statStatus = document.getElementById('statStatus');
+  const statProtections = document.getElementById('statProtections');
+  const historyList = document.getElementById('historyList');
+  const clearHistoryBtn = document.getElementById('clearHistoryBtn');
+
+  function updateDashboard(shieldEnabled) {
+    if (shieldEnabled) {
+      statStatus.textContent = "ON";
+      statStatus.style.color = "#2e7d32";
+    } else {
+      statStatus.textContent = "OFF";
+      statStatus.style.color = "#d32f2f";
+    }
+  }
+
   const data = await chrome.storage.local.get(['shieldEnabled', 'provider', 'model', 'baseUrl', 'apiKey']);
   if (data.shieldEnabled !== undefined) toggle.checked = data.shieldEnabled;
 
@@ -41,6 +59,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   toggle.addEventListener('change', async (e) => {
     await chrome.storage.local.set({ shieldEnabled: e.target.checked });
+    updateDashboard(e.target.checked);
   });
 
   // Advanced Toggle
@@ -48,6 +67,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   advancedToggle.addEventListener('click', () => {
     advancedOpen = !advancedOpen;
     advancedArea.style.display = advancedOpen ? 'block' : 'none';
+    testConnBtn.style.display = advancedOpen ? 'block' : 'none';
     advancedToggle.textContent = advancedOpen ? '▼ Custom / Advanced Configuration' : '► Custom / Advanced Configuration';
   });
 
@@ -247,4 +267,92 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Instead we just show the advanced tab by default.
     advancedToggle.click();
   }
+
+  testConnBtn.addEventListener('click', async () => {
+    testConnBtn.disabled = true;
+    testConnBtn.textContent = "Testing...";
+    healthStatus.style.display = "block";
+    healthStatus.className = "health-status";
+    healthStatus.textContent = "Connecting...";
+
+    const config = {
+      provider: providerInput.value.trim(),
+      model: modelInput.value.trim(),
+      baseUrl: baseUrlInput.value.trim(),
+      apiKey: apiKeyInput.value.trim()
+    };
+
+    chrome.runtime.sendMessage({ action: "testProvider", config }, (response) => {
+      testConnBtn.disabled = false;
+      testConnBtn.textContent = "Test Connection";
+
+      if (chrome.runtime.lastError || !response || !response.success) {
+        healthStatus.className = "health-status health-error";
+        healthStatus.textContent = "Error: " + (response?.error || chrome.runtime.lastError?.message || "Connection failed");
+      } else {
+        healthStatus.className = "health-status health-success";
+        healthStatus.textContent = `Connected to ${response.model} in ${response.responseTime}ms`;
+      }
+    });
+  });
+
+  clearHistoryBtn.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ action: "clearProtectionHistory" }, () => {
+      loadHistory();
+      refreshStats();
+    });
+  });
+
+  function loadHistory() {
+    chrome.runtime.sendMessage({ action: "getProtectionHistory" }, (response) => {
+      if (!response || !response.history || response.history.length === 0) {
+        historyList.innerHTML = '<div class="no-history">No protections recorded yet.</div>';
+        return;
+      }
+
+      historyList.innerHTML = '';
+      response.history.forEach(item => {
+        const div = document.createElement('div');
+        div.className = 'history-item';
+
+        const timeString = new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+        let changesHtml = '';
+        if (item.counts && Object.keys(item.counts).length > 0) {
+          const changeList = Object.entries(item.counts).map(([type, count]) => `${count} ${type}`).join(', ');
+          changesHtml = `<div class="history-item-changes">Masked: ${changeList}</div>`;
+        } else {
+          changesHtml = `<div class="history-item-changes">No PII detected</div>`;
+        }
+
+        div.innerHTML = `
+          <div class="history-item-header">
+            <span>${item.site || 'unknown'}</span>
+            <span>${timeString}</span>
+          </div>
+          <div class="history-item-preview"></div>
+          ${changesHtml}
+        `;
+
+        const previewDiv = div.querySelector('.history-item-preview');
+        if (previewDiv) {
+          previewDiv.textContent = '"' + item.cappedPreview + '"';
+        }
+        historyList.appendChild(div);
+      });
+    });
+  }
+
+  function refreshStats() {
+    chrome.runtime.sendMessage({ action: "getRuntimeStatus" }, (response) => {
+      if (response && response.success) {
+        statProtections.textContent = response.totalProtections || 0;
+        updateDashboard(response.shieldEnabled);
+      }
+    });
+  }
+
+  loadHistory();
+  refreshStats();
+
 });

@@ -93,6 +93,45 @@ function mountBadgeHost() {
   return document.body || document.documentElement;
 }
 
+
+function showComposerChip(active) {
+  let chip = document.getElementById('privacyai-composer-chip');
+  if (!chip && active) {
+    chip = document.createElement('div');
+    chip.id = 'privacyai-composer-chip';
+    chip.style.cssText = [
+      'position:absolute',
+      'top:-25px',
+      'right:10px',
+      'z-index:2147483647',
+      'padding:4px 8px',
+      'border-radius:12px',
+      'background:#e3f2fd',
+      'color:#1976d2',
+      'border:1px solid #bbdefb',
+      'font:10px/1.2 sans-serif',
+      'font-weight:bold',
+      'pointer-events:none',
+      'opacity:0.9',
+      'transition:opacity 0.2s'
+    ].join(';');
+    chip.textContent = '🛡️ Sanitizing...';
+
+    // Find composer to anchor
+    const composer = document.querySelector('form') || document.querySelector('div[role="presentation"]');
+    if (composer && composer.parentElement) {
+       composer.parentElement.style.position = 'relative';
+       composer.parentElement.appendChild(chip);
+    } else {
+       mountBadgeHost().appendChild(chip);
+    }
+  }
+
+  if (chip) {
+    chip.style.display = active ? 'block' : 'none';
+  }
+}
+
 function showBadge(text) {
   let badge = document.getElementById('privacyai-badge');
   if (!badge) {
@@ -320,8 +359,9 @@ window.addEventListener('message', async (event) => {
   }
 
   const originalText = String(event.data.text || '');
-  console.log("PrivacyAI intercepting prompt:", originalText);
+
   showBadge('PrivacyAI sanitizing...');
+  showComposerChip(true);
 
   const conversationContext = extractConversationContext(6);
 
@@ -346,9 +386,11 @@ window.addEventListener('message', async (event) => {
     Object.assign(currentSessionMap, result.sessionMap);
     rebuildRestoreRegex();
     showBadge('PrivacyAI ready');
+    showComposerChip(false);
   } catch (error) {
     console.error("PrivacyAI sanitization error:", error);
     postToPage('sanitize-error');
     showBadge('PrivacyAI error — refresh page');
+    showComposerChip(false);
   }
 });
