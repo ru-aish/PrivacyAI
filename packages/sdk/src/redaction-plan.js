@@ -81,7 +81,7 @@ export class RedactionPlan {
   }
 
   ensureProtectedSpans(protectedSpans) {
-    const credTypes = new Set(["URL_CREDENTIAL", "URL_QUERY_SECRET", "CONNECTION_STRING_CREDENTIAL"]);
+    const credTypes = new Set(["URL_CREDENTIAL", "URL_QUERY_SECRET", "CONNECTION_STRING_CREDENTIAL", "SESSION_MAP_OVERRIDE"]);
 
     this.replacements = this.replacements.filter(r => {
       const inProtected = protectedSpans.some(span =>

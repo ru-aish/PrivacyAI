@@ -135,3 +135,4 @@ cython_debug/
 *.sqlite
 session_data/
 temp/
+test-results/

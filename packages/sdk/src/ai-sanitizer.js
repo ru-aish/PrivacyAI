@@ -201,7 +201,7 @@ function buildSafePromptFromPlan(baseText, sessionMap) {
 
       const existing = plan.findReplacement(foundIndex, end);
       if (!existing) {
-        plan.addReplacement(foundIndex, end, original, dummy, "SENSITIVE", "session-map");
+        plan.addReplacement(foundIndex, end, original, dummy, "SESSION_MAP_OVERRIDE", "session-map");
       }
 
       searchIndex = end;

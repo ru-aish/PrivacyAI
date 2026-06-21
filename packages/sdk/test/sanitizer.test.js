@@ -270,3 +270,31 @@ test("protected URL spans are not corrupted by same value elsewhere", async () =
   assert.match(result.sanitizedText, /Preserve host 10\.0\.1\.4\./);
   assert.ok(result.sessionMap["API_KEY_1"]);
 });
+test("enforcement does not leak URL query token when AI JSON misses it", async () => {
+  const text = "https://api.example.com/callback?token=abc123secret456&tab=oauth";
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({
+      safe_prompt: "https://api.example.com/callback?token=abc123secret456&tab=oauth",
+      session_map: {
+        "API_KEY_1": "abc123secret456"
+      }
+    }),
+    loadEnv: false
+  });
+
+  const result = await sanitizer.sanitize(text);
+  assert.doesNotMatch(result.sanitizedText, /abc123secret456/);
+  assert.match(result.sanitizedText, /https:\/\/api\.example\.com\/callback\?token=[^&]+&tab=oauth/);
+});
+
+test("Postgres connection-string password does not leak in regex fallback", async () => {
+  const text = "DATABASE_URL=postgres://sam:supersecret@prod-db.internal:5432/acme";
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({ text: "invalid json" }),
+    loadEnv: false
+  });
+
+  const result = await sanitizer.sanitize(text);
+  assert.doesNotMatch(result.sanitizedText, /supersecret/);
+  assert.match(result.sanitizedText, /DATABASE_URL=postgres:\/\/[^:]+:[^@]+@prod-db\.internal:5432\/acme/);
+});
