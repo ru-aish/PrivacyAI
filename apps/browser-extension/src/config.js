@@ -3,7 +3,10 @@ export function getEffectiveConfig(data = {}) {
     provider: data.provider || "openai-compatible",
     model: data.model || "gemini-1.5-flash",
     baseUrl: data.baseUrl || "https://generativelanguage.googleapis.com/v1beta/openai",
-    apiKey: data.apiKey || ""
+    apiKey: data.apiKey || "",
+    sanitizeContextBeforeProvider: data.sanitizeContextBeforeProvider !== undefined
+      ? data.sanitizeContextBeforeProvider
+      : isRemoteProviderUrl(data.baseUrl || "https://generativelanguage.googleapis.com/v1beta/openai")
   };
 
   if (!config.apiKey.trim() && isLocalProviderUrl(config.baseUrl)) {
@@ -20,11 +23,26 @@ export function hasRemoteProvider(data = {}) {
   return Boolean(config.apiKey && config.apiKey.trim());
 }
 
+export function isRemoteProvider(data = {}) {
+  const config = getEffectiveConfig(data);
+  return !isLocalProviderUrl(config.baseUrl) && Boolean(config.apiKey?.trim());
+}
+
 export function isLocalProviderUrl(baseUrl) {
   if (!baseUrl) return false;
   try {
     const { hostname } = new URL(baseUrl);
     return hostname === "127.0.0.1" || hostname === "localhost";
+  } catch {
+    return false;
+  }
+}
+
+export function isRemoteProviderUrl(baseUrl) {
+  if (!baseUrl) return false;
+  try {
+    const { hostname } = new URL(baseUrl);
+    return hostname !== "127.0.0.1" && hostname !== "localhost";
   } catch {
     return false;
   }

@@ -158,4 +158,56 @@ test.describe("PrivacyAI on Gemini", () => {
       await closeExtensionContext(context);
     }
   });
+
+  test("sanitizes context text before sending to remote provider", async () => {
+    const context = await launchExtensionContext();
+    const workerLogs = [];
+
+    try {
+      const serviceWorker = await waitForServiceWorker(context);
+      serviceWorker.on("console", (msg) => workerLogs.push(msg.text()));
+
+      await configureExtensionViaStorage(context, {
+        shieldEnabled: true,
+        provider: "openai-compatible",
+        model: "test-model",
+        baseUrl: `http://127.0.0.1:${apiPort}/v1`,
+        apiKey: "remote-api-key",
+        sanitizeContextBeforeProvider: true
+      });
+
+      // Instead of relying on Gemini DOM which might not have context history locally
+      // Let's trigger the background sanitize action directly from a page context
+            const extensionId = serviceWorker.url().split("/")[2];
+      const page = await context.newPage();
+      await page.goto(`chrome-extension://${extensionId}/popup.html`);
+
+      const response = await page.evaluate(() => {
+        return new Promise(resolve => {
+          chrome.runtime.sendMessage({
+            action: "sanitize",
+            text: "Here is my prompt",
+            context: [
+              { role: "user", text: "My email is sensitive@example.com." },
+              { role: "assistant", text: "Got it." }
+            ]
+          }, resolve);
+        });
+      });
+
+      expect(response.success).toBe(true);
+
+      const apiRequest = getLastApiRequest();
+      expect(apiRequest).not.toBeNull();
+
+      const sentContext = apiRequest.body.messages.filter(m => m.content && m.content.includes("[CONTEXT]"));
+      expect(sentContext.length).toBeGreaterThan(0);
+      expect(sentContext[0].content).not.toContain("sensitive@example.com");
+      expect(typeof sentContext[0].content).toBe("string");
+      expect(sentContext[0].content.length).toBeGreaterThan(0);
+
+    } finally {
+      await closeExtensionContext(context);
+    }
+  });
 });

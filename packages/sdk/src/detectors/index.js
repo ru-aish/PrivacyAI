@@ -35,8 +35,21 @@ export function mergeDetections(detections) {
       }
 
       const index = merged.findIndex((current) => rangesOverlap(current, detection));
-      if (index !== -1 && detection.confidence > merged[index].confidence) {
+      const PRECEDENCE = {
+        "CONNECTION_STRING_CREDENTIAL": 100,
+        "URL_QUERY_SECRET": 90,
+        "URL_CREDENTIAL": 90,
+        "API_KEY": 80,
+        "EMAIL": 50,
+        "IP_ADDRESS": 50
+      };
+
+      if (index !== -1) {
+        const currentPrio = PRECEDENCE[merged[index].type] || merged[index].confidence * 10;
+        const newPrio = PRECEDENCE[detection.type] || detection.confidence * 10;
+        if (newPrio > currentPrio) {
         merged[index] = detection;
+        }
       }
       return merged;
     }, [])

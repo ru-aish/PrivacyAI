@@ -12,10 +12,10 @@ function hasCommand(command) {
 const forceForeground = process.env.PRIVACYAI_E2E_FOREGROUND === "1";
 const useXvfb = process.platform === "linux" && !forceForeground && hasCommand("xvfb-run");
 
-const command = useXvfb ? "xvfb-run" : "npx";
+const command = useXvfb ? "xvfb-run" : "pnpm";
 const args = useXvfb
-  ? ["-a", "--server-args=-screen 0 1280x720x24", "npx", ...playwrightArgs]
-  : playwrightArgs;
+  ? ["-a", "--server-args=-screen 0 1280x720x24", "pnpm", "exec", ...playwrightArgs]
+  : ["exec", ...playwrightArgs];
 
 const childEnv = { ...process.env };
 if (useXvfb) {

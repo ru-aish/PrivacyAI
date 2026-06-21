@@ -1,0 +1,74 @@
+[
+  {
+    "id": "github-repo-url",
+    "prompt": "Check out my repo at https://github.com/ru-aish/PrivacyAI. I built this PII-scrubbing proxy. What do you think?",
+    "context": [],
+    "mustRedact": [],
+    "mustKeep": ["https://github.com/ru-aish/PrivacyAI"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  },
+  {
+    "id": "connection-string-credentials",
+    "prompt": "Here's my DB URL: postgres://admin:supersecret@prod-db.internal:5432/acme. Can you help me optimize queries?",
+    "context": [],
+    "mustRedact": ["supersecret"],
+    "mustKeep": ["postgres://", "prod-db.internal:5432/acme"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  },
+  {
+    "id": "email-and-url",
+    "prompt": "My email is alice@example.com. I'm having issues with the CI at https://ci.example.com/jobs/123. The build keeps failing.",
+    "context": [],
+    "mustRedact": ["alice@example.com"],
+    "mustKeep": ["https://ci.example.com/jobs/123"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  },
+  {
+    "id": "stack-trace-with-path",
+    "prompt": "Getting OperationalError in my Django app. Traceback: File \"/home/rudra/app/worker.py\", line 88. Why does my Celery worker hang under load?",
+    "context": [],
+    "mustRedact": [],
+    "mustKeep": ["/home/rudra/app/worker.py"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  },
+  {
+    "id": "redis-url-preserve-host",
+    "prompt": "REDIS_URL=redis://:redispass@10.0.1.4:6379. Preserve host 10.0.1.4 in both places.",
+    "context": [],
+    "mustRedact": ["redispass"],
+    "mustKeep": ["redis://", "10.0.1.4:6379"],
+    "mode": ["good-json", "invalid-json"]
+  },
+  {
+    "id": "api-key-in-query",
+    "prompt": "I need to debug this API call: https://api.stripe.com/v1/charges?api_key=sk_live_abc123def456&charge_id=ch_789. Can you help?",
+    "context": [],
+    "mustRedact": ["sk_live_abc123def456"],
+    "mustKeep": ["https://api.stripe.com/v1/charges"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  },
+  {
+    "id": "oauth-prod-incident",
+    "prompt": "We have a production issue with OAuth tokens. The callback URL is https://app.example.com/oauth/callback?code=AUTHORIZATION_CODE_XYZ&state=abc123. The JWT secret is super-secret-key-12345.",
+    "context": [],
+    "mustRedact": ["super-secret-key-12345"],
+    "mustKeep": ["https://app.example.com/oauth/callback", "OAuth tokens"],
+    "mode": ["good-json", "leaky-json", "invalid-json"]
+  },
+  {
+    "id": "person-name-with-technical-context",
+    "prompt": "I'm Alice and I work at the company on the Kubernetes cluster. My manager Bob said to use Terraform for provisioning. Can you write a Terraform config for EKS?",
+    "context": [],
+    "mustRedact": [],
+    "mustKeep": ["Kubernetes", "Terraform", "EKS"],
+    "mode": ["good-json", "invalid-json"]
+  },
+  {
+    "id": "medical-patient-id",
+    "prompt": "Patient MRN-88472 needs a follow-up appointment. The diagnosis is Type 2 Diabetes.",
+    "context": [],
+    "mustRedact": ["MRN-88472"],
+    "mustKeep": ["Type 2 Diabetes", "follow-up appointment"],
+    "mode": ["good-json", "invalid-json"]
+  }
+]

@@ -240,5 +240,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // Initial Scan
-  scanProviders();
+  if (!data.provider || data.provider === "ollama" || (data.provider === "openai-compatible" && data.apiKey === "lm-studio")) {
+    scanProviders();
+  } else {
+    // If it's custom configuration, we don't scan local providers by default to avoid overwriting.
+    // Instead we just show the advanced tab by default.
+    advancedToggle.click();
+  }
 });

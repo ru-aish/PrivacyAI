@@ -5,11 +5,6 @@ const PATTERNS = [
     regex: /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi
   },
   {
-    type: "URL",
-    confidence: 0.95,
-    regex: /\b(?:https?:\/\/|ftp:\/\/|www\.)[^\s<>"']+/gi
-  },
-  {
     type: "IP_ADDRESS",
     confidence: 0.95,
     regex: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g
@@ -77,6 +72,59 @@ const PATTERNS = [
     type: "API_KEY",
     confidence: 0.8,
     regex: /\b(?:sk|pk|api|key|token|secret)[-_]?[A-Za-z0-9]{16,}\b/g
+  },
+  {
+    type: "API_KEY",
+    confidence: 0.75,
+    regex: /\bsecret\s+is\s+([A-Za-z0-9_-]{8,})/gi,
+    valueGroup: 1
+  },
+  {
+    type: "URL_CREDENTIAL",
+    confidence: 0.97,
+    regex: /(?:https?:\/\/|ftp:\/\/)(?:[^@\/]+):([^@]+)@/g,
+    valueGroup: 1
+  },
+  {
+    type: "URL_QUERY_SECRET",
+    confidence: 0.95,
+    regex: /[?&](?:token|access_token|api_key|signature|password|secret|sig|code)=([^&\s"]{8,})/gi,
+    valueGroup: 1
+  },
+  {
+    type: "CONNECTION_STRING_CREDENTIAL",
+    confidence: 0.96,
+    regex: /\b(?:postgres(?:ql)?|mysql|mongodb|redis|amqp|kafka):\/\/([^:]+):([^@]+)@/g,
+    valueGroup: 1
+  },
+  {
+    type: "CONNECTION_STRING_CREDENTIAL",
+    confidence: 0.96,
+    regex: /\b(?:postgres(?:ql)?|mysql|mongodb|redis|amqp|kafka):\/\/(?:[^:]+):([^@]+)@/g,
+    valueGroup: 1
+  },
+  {
+    type: "CONNECTION_STRING_CREDENTIAL",
+    confidence: 0.95,
+    regex: /\bredis:\/\/:([^@]+)@/g,
+    valueGroup: 1
+  },
+  {
+    type: "MRN",
+    confidence: 0.97,
+    regex: /\bMRN[-\s]?\d{5,}\b/gi
+  },
+  {
+    type: "MEDICAL_ID",
+    confidence: 0.94,
+    regex: /\bPatient\s+ID[:\s]+([A-Z0-9]{4,})/gi,
+    valueGroup: 1
+  },
+  {
+    type: "MEDICAL_ID",
+    confidence: 0.93,
+    regex: /\b(?:Insurance|Member)\s+ID[:\s]+([A-Z0-9]{4,})/gi,
+    valueGroup: 1
   }
 ];
 
@@ -84,10 +132,12 @@ const ORG_REGEX = /\b([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4}\s+(
 const PERSON_REGEX = /\b(?:Dr\.?\s+|Prof\.?\s+|Mr\.?\s+|Ms\.?\s+|Mrs\.?\s+)?([A-Z][a-z]+(?:[-'][A-Z][a-z]+)?\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?(?:\s+(?:Jr\.?|Sr\.?|III|IV))?)\b/g;
 const CONTACT_PERSON_REGEX = /\bContact\s+([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+)\s+at\b/g;
 const CONTEXT_NAME_REGEX = /\b(?:my name is\s+|name['"]?\s*:\s*['"]?)([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+?)(?=[,'".}]|\s+(?:and|my|with|at|from|in)\b|$)/gi;
+const CONTEXT_PATIENT_REGEX = /\b(?:patient|customer|employee)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+?)(?=[,'".}]|\s+(?:reported|said|has|is|was)\b|$)/gi;
 const CONTEXT_COMPANY_REGEX = /\b(?:company['"]?\s*:\s*['"]?|my company is\s+)([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,3}?)(?=[,'".}]|\s+(?:and|my|with|at)\b|$)/gi;
 const CONTEXT_CITY_REGEX = /\b(?:city['"]?\s*:\s*['"]|live in\s+|located in\s+)([A-Z][A-Za-z .'-]+?)(?=[,'".}]|\s+(?:and|my|with|at)\b|$)/gi;
 const CONTEXT_ZIP_REGEX = /\bzip['"]?\s*:\s*['"]?(\d{5}(?:-\d{4})?)/gi;
 const COMMON_LOCATION_REGEX = /\b(New York|Berlin|Boston|San Francisco|Seattle|London|Paris|Mumbai|Delhi|Bengaluru|Tokyo)\b/g;
+const CONTEXT_NAME_DOB_REGEX = /\b(?:name|DOB)\s*:\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g;
 
 export class RegexDetector {
   detect(text) {
@@ -108,9 +158,11 @@ export class RegexDetector {
 
     addCapturedMatches(detections, text, CONTACT_PERSON_REGEX, "PERSON", 0.9, "context");
     addCapturedMatches(detections, text, CONTEXT_NAME_REGEX, "PERSON", 0.9, "context");
+    addCapturedMatches(detections, text, CONTEXT_PATIENT_REGEX, "PERSON", 0.85, "context");
     addCapturedMatches(detections, text, CONTEXT_COMPANY_REGEX, "ORGANIZATION", 0.86, "context");
     addCapturedMatches(detections, text, CONTEXT_CITY_REGEX, "LOCATION", 0.86, "context");
     addCapturedMatches(detections, text, CONTEXT_ZIP_REGEX, "POSTAL_CODE", 0.86, "context");
+    addCapturedMatches(detections, text, CONTEXT_NAME_DOB_REGEX, "PERSON", 0.82, "context");
     addFullMatches(detections, text, COMMON_LOCATION_REGEX, "LOCATION", 0.84, "context");
 
     for (const match of text.matchAll(PERSON_REGEX)) {
@@ -150,9 +202,17 @@ function toDetection(type, value, start, confidence, source) {
   };
 }
 
+const KNOWN_NON_PERSON_TERMS = new Set([
+  "TypeScript", "JavaScript", "GitHub", "GitLab", "React", "Angular",
+  "Docker", "Kubernetes", "Contact", "Please", "Return", "Write", "Replace",
+  "Using", "Running", "Getting", "Having", "Making", "Going"
+]);
+
 function isLikelyFalsePerson(value) {
   const firstWord = value.split(/\s+/)[0];
-  return ["Contact", "Please", "Return", "Write", "Replace"].includes(firstWord);
+  if (KNOWN_NON_PERSON_TERMS.has(firstWord)) return true;
+  if (KNOWN_NON_PERSON_TERMS.has(value)) return true;
+  return false;
 }
 
 function luhnLike(value) {
