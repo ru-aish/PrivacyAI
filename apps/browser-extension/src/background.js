@@ -1,5 +1,5 @@
 import { createBrowserClient, localSanitize } from "@privacy-ai/sdk/browser";
-import { getEffectiveConfig, hasRemoteProvider, PROVIDER_PRESETS } from "./config.js";
+import { getEffectiveConfig, hasRemoteProvider, isRemoteProvider, PROVIDER_PRESETS } from "./config.js";
 import { isSupportedChatUrl } from "./supported-sites.js";
 
 
@@ -25,7 +25,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 async function getStoredConfig() {
-  return chrome.storage.local.get(["provider", "model", "baseUrl", "apiKey"]);
+  return chrome.storage.local.get(["provider", "model", "baseUrl", "apiKey", "sanitizeContextBeforeProvider"]);
 }
 
 async function getClient() {
@@ -52,15 +52,29 @@ async function sanitizeText(text, context) {
     return localSanitize(text);
   }
 
+  let contextToSend = context;
+  const remoteMode = isRemoteProvider(stored);
+  const sanitizeContext = config.sanitizeContextBeforeProvider !== false;
+
+  if (remoteMode && sanitizeContext && Array.isArray(context) && context.length > 0) {
+    console.log("PrivacyAI: sanitizing context before sending to remote provider");
+    contextToSend = await Promise.all(context.map(async (turn) => {
+      const sanitized = localSanitize(turn.text);
+      return { ...turn, text: sanitized.sanitizedText };
+    }));
+  } else if (remoteMode && Array.isArray(context) && context.length > 0) {
+    console.warn("PrivacyAI: forwarding raw context to remote provider - enable sanitizeContextBeforeProvider for safety");
+  }
+
   try {
     const client = await getClient();
     console.log("PrivacyAI: sanitizing via API", {
       provider: config.provider,
       baseUrl: config.baseUrl,
       model: config.model,
-      contextTurns: context?.length ?? 0
+      contextTurns: contextToSend?.length ?? 0
     });
-    return await client.sanitize(text, { context });
+    return await client.sanitize(text, { context: contextToSend });
   } catch (error) {
     console.error("Sanitization error details:", error, error.details || error.message);
     console.log("PrivacyAI: API failed, falling back to local regex sanitization");
