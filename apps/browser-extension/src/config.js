@@ -6,7 +6,7 @@ export function getEffectiveConfig(data = {}) {
     apiKey: data.apiKey || "",
     sanitizeContextBeforeProvider: data.sanitizeContextBeforeProvider !== undefined
       ? data.sanitizeContextBeforeProvider
-      : isRemoteProviderUrl(data.baseUrl)
+      : isRemoteProviderUrl(data.baseUrl || "https://generativelanguage.googleapis.com/v1beta/openai")
   };
 
   if (!config.apiKey.trim() && isLocalProviderUrl(config.baseUrl)) {

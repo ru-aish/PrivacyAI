@@ -59,7 +59,7 @@ async function sanitizeText(text, context) {
   if (remoteMode && sanitizeContext && Array.isArray(context) && context.length > 0) {
     console.log("PrivacyAI: sanitizing context before sending to remote provider");
     contextToSend = await Promise.all(context.map(async (turn) => {
-      const sanitized = localSanitize(turn.text);
+      const sanitized = await localSanitize(turn.text);
       return { ...turn, text: sanitized.sanitizedText };
     }));
   } else if (remoteMode && Array.isArray(context) && context.length > 0) {
