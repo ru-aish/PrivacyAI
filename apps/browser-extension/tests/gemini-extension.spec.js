@@ -141,11 +141,7 @@ test.describe("PrivacyAI on Gemini", () => {
           expect.arrayContaining([
             expect.objectContaining({
               role: "user",
-              content: `[CONTEXT] ${CONTEXT_TURNS[0].text}`
-            }),
-            expect.objectContaining({
-              role: "assistant",
-              content: `[CONTEXT] ${CONTEXT_TURNS[1].text}`
+              content: expect.stringContaining("Mock compacted context summary")
             })
           ])
         );
@@ -178,7 +174,7 @@ test.describe("PrivacyAI on Gemini", () => {
 
       // Instead of relying on Gemini DOM which might not have context history locally
       // Let's trigger the background sanitize action directly from a page context
-            const extensionId = serviceWorker.url().split("/")[2];
+      const extensionId = serviceWorker.url().split("/")[2];
       const page = await context.newPage();
       await page.goto(`chrome-extension://${extensionId}/popup.html`);
 
@@ -200,7 +196,7 @@ test.describe("PrivacyAI on Gemini", () => {
       const apiRequest = getLastApiRequest();
       expect(apiRequest).not.toBeNull();
 
-      const sentContext = apiRequest.body.messages.filter(m => m.content && m.content.includes("[CONTEXT]"));
+      const sentContext = apiRequest.body.messages.filter(m => m.content && m.content.includes("REFERENCE CONTEXT"));
       expect(sentContext.length).toBeGreaterThan(0);
       expect(sentContext[0].content).not.toContain("sensitive@example.com");
       expect(typeof sentContext[0].content).toBe("string");

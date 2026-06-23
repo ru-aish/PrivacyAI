@@ -2,6 +2,7 @@ import { configFromEnv } from "./config.js";
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { OllamaProvider } from "./providers/ollama.js";
 import { PrivacySanitizer } from "./sanitizer.js";
+import { ContextCompactor } from "./context-compactor.js";
 import { restore } from "./redactor.js";
 
 export class PrivateAI {
@@ -15,6 +16,10 @@ export class PrivateAI {
         ...config,
         provider: this.provider
       });
+    this.compactor = options.compactor || new ContextCompactor({
+      ...config,
+      provider: this.provider
+    });
   }
 
   static fromEnv(options = {}) {

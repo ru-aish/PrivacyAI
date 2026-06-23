@@ -28,26 +28,65 @@ export class AiSanitizer {
       { role: "system", content: this.systemPrompt }
     ];
 
-    if (options.context && Array.isArray(options.context)) {
-      for (const turn of options.context) {
-        messages.push({
-          role: turn.role === "user" ? "user" : "assistant",
-          content: `[CONTEXT] ${turn.text}`
-        });
-      }
+    let contextText = "";
+    if (options.compactedContextSummary) {
+      contextText = options.compactedContextSummary;
+      messages.push({
+        role: "user",
+        content: `[REFERENCE CONTEXT (DO NOT COPY, DO NOT SUMMARIZE, REFERENCE ONLY)]\n${options.compactedContextSummary}`
+      });
+    } else if (options.context && Array.isArray(options.context) && options.context.length > 0) {
+      const summaryLines = options.context.map(turn => `- ${turn.role}: ${turn.text}`).join("\n");
+      contextText = summaryLines;
+      messages.push({
+        role: "user",
+        content: `[CONVERSATION REFERENCE HISTORY (DO NOT COPY, DO NOT ANSWER, REFERENCE ONLY)]:\n${summaryLines}`
+      });
     }
 
     messages.push({ role: "user", content: text });
 
-    const response = await this.provider.chat({
+    let response = await this.provider.chat({
       model: this.model,
       messages: messages,
       temperature: 0,
       maxTokens: optionsMaxTokens(this)
     });
 
-    const parsed = parseSanitizerJson(response.text);
+    let parsed = parseSanitizerJson(response.text);
+    let isValid = false;
+
     if (parsed) {
+      isValid = await validateSanitizerOutput(text, parsed, contextText, this.fallbackDetector);
+    }
+
+    if (!isValid) {
+      const repairMessages = [
+        { role: "system", content: "You are a JSON corrector. You must fix the previous invalid output. Return ONLY the corrected JSON object matching the schema, with no explanation and no markdown. Ensure safe_prompt does NOT contain context references, does NOT answer the request, and stays as close to the original input as possible." },
+        { role: "user", content: `Original Input: ${text}\nPrevious Output (Failed validation): ${response.text}\n\nCorrection instruction: Correct the output JSON. Return ONLY the valid JSON.` }
+      ];
+      try {
+        const repairResponse = await this.provider.chat({
+          model: this.model,
+          messages: repairMessages,
+          temperature: 0,
+          maxTokens: optionsMaxTokens(this)
+        });
+        const repairedParsed = parseSanitizerJson(repairResponse.text);
+        if (repairedParsed) {
+          const repairValid = await validateSanitizerOutput(text, repairedParsed, contextText, this.fallbackDetector);
+          if (repairValid) {
+            parsed = repairedParsed;
+            response = repairResponse;
+            isValid = true;
+          }
+        }
+      } catch (err) {
+        console.error("Sanitizer repair retry failed:", err);
+      }
+    }
+
+    if (isValid && parsed) {
       const enforced = await enforceSafeResult(text, parsed, this.fallbackDetector);
       return normalizeSanitizerResult(text, enforced, response, "ai-sanitizer");
     }
@@ -400,3 +439,103 @@ function extractJson(text) {
     return undefined;
   }
 }
+
+async function validateSanitizerOutput(originalText, parsedJson, contextText = "", detector = null) {
+  if (!parsedJson || typeof parsedJson.safe_prompt !== "string" || !parsedJson.session_map) {
+    return false;
+  }
+  const { safe_prompt, session_map } = parsedJson;
+
+  if (safe_prompt.toUpperCase().includes("[CONTEXT]")) {
+    return false;
+  }
+
+  if (contextText) {
+    const cleanText = contextText
+      .replace(/\[CONTEXT\]/gi, "")
+      .replace(/-\s*(user|assistant):/gi, "")
+      .trim();
+    const segments = cleanText.split(/[.,!?;\n]/);
+    for (const seg of segments) {
+      const trimmed = seg.trim();
+      if (trimmed.length >= 10 && !originalText.toLowerCase().includes(trimmed.toLowerCase())) {
+        if (safe_prompt.toLowerCase().includes(trimmed.toLowerCase())) {
+          return false;
+        }
+      }
+    }
+  }
+
+  const codeBlockCountOriginal = (originalText.match(/```/g) || []).length;
+  const codeBlockCountSafe = (safe_prompt.match(/```/g) || []).length;
+  if (codeBlockCountSafe > codeBlockCountOriginal) {
+    return false;
+  }
+
+  if (safe_prompt.length > originalText.length + 150 && safe_prompt.length > originalText.length * 1.5) {
+    return false;
+  }
+
+  let cleanOriginal = stripUrls(originalText);
+  let cleanSafe = stripUrls(safe_prompt);
+  for (const [dummy, original] of Object.entries(session_map || {})) {
+    if (original && typeof original === "string") {
+      cleanOriginal = cleanOriginal.replace(new RegExp(escapeRegExp(original), "gi"), "");
+    }
+    if (dummy && typeof dummy === "string") {
+      cleanSafe = cleanSafe.replace(new RegExp(escapeRegExp(dummy), "gi"), "");
+    }
+  }
+
+  let hasSensitive = false;
+  if (detector) {
+    const detections = await detector.detect(originalText);
+    const sensitiveDetections = detections.filter(d => shouldRedact(d, { text: originalText }));
+    hasSensitive = sensitiveDetections.length > 0;
+  }
+
+  const threshold = hasSensitive
+    ? Math.max(40, cleanOriginal.trim().length * 0.45)
+    : Math.max(12, cleanOriginal.trim().length * 0.15);
+
+  const dist = getEditDistance(cleanOriginal.trim(), cleanSafe.trim());
+  if (dist > threshold) {
+    return false;
+  }
+
+  return true;
+}
+
+function getEditDistance(a, b) {
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  const matrix = [];
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          Math.min(
+            matrix[i][j - 1] + 1,
+            matrix[i - 1][j] + 1
+          )
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+function stripUrls(str) {
+  return str.replace(/\b(?:https?:\/\/|ftp:\/\/|www\.)[^\s<>"']+/gi, "");
+}
+
+

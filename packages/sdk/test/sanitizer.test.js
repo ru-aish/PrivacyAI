@@ -223,14 +223,14 @@ test("ai sanitizer passes conversation context turns to the provider", async () 
 
   assert.equal(calls.length, 1);
   const messages = calls[0].messages;
-  assert.equal(messages.length, 4); // system, user turn, assistant turn, final user prompt
+  assert.equal(messages.length, 3); // system, reference context, final user prompt
   assert.equal(messages[0].role, "system");
   assert.equal(messages[1].role, "user");
-  assert.equal(messages[1].content, "[CONTEXT] What is my name?");
-  assert.equal(messages[2].role, "assistant");
-  assert.equal(messages[2].content, "[CONTEXT] Your name is Alice.");
-  assert.equal(messages[3].role, "user");
-  assert.equal(messages[3].content, "Now sanitize my email: alice@example.com");
+  assert.match(messages[1].content, /CONVERSATION REFERENCE HISTORY/);
+  assert.match(messages[1].content, /What is my name\?/);
+  assert.match(messages[1].content, /Your name is Alice\./);
+  assert.equal(messages[2].role, "user");
+  assert.equal(messages[2].content, "Now sanitize my email: alice@example.com");
 });
 
 test("ai sanitizer preserves URLs in real developer prompts while redacting personal names", async () => {
