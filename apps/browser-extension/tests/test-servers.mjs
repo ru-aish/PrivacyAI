@@ -69,6 +69,29 @@ export async function startTestServers() {
     lastApiRequest = { url: req.url, body };
     apiRequests.push(lastApiRequest);
 
+    const isCompactor = body.messages?.some((message) => message.role === "system" && message.content.toLowerCase().includes("compaction"));
+
+    if (isCompactor) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                safe_context_summary: "Mock compacted context summary",
+                private_memory: {},
+                open_tasks: [],
+                stable_user_intent: [],
+                privacy_sensitive_refs: [],
+                warnings: []
+              })
+            }
+          }
+        ]
+      }));
+      return;
+    }
+
     const userMessages = body.messages?.filter((message) => message.role === "user") || [];
     const userMessage = userMessages.at(-1)?.content || "";
     const sanitized = mockAiSanitize(userMessage);

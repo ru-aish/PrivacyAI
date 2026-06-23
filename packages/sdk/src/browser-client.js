@@ -1,6 +1,7 @@
 import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { OllamaProvider } from "./providers/ollama.js";
 import { PrivacySanitizer } from "./sanitizer.js";
+import { ContextCompactor } from "./context-compactor.js";
 
 const DEFAULT_CONFIG = {
   apiKey: "not-required",
@@ -23,6 +24,10 @@ export class BrowserPrivateAI {
         ...config,
         provider: this.provider
       });
+    this.compactor = options.compactor || new ContextCompactor({
+      ...config,
+      provider: this.provider
+    });
   }
 
   async sanitize(prompt, options = {}) {

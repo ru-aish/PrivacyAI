@@ -129,11 +129,7 @@ test.describe("PrivacyAI browser extension", () => {
         expect.arrayContaining([
           expect.objectContaining({
             role: "user",
-            content: "[CONTEXT] Earlier I said my email was alice.original@example.com."
-          }),
-          expect.objectContaining({
-            role: "assistant",
-            content: "[CONTEXT] I can help Alice draft a reply."
+            content: expect.stringContaining("Mock compacted context summary")
           })
         ])
       );

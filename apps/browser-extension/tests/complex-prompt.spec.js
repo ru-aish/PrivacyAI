@@ -82,7 +82,7 @@ async function runPromptTest(page, prompt) {
 
   const apiRequest = getLastApiRequest();
   expect(apiRequest).not.toBeNull();
-  const userApiMessage = apiRequest.body.messages.find((message) => message.role === "user")?.content || "";
+  const userApiMessage = apiRequest.body.messages.at(-1)?.content || "";
   expect(userApiMessage).toBe(prompt);
   expect(apiRequest.body.messages.some((message) => message.role === "system")).toBeTruthy();
 

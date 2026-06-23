@@ -25,7 +25,8 @@ const server = http.createServer(async (req, res) => {
 
   lastRequest = { url: req.url, body };
 
-  const userMessage = body.messages?.find((message) => message.role === "user")?.content || "";
+  const userMessages = body.messages?.filter((message) => message.role === "user") || [];
+  const userMessage = userMessages.at(-1)?.content || "";
   const emailMatch = userMessage.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i);
   const originalEmail = emailMatch?.[0] || "secret@example.com";
   const safePrompt = userMessage.replace(originalEmail, "contact1@example.com");

@@ -24,6 +24,19 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
+const tabStateMap = new Map();
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" && tabId && isSupportedChatUrl(tab.url)) {
+    injectPageBridge(tabId).catch(() => {});
+    tabStateMap.delete(tabId);
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  tabStateMap.delete(tabId);
+});
+
 async function getStoredConfig() {
   return chrome.storage.local.get(["provider", "model", "baseUrl", "apiKey", "sanitizeContextBeforeProvider"]);
 }
@@ -43,7 +56,7 @@ async function getClient() {
   return privateClient;
 }
 
-async function sanitizeText(text, context) {
+async function sanitizeText(text, context, tabId) {
   const stored = await getStoredConfig();
   const config = getEffectiveConfig(stored);
 
@@ -52,29 +65,62 @@ async function sanitizeText(text, context) {
     return localSanitize(text);
   }
 
-  let contextToSend = context;
-  const remoteMode = isRemoteProvider(stored);
-  const sanitizeContext = config.sanitizeContextBeforeProvider === true || (remoteMode && config.sanitizeContextBeforeProvider !== false);
+  const client = await getClient();
 
-  if (sanitizeContext && Array.isArray(context) && context.length > 0) {
-    console.log("PrivacyAI: sanitizing context before sending to remote provider");
-    contextToSend = await Promise.all(context.map(async (turn) => {
-      const sanitized = await localSanitize(turn.text);
-      return { ...turn, text: sanitized.sanitizedText };
-    }));
-  } else if (!sanitizeContext && remoteMode && Array.isArray(context) && context.length > 0) {
-    console.warn("PrivacyAI: forwarding raw context to remote provider - enable sanitizeContextBeforeProvider for safety");
+  const key = tabId || "default";
+  if (!tabStateMap.has(key)) {
+    tabStateMap.set(key, {
+      safe_context_summary: "",
+      private_memory: {},
+      open_tasks: [],
+      stable_user_intent: [],
+      privacy_sensitive_refs: [],
+      warnings: [],
+      lastCompactedTurnCount: 0
+    });
+  }
+  let state = tabStateMap.get(key);
+
+  if (state && Array.isArray(context) && context.length > state.lastCompactedTurnCount) {
+    const newTurns = context.slice(state.lastCompactedTurnCount);
+    for (let i = 0; i < newTurns.length; i += 2) {
+      const userTurn = newTurns[i];
+      const assistantTurn = newTurns[i + 1];
+      if (userTurn) {
+        const userPrompt = userTurn.text;
+        const assistantResponse = assistantTurn ? assistantTurn.text : "";
+        try {
+          state = await client.compactor.compact(
+            state,
+            userPrompt,
+            assistantResponse,
+            {}
+          );
+        } catch (compactError) {
+          console.error("Compaction error:", compactError);
+        }
+      }
+    }
+    state.lastCompactedTurnCount = context.length;
+    tabStateMap.set(key, state);
   }
 
   try {
-    const client = await getClient();
     console.log("PrivacyAI: sanitizing via API", {
       provider: config.provider,
       baseUrl: config.baseUrl,
       model: config.model,
-      contextTurns: contextToSend?.length ?? 0
+      compactedContextSummary: state?.safe_context_summary || ""
     });
-    return await client.sanitize(text, { context: contextToSend });
+
+    const options = {};
+    if (state?.safe_context_summary) {
+      options.compactedContextSummary = state.safe_context_summary;
+    } else if (context) {
+      options.context = context;
+    }
+
+    return await client.sanitize(text, options);
   } catch (error) {
     console.error("Sanitization error details:", error, error.details || error.message);
     console.log("PrivacyAI: API failed, falling back to local regex sanitization");
@@ -124,7 +170,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     (async () => {
       try {
-        const result = await sanitizeText(request.text, request.context);
+        const result = await sanitizeText(request.text, request.context, sender.tab?.id);
         console.log("PrivacyAI: sanitize complete", {
           source: result.privacySource || "local-regex",
           preview: result.sanitizedText?.slice(0, 80)

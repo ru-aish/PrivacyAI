@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PrivacyAI Shield",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Protects your privacy by sanitizing PII before sending it to AI models.",
   "permissions": [
     "storage",
