@@ -446,7 +446,8 @@ async function validateSanitizerOutput(originalText, parsedJson, contextText = "
   }
   const { safe_prompt, session_map } = parsedJson;
 
-  if (safe_prompt.toUpperCase().includes("[CONTEXT]")) {
+  const upperSafe = safe_prompt.toUpperCase();
+  if (upperSafe.includes("CONTEXT") || upperSafe.includes("REFERENCE HISTORY")) {
     return false;
   }
 
@@ -507,31 +508,44 @@ async function validateSanitizerOutput(originalText, parsedJson, contextText = "
 }
 
 function getEditDistance(a, b) {
-  if (a.length === 0) return b.length;
-  if (b.length === 0) return a.length;
-  const matrix = [];
-  for (let i = 0; i <= b.length; i++) {
-    matrix[i] = [i];
+  if (a.length > b.length) {
+    const tmp = a;
+    a = b;
+    b = tmp;
   }
-  for (let j = 0; j <= a.length; j++) {
-    matrix[0][j] = j;
+  const lenA = a.length;
+  const lenB = b.length;
+  if (lenA === 0) return lenB;
+  if (lenB === 0) return lenA;
+
+  let prevRow = new Array(lenA + 1);
+  let currRow = new Array(lenA + 1);
+
+  for (let j = 0; j <= lenA; j++) {
+    prevRow[j] = j;
   }
-  for (let i = 1; i <= b.length; i++) {
-    for (let j = 1; j <= a.length; j++) {
+
+  for (let i = 1; i <= lenB; i++) {
+    currRow[0] = i;
+    for (let j = 1; j <= lenA; j++) {
       if (b.charAt(i - 1) === a.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
+        currRow[j] = prevRow[j - 1];
       } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1,
+        currRow[j] = Math.min(
+          prevRow[j - 1] + 1,
           Math.min(
-            matrix[i][j - 1] + 1,
-            matrix[i - 1][j] + 1
+            currRow[j - 1] + 1,
+            prevRow[j] + 1
           )
         );
       }
     }
+    const temp = prevRow;
+    prevRow = currRow;
+    currRow = temp;
   }
-  return matrix[b.length][a.length];
+
+  return prevRow[lenA];
 }
 
 function stripUrls(str) {

@@ -47,7 +47,7 @@ export class ContextCompactor {
       }
       return state; // Fallback to previous state on invalid JSON
     } catch (err) {
-      console.error("ContextCompactor error:", err);
+      console.error("ContextCompactor error:", err?.message || err);
       return state;
     }
   }
@@ -58,8 +58,15 @@ export function parseCompactorJson(text) {
   if (!json || typeof json.safe_context_summary !== "string") {
     return null;
   }
+  
+  let safeSummary = json.safe_context_summary || "";
+  const maxSummaryLength = 2000;
+  if (safeSummary.length > maxSummaryLength) {
+    safeSummary = safeSummary.slice(0, maxSummaryLength);
+  }
+
   return {
-    safe_context_summary: json.safe_context_summary || "",
+    safe_context_summary: safeSummary,
     private_memory: json.private_memory || {},
     open_tasks: Array.isArray(json.open_tasks) ? json.open_tasks : [],
     stable_user_intent: Array.isArray(json.stable_user_intent) ? json.stable_user_intent : [],
