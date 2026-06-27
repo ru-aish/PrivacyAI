@@ -1,6 +1,6 @@
 {
   "name": "@privacy-ai/sdk",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Local-first privacy layer for OpenAI-compatible AI prompts.",
   "type": "module",
   "main": "./src/index.js",
@@ -19,6 +19,11 @@
     "ollama",
     "lm-studio",
     "pii"
+  ],
+  "files": [
+    "src",
+    "examples",
+    "README.md"
   ],
   "license": "MIT",
   "engines": {
