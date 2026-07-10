@@ -1,0 +1,21 @@
+name: Terminal proof
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run normal shell commands
+        run: |
+          set -euxo pipefail
+          pwd
+          uname -a
+          node --version
+          python3 --version
+          git status --short --branch
+          test -f README.md
+          printf 'runner-write-ok\n' > /tmp/github-actions-proof.txt
+          cat /tmp/github-actions-proof.txt
+          sleep 3
