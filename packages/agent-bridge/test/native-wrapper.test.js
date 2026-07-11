@@ -8,11 +8,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  DEFAULT_PRIVACY_MODEL,
   SessionVault,
   assertLocalPrivacyEndpoint,
   buildCodexHookDeclarationArgs,
   codexEffectiveCwd,
   consumeAllowance,
+  listDownloadedLanguageModels,
   loadPrivacyConfig,
   processPromptSubmission,
   rebaseSessionAdditions,
@@ -141,7 +143,34 @@ test("native slash commands without arguments bypass prompt sanitization", async
   assert.equal(called, true);
 });
 
-test("onboarding downloads the chosen model and writes a private config", async () => {
+test("Ollama model discovery lists completion models and excludes embedding-only models", async () => {
+  const models = await listDownloadedLanguageModels({
+    fetch: async (url, init = {}) => {
+      if (url.endsWith("/api/tags")) {
+        return jsonResponse({
+          models: [
+            { name: "ministral-3:3b", size: 3_000_000_000, details: { parameter_size: "3.2B" } },
+            { name: "bge-m3:latest", size: 1_200_000_000 },
+            { name: "llama3.2:3b", size: 2_000_000_000 }
+          ]
+        });
+      }
+
+      const { model } = JSON.parse(init.body);
+      if (model === "bge-m3:latest") {
+        return jsonResponse({ capabilities: ["embedding"], details: { parameter_size: "567M" } });
+      }
+      return jsonResponse({
+        capabilities: ["completion"],
+        details: { parameter_size: model === "ministral-3:3b" ? "3.2B" : "3.0B", quantization_level: "Q4_K_M" }
+      });
+    }
+  });
+
+  assert.deepEqual(models.map(item => item.name), ["ministral-3:3b", "llama3.2:3b"]);
+});
+
+test("onboarding recommends Ministral 3 3B and shows every downloaded language model", async () => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-"));
   const configPath = join(root, "config", "config.json");
   const output = new PassThrough();
@@ -156,25 +185,98 @@ test("onboarding downloads the chosen model and writes a private config", async 
     ollamaPath: "/test/ollama",
     ask: async () => "",
     output,
+    listModels: async () => [
+      { name: "llama3.2:3b", parameterSize: "3.0B", capabilities: ["completion"] },
+      { name: "ministral-3:3b", parameterSize: "3.2B", capabilities: ["completion"] }
+    ],
     runCommand: async (command, args) => {
       commands.push([command, args]);
       return 0;
     },
-    fetch: async () => ({
-      ok: true,
-      async json() {
-        return { models: [{ name: "qwen3.5:2b" }] };
-      }
-    })
+    fetch: async () => jsonResponse({ models: [{ name: "ministral-3:3b" }] })
   });
 
-  assert.deepEqual(commands, [["/test/ollama", ["pull", "qwen3.5:2b"]]]);
+  assert.deepEqual(commands, []);
   const loaded = await loadPrivacyConfig({ path: configPath });
   assert.equal(loaded.configured, true);
-  assert.equal(loaded.config.model, "qwen3.5:2b");
+  assert.equal(loaded.config.model, DEFAULT_PRIVACY_MODEL);
   assert.equal((await stat(configPath)).mode & 0o777, 0o600);
+  assert.match(text, /1\. ministral-3:3b \(recommended, downloaded/);
+  assert.match(text, /2\. llama3\.2:3b \(downloaded/);
+  assert.match(text, /Using downloaded local privacy model: ministral-3:3b/);
   assert.match(text, /privacyai claude/);
   assert.match(text, /github.com\/ru-aish\/PrivacyAI/);
+});
+
+test("onboarding pulls the recommended Ministral model when it is not downloaded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-default-pull-"));
+  const configPath = join(root, "config.json");
+  const output = new PassThrough();
+  let text = "";
+  output.on("data", chunk => {
+    text += chunk.toString();
+  });
+  const commands = [];
+
+  await runOnboarding({
+    configPath,
+    ollamaPath: "/test/ollama",
+    ask: async () => "",
+    output,
+    listModels: async () => ["llama3.2:3b"],
+    runCommand: async (command, args) => {
+      commands.push([command, args]);
+      return 0;
+    },
+    fetch: async () => jsonResponse({ models: [{ name: "ministral-3:3b" }] })
+  });
+
+  assert.deepEqual(commands, [["/test/ollama", ["pull", "ministral-3:3b"]]]);
+  assert.match(text, /1\. ministral-3:3b \(recommended, not downloaded/);
+  assert.equal((await loadPrivacyConfig({ path: configPath })).config.model, DEFAULT_PRIVACY_MODEL);
+});
+
+test("onboarding can select a downloaded model by number without pulling it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-choice-"));
+  const configPath = join(root, "config.json");
+  const commands = [];
+
+  await runOnboarding({
+    configPath,
+    ollamaPath: "/test/ollama",
+    ask: async () => "2",
+    output: new PassThrough(),
+    listModels: async () => ["ministral-3:3b", "llama3.2:3b"],
+    runCommand: async (command, args) => {
+      commands.push([command, args]);
+      return 0;
+    },
+    fetch: async () => jsonResponse({ models: [{ name: "llama3.2:3b" }] })
+  });
+
+  assert.deepEqual(commands, []);
+  assert.equal((await loadPrivacyConfig({ path: configPath })).config.model, "llama3.2:3b");
+});
+
+test("onboarding pulls a model name that is not downloaded", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-custom-"));
+  const configPath = join(root, "config.json");
+  const commands = [];
+
+  await runOnboarding({
+    configPath,
+    ollamaPath: "/test/ollama",
+    ask: async () => "custom-private-model:latest",
+    output: new PassThrough(),
+    listModels: async () => ["ministral-3:3b"],
+    runCommand: async (command, args) => {
+      commands.push([command, args]);
+      return 0;
+    },
+    fetch: async () => jsonResponse({ models: [{ name: "custom-private-model:latest" }] })
+  });
+
+  assert.deepEqual(commands, [["/test/ollama", ["pull", "custom-private-model:latest"]]]);
 });
 
 test("Codex hook arguments declare prompt and Bash lifecycle hooks", () => {
@@ -228,6 +330,16 @@ test("Unix PTY helper reinjects a pending sanitized prompt into an unchanged chi
   assert.equal(result.code, 0);
   assert.match(result.stdout, /RECEIVED:Use \[API_KEY_1\] now/);
 });
+
+function jsonResponse(body, options = {}) {
+  return {
+    ok: options.ok ?? true,
+    status: options.status ?? 200,
+    async json() {
+      return body;
+    }
+  };
+}
 
 function runProcess(command, args) {
   return new Promise((resolve, reject) => {

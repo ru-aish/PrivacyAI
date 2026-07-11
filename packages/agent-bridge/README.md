@@ -55,12 +55,26 @@ privacyai claude
 privacyai codex
 ```
 
-`privacyai onboard` detects Ollama, asks the user to press Enter to download the
-default `qwen3.5:2b` privacy model (or enter another model name), writes a
-private local configuration, checks the model, and prints the project link.
+`privacyai onboard` detects Ollama, lists every downloaded completion-capable
+Ollama model, and lets the user select one by number. The recommended default is
+`ministral-3:3b`; if it is not downloaded, pressing Enter downloads it. The
+onboarding flow writes a private local configuration, checks the selected
+model, and prints the project link.
 
 If the configuration or local model is missing, protected launch fails closed
 and instructs the user to run `privacyai onboard`.
+
+To run the real local-model privacy lifecycle test with Ollama and the
+recommended model:
+
+```bash
+ollama serve
+pnpm --filter @privacy-ai/agent-bridge test:e2e:ministral
+```
+
+The test sends a synthetic email through the actual `ministral-3:3b` sanitizer,
+verifies that the prompt is replaced before the model-facing boundary, restores
+the original only for local Bash execution, and sanitizes the tool result again.
 
 ## Security properties
 

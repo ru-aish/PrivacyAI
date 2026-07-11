@@ -16,7 +16,14 @@ export {
   hookCommands,
   writeClaudeSettings
 } from "./native-hooks.js";
-export { DEFAULT_PRIVACY_MODEL, PROJECT_URL, runOnboarding } from "./onboard.js";
+export {
+  DEFAULT_PRIVACY_MODEL,
+  PROJECT_URL,
+  buildModelChoices,
+  listDownloadedLanguageModels,
+  resolveModelSelection,
+  runOnboarding
+} from "./onboard.js";
 export { createPrivacySanitizer, normalizeSanitizerResult } from "./privacy-sanitizer.js";
 export {
   consumeAllowance,

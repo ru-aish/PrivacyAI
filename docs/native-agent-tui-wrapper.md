@@ -98,19 +98,37 @@ PrivacyAI adds only the block-and-reinject lifecycle around protected prompts.
 
 ## Onboarding
 
-The current default is Ollama with `qwen3.5:2b`:
+The recommended default is Ollama with `ministral-3:3b`:
 
 1. Detect `ollama` on PATH.
-2. Ask the user to press Enter for the default or type another model.
-3. Run `ollama pull <model>` visibly.
-4. Save `~/.config/privacyai/config.json` with mode `0600`.
-5. Verify the model through the local Ollama API.
-6. Print the launch commands and the GitHub project link.
+2. Query Ollama for downloaded models and keep the models that support text completion.
+3. Show `ministral-3:3b` first as the recommended choice, followed by every downloaded usable language model.
+4. Let the user select a downloaded model by number, press Enter for the recommended model, or type another Ollama model name.
+5. Skip the download when the selected model is already installed; otherwise run `ollama pull <model>` visibly.
+6. Save `~/.config/privacyai/config.json` with mode `0600`.
+7. Verify the selected model through the local Ollama API.
+8. Print the launch commands and the GitHub project link.
 
 The launcher refuses to start protected mode when onboarding or the local model
 is missing.
 
 ## Verified results
+
+### Real Ministral local-model lifecycle
+
+The opt-in test command below was run against the downloaded
+`ministral-3:3b` model through the actual prompt-hook and agent-hook executable
+processes, not a mocked sanitizer:
+
+```bash
+pnpm --filter @privacy-ai/agent-bridge test:e2e:ministral
+```
+
+The test verified that the raw synthetic email was absent from the pending
+model-facing prompt, the reversible mapping was saved locally, the original was
+restored only in the Bash command immediately before execution, the local file
+received the original value, and the post-tool hook converted the result back
+to the placeholder.
 
 ### Exact provider-boundary recorders
 

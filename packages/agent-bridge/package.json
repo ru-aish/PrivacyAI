@@ -13,7 +13,8 @@
     "privacyai-prompt-hook": "./bin/privacyai-prompt-hook.js"
   },
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:e2e:ministral": "PRIVACYAI_OLLAMA_E2E=1 node --test test/ministral-ollama.e2e.test.js"
   },
   "dependencies": {
     "@privacy-ai/sdk": "workspace:0.0.2"
