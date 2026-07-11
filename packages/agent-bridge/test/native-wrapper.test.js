@@ -22,6 +22,7 @@ import {
   rebaseSessionAdditions,
   runOnboarding,
   validateNativeArguments,
+  validateNativeEnvironment,
   writeClaudeSettings
 } from "../src/index.js";
 
@@ -110,9 +111,29 @@ test("remote sanitizer endpoints are rejected unless explicitly allowed", () => 
 
 test("argument guards reject flags that can replace privacy hooks", () => {
   assert.throws(() => validateNativeArguments("claude", ["--settings", "other.json"]), /privacy hooks/);
+  assert.throws(() => validateNativeArguments("claude", ["--bare"]), /disables privacy hooks/);
+  assert.throws(() => validateNativeArguments("claude", ["--safe-mode"]), /disables privacy hooks/);
   assert.throws(() => validateNativeArguments("codex", ["--disable", "hooks"]), /hooks disabled/);
   assert.throws(() => validateNativeArguments("codex", ["-c", "hooks.UserPromptSubmit=[]"]), /reserves/);
   assert.doesNotThrow(() => validateNativeArguments("claude", ["--model", "sonnet"]));
+});
+
+test("Claude environment guards reject hook-disabling modes", () => {
+  assert.throws(
+    () => validateNativeEnvironment("claude", { CLAUDE_CODE_SIMPLE: "1" }),
+    /CLAUDE_CODE_SIMPLE disables privacy hooks/
+  );
+  assert.throws(
+    () => validateNativeEnvironment("claude", { CLAUDE_CODE_SAFE_MODE: "true" }),
+    /CLAUDE_CODE_SAFE_MODE disables privacy hooks/
+  );
+  assert.doesNotThrow(() =>
+    validateNativeEnvironment("claude", {
+      CLAUDE_CODE_SIMPLE: "0",
+      CLAUDE_CODE_SAFE_MODE: "false"
+    })
+  );
+  assert.doesNotThrow(() => validateNativeEnvironment("codex", { CLAUDE_CODE_SIMPLE: "1" }));
 });
 
 test("native slash commands without arguments bypass prompt sanitization", async () => {
@@ -411,12 +432,14 @@ test("onboarding pulls a model name that is not downloaded", async () => {
   assert.deepEqual(commands, [["/test/ollama", ["pull", "custom-private-model:latest"]]]);
 });
 
-test("native hook declarations cover every built-in, app, and MCP tool", async () => {
+test("native hook declarations cover every built-in, app, plugin, and MCP tool", async () => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-all-tool-hooks-"));
   const settingsPath = join(root, "claude-settings.json");
   const settings = await writeClaudeSettings(settingsPath, { nodePath: "/usr/bin/node" });
+  assert.equal(settings.disableAllHooks, false);
   assert.equal(settings.hooks.PreToolUse[0].matcher, "*");
   assert.equal(settings.hooks.PostToolUse[0].matcher, "*");
+  assert.equal(settings.hooks.PostToolBatch[0].matcher, undefined);
 
   const args = buildCodexHookDeclarationArgs({ nodePath: "/usr/bin/node" });
   const joined = args.join(" ");

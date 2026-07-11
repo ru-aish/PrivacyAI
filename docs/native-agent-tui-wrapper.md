@@ -66,17 +66,22 @@ The integration test caught and fixed this behavior.
 ## Tool path
 
 For any model-generated tool call, PrivacyAI registers wildcard `PreToolUse` and
-`PostToolUse` hooks. This includes built-in tools, app tools such as Gmail, and
-MCP tools.
+`PostToolUse` hooks. This includes built-in tools, app tools such as Gmail,
+plugin-provided tools, and MCP tools.
 
 `PreToolUse` loads the current CLI session's map and recursively restores values
 inside objects and arrays immediately before execution. The selected tool
 receives the real local value while the model-visible tool call continues to
 contain the placeholder.
 
-After execution, `PostToolUse` recursively replaces all known originals before
-the result is added to remote model context. A recognizable placeholder with no
-mapping is denied rather than executed.
+After successful execution, `PostToolUse` recursively replaces all known
+originals before the result is added to remote model context. Claude does not
+provide equivalent output replacement for every failed-tool error, so a
+`PostToolBatch` guard scans the model-visible result fields and stops the turn
+before the next provider request when a known original remains. Restored
+`tool_input` fields are intentionally excluded from that batch scan because they
+are local execution records. A recognizable placeholder with no mapping is
+denied rather than executed.
 
 ## Native experience preserved
 
@@ -111,7 +116,12 @@ local sanitizer providers:
 9. Print the launch commands and the GitHub project link.
 
 The launcher refuses to start protected mode when onboarding or the local model
-is missing.
+is missing. For Claude, it also rejects `--bare`, `--safe-mode`, custom
+`--settings`, custom `--setting-sources`, and truthy `CLAUDE_CODE_SIMPLE` or
+`CLAUDE_CODE_SAFE_MODE` environments because those paths can suppress the
+privacy hooks. Temporary session settings explicitly set `disableAllHooks` to
+`false` while preserving normal MCP configuration and native `--mcp-config`
+usage.
 
 ## Verified results
 
@@ -162,6 +172,35 @@ The verification checked these boundaries separately:
 - Codex's local execution event retained the original recipient for the native
   audit trail;
 - no real mail provider or external action was involved.
+
+### Native Claude MCP success and failure verification
+
+The installed Claude Code 2.1.206 binary was connected to a local mock Anthropic
+Messages endpoint and a harmless local MCP `send_mail` tool. No external model or
+mail provider was contacted. The task-provider response generated the MCP call
+with `contact1@example.com`; Claude's wildcard `PreToolUse` hook restored a
+synthetic original immediately before the MCP call.
+
+The successful path verified that:
+
+- the fake MCP received the original synthetic recipient;
+- the first and second provider request bodies contained the safe recipient and
+  never the original;
+- `PostToolUse.updatedToolOutput` changed the MCP result back to the safe
+  recipient before the second request;
+- `PostToolBatch` ran after the sanitized result and allowed the turn to continue.
+
+A second fake MCP returned a controlled error containing the restored original.
+Claude's failed-tool path does not expose the same result-replacement mechanism,
+so the `PostToolBatch` guard detected the known original and stopped the turn.
+Only one provider request occurred; the failed result was never submitted in a
+second model request.
+
+The opt-in regression command is:
+
+```bash
+pnpm --filter @privacy-ai/agent-bridge test:e2e:claude
+```
 
 ### Exact provider-boundary recorders
 
@@ -214,7 +253,10 @@ conversation turns remain sanitized.
 
 At the time of implementation:
 
-- bridge tests: 15 passed, 0 failed;
+- SDK tests: 73 passed, 0 failed;
+- bridge tests: 29 passed, 3 optional E2Es skipped, 0 failed;
+- installed Claude MCP E2E: 1 passed, covering both successful and failed tool
+  results;
 - public CLI tests: 1 passed, 0 failed;
 - Python PTY helper compiled successfully;
 - Codex installed-binary hook discovery returned all three expected hooks and
@@ -236,10 +278,11 @@ The vault uses restrictive filesystem permissions but is not encrypted yet.
 Concurrent hook processes can still require a stronger locking strategy for
 production use.
 
-Codex local event records can retain restored tool arguments so the native UI
-and local audit trail show what actually executed. Provider-facing
-`response_item` records remain sanitized; the native fake-MCP verification
-explicitly checks both sides of this boundary.
+Claude hook-event/debug streams and Codex local event records can retain
+restored tool arguments so the native UI and local audit trail show what
+actually executed. Provider-facing Anthropic Messages bodies and Codex
+`response_item` records remain sanitized; the native fake-MCP verifications
+explicitly check both sides of this boundary.
 
 Windows needs a ConPTY implementation. The launcher fails explicitly on Windows
 instead of silently using a non-interactive or unsafe fallback.

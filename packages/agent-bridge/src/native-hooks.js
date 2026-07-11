@@ -16,6 +16,7 @@ export function hookCommands(options = {}) {
 export async function writeClaudeSettings(path, options = {}) {
   const commands = hookCommands(options);
   const settings = {
+    disableAllHooks: false,
     hooks: {
       UserPromptSubmit: [
         {
@@ -35,6 +36,13 @@ export async function writeClaudeSettings(path, options = {}) {
       PostToolUse: [
         {
           matcher: "*",
+          hooks: [
+            { type: "command", command: commands.agent, timeout: options.toolTimeout || 30 }
+          ]
+        }
+      ],
+      PostToolBatch: [
+        {
           hooks: [
             { type: "command", command: commands.agent, timeout: options.toolTimeout || 30 }
           ]

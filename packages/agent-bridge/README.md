@@ -31,7 +31,8 @@ official Claude Code / Codex provider request
 ```
 
 For every model-generated tool call exposed by the native hook system,
-including built-in tools, app tools such as Gmail, and MCP tools:
+including built-in tools, app tools such as Gmail, plugin-provided tools, and
+MCP tools:
 
 ```text
 model emits tool arguments with placeholders
@@ -44,6 +45,8 @@ the selected tool runs with the real values
         │
         ▼
 PostToolUse recursively replaces known real values before the result returns to the model
+        │
+        └─ Claude PostToolBatch stops the turn if a failed/batched result still contains a known original
 ```
 
 ## User commands
@@ -76,6 +79,9 @@ pnpm --filter @privacy-ai/agent-bridge test:e2e:ministral
 
 # LM Studio (start the Local Server first)
 pnpm --filter @privacy-ai/agent-bridge test:e2e:lmstudio
+
+# Installed Claude Code + local mock provider + harmless fake MCP
+pnpm --filter @privacy-ai/agent-bridge test:e2e:claude
 ```
 
 Both local-model tests send a synthetic email through the actual sanitizer,
@@ -95,8 +101,13 @@ and MCP-shaped events to verify all-tool argument restoration.
   loop.
 - Placeholder collisions are rebased across turns in the same session.
 - Unresolved recognizable placeholders fail closed before any hooked tool executes.
-- Claude `--settings` overrides and Codex hook-disabling/config overrides are
-  rejected while protection is active.
+- Claude `--settings`, `--bare`, and `--safe-mode` overrides are rejected while
+  protection is active. Hook-disabling `CLAUDE_CODE_SIMPLE` and
+  `CLAUDE_CODE_SAFE_MODE` environments are rejected too, and the temporary
+  session settings explicitly set `disableAllHooks` to `false`.
+- Claude successful tool results are rewritten through `PostToolUse`; failed or
+  batched results containing known originals stop before the next model request
+  through `PostToolBatch`.
 - Codex hook hashes are discovered through the installed app-server and trusted
   only for the current process. User configuration is not modified.
 
@@ -128,8 +139,10 @@ argument is sanitized like any other prompt.
 
 - The transparent PTY backend currently supports Linux and macOS.
 - Windows is rejected until a ConPTY backend is implemented.
-- Claude can preserve structured sanitized tool output through
-  `updatedToolOutput`.
+- Claude can preserve structured successful tool output through
+  `updatedToolOutput`. Claude does not expose equivalent replacement for every
+  failed-tool error, so PrivacyAI stops that batch before another model request
+  when a known original remains.
 - Codex 0.143.0 can replace model-visible post-tool feedback only as text; when
   sensitive output requires replacement, the current safe fallback can stop
   that turn.
@@ -147,4 +160,7 @@ node --test packages/agent-tui/test/*.test.js
 
 The integration suite also exercises both installed native TUIs against local
 mock task providers and verifies that provider request bodies contain the
-placeholder but not the original private value.
+placeholder but not the original private value. The opt-in Claude MCP test runs
+both a successful result and a controlled failure: the fake MCP receives the
+restored original, successful output is sanitized before the next request, and a
+failed output containing the original is stopped before any next request.

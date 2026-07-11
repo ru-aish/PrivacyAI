@@ -52,6 +52,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   };
 
   try {
+    validateNativeEnvironment(flavor, env);
     let childArgs;
     let cwd = options.cwd || process.cwd();
 
@@ -110,6 +111,9 @@ export function validateNativeArguments(flavor, args) {
   if (flavor === "claude") {
     for (let index = 0; index < args.length; index += 1) {
       const arg = String(args[index]);
+      if (arg === "--bare" || arg === "--safe-mode") {
+        throw new Error(`PrivacyAI cannot launch Claude with ${arg} because it disables privacy hooks.`);
+      }
       if (arg === "--settings" || arg.startsWith("--settings=")) {
         throw new Error("PrivacyAI cannot accept Claude --settings yet because it could replace the privacy hooks.");
       }
@@ -138,4 +142,20 @@ export function validateNativeArguments(flavor, args) {
       }
     }
   }
+}
+
+export function validateNativeEnvironment(flavor, env = process.env) {
+  if (flavor !== "claude") return;
+
+  for (const name of ["CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_SAFE_MODE"]) {
+    if (isTruthyEnvironmentValue(env?.[name])) {
+      throw new Error(`PrivacyAI cannot launch Claude while ${name} disables privacy hooks.`);
+    }
+  }
+}
+
+function isTruthyEnvironmentValue(value) {
+  if (value == null) return false;
+  const normalized = String(value).trim().toLowerCase();
+  return normalized !== "" && !new Set(["0", "false", "no", "off"]).has(normalized);
 }

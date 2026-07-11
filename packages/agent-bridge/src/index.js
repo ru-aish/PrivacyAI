@@ -7,7 +7,11 @@ export {
 } from "./config-store.js";
 export { resolveExecutable } from "./executable.js";
 export { processHookEvent } from "./hook-adapter.js";
-export { launchNativeTui, validateNativeArguments } from "./launcher.js";
+export {
+  launchNativeTui,
+  validateNativeArguments,
+  validateNativeEnvironment
+} from "./launcher.js";
 export { checkPrivacyModel } from "./model-health.js";
 export {
   buildCodexHookDeclarationArgs,

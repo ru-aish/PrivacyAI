@@ -22,6 +22,10 @@ export function processHookEvent(event, options = {}) {
     return processPostToolUse(event, sessionMap, flavor);
   }
 
+  if (eventName === "PostToolBatch") {
+    return processPostToolBatch(event, sessionMap, flavor);
+  }
+
   return null;
 }
 
@@ -79,6 +83,24 @@ function processPostToolUse(event, sessionMap, flavor) {
   }
 
   throw new Error(`Unsupported agent hook flavor: ${flavor}`);
+}
+
+function processPostToolBatch(event, sessionMap, flavor) {
+  if (flavor !== "claude" || !Array.isArray(event.tool_calls)) return null;
+
+  const modelVisibleResults = event.tool_calls.map(call => {
+    if (!call || typeof call !== "object") return call;
+    const { tool_input: _toolInput, ...resultFields } = call;
+    return resultFields;
+  });
+  const sanitizedResults = sanitizeKnownValue(modelVisibleResults, sessionMap);
+  if (valuesEqual(modelVisibleResults, sanitizedResults)) return null;
+
+  return {
+    continue: false,
+    stopReason:
+      "PrivacyAI stopped this turn because a failed or batched tool result still contained local private values."
+  };
 }
 
 function outputAsText(value) {

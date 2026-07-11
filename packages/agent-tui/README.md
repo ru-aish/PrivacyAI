@@ -18,8 +18,10 @@ Studio entry by number, or type another Ollama model name to download it.
 
 The wrapper registers wildcard pre/post hooks for every tool event exposed by
 the native CLI. Placeholder values are restored recursively before built-in,
-app, and MCP tools execute, then known real values are sanitized in tool results
-before they return to the task model.
+app, plugin, and MCP tools execute, then known real values are sanitized in tool
+results before they return to the task model. Claude hook-disabling launch modes
+such as `--bare` and `--safe-mode` are rejected; a failed Claude tool result that
+cannot be rewritten safely is stopped before the next model request.
 
 The implementation lives in `@privacy-ai/agent-bridge`; this package owns only
 the public `privacyai` command so there is one install surface and one tested

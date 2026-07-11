@@ -124,9 +124,11 @@ privacyai codex
 Onboarding scans both Ollama and a running LM Studio local server and lets the
 user choose any usable downloaded language model. The original prompt is then
 sanitized locally before the official CLI sends it. Placeholder values are then
-restored recursively immediately before any hooked built-in, app, or MCP tool
-executes, and known real values in tool results are sanitized before returning
-to the task model. Native local session history may retain real values by
+restored recursively immediately before any hooked built-in, app, plugin, or MCP
+tool executes, and known real values in successful tool results are sanitized
+before returning to the task model. Claude hook-disabling modes are rejected,
+and a failed Claude tool result containing a known original is stopped before a
+next provider request. Native local session history may retain real values by
 design; the remote provider receives the sanitized conversation. Current
 support is Linux and macOS; file contents, project instructions, skills, and
 other context injected before the prompt hook remain outside this boundary.

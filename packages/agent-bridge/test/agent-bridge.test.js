@@ -182,6 +182,51 @@ test("Claude PostToolUse preserves structured output shape", () => {
   });
 });
 
+test("Claude PostToolBatch fails closed when a failed result still contains a known original", () => {
+  const result = processHookEvent(
+    {
+      hook_event_name: "PostToolBatch",
+      tool_calls: [
+        {
+          tool_name: "mcp__example__send_mail",
+          tool_input: { to: "intended.recipient@example.test" },
+          tool_use_id: "toolu_test",
+          error: "Delivery failed for intended.recipient@example.test"
+        }
+      ]
+    },
+    {
+      flavor: "claude",
+      sessionMap: { "contact1@example.com": "intended.recipient@example.test" }
+    }
+  );
+
+  assert.equal(result.continue, false);
+  assert.match(result.stopReason, /failed or batched tool result/);
+});
+
+test("Claude PostToolBatch ignores restored tool inputs after outputs were sanitized", () => {
+  const result = processHookEvent(
+    {
+      hook_event_name: "PostToolBatch",
+      tool_calls: [
+        {
+          tool_name: "mcp__example__send_mail",
+          tool_input: { to: "intended.recipient@example.test" },
+          tool_use_id: "toolu_test",
+          tool_response: "Fake mail recorded for contact1@example.com"
+        }
+      ]
+    },
+    {
+      flavor: "claude",
+      sessionMap: { "contact1@example.com": "intended.recipient@example.test" }
+    }
+  );
+
+  assert.equal(result, null);
+});
+
 test("Codex PostToolUse uses sanitized feedback replacement", () => {
   const result = processHookEvent(
     {

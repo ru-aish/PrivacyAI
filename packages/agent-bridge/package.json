@@ -1,7 +1,7 @@
 {
   "name": "@privacy-ai/agent-bridge",
   "version": "0.0.1",
-  "description": "Local prompt and Bash privacy engine for native agent CLIs.",
+  "description": "Local prompt and all-tool privacy engine for native agent CLIs.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -15,7 +15,8 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:e2e:ministral": "PRIVACYAI_OLLAMA_E2E=1 node --test test/ministral-ollama.e2e.test.js",
-    "test:e2e:lmstudio": "PRIVACYAI_LM_STUDIO_E2E=1 node --test test/lmstudio.e2e.test.js"
+    "test:e2e:lmstudio": "PRIVACYAI_LM_STUDIO_E2E=1 node --test test/lmstudio.e2e.test.js",
+    "test:e2e:claude": "PRIVACYAI_CLAUDE_NATIVE_E2E=1 node --test test/native-claude.e2e.test.js"
   },
   "dependencies": {
     "@privacy-ai/sdk": "workspace:0.0.2"
