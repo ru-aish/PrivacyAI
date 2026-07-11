@@ -26,7 +26,7 @@ export async function writeClaudeSettings(path, options = {}) {
       ],
       PreToolUse: [
         {
-          matcher: "Bash",
+          matcher: "*",
           hooks: [
             { type: "command", command: commands.agent, timeout: options.toolTimeout || 30 }
           ]
@@ -34,7 +34,7 @@ export async function writeClaudeSettings(path, options = {}) {
       ],
       PostToolUse: [
         {
-          matcher: "Bash",
+          matcher: "*",
           hooks: [
             { type: "command", command: commands.agent, timeout: options.toolTimeout || 30 }
           ]
@@ -57,9 +57,9 @@ export function buildCodexHookDeclarationArgs(options = {}) {
     "-c",
     `hooks.UserPromptSubmit=[{hooks=[{type="command",command=${tomlString(commands.prompt)},timeout=${promptTimeout}}]}]`,
     "-c",
-    `hooks.PreToolUse=[{matcher="^Bash$",hooks=[{type="command",command=${tomlString(commands.agent)},timeout=${toolTimeout}}]}]`,
+    `hooks.PreToolUse=[{matcher="^.*$",hooks=[{type="command",command=${tomlString(commands.agent)},timeout=${toolTimeout}}]}]`,
     "-c",
-    `hooks.PostToolUse=[{matcher="^Bash$",hooks=[{type="command",command=${tomlString(commands.agent)},timeout=${toolTimeout}}]}]`
+    `hooks.PostToolUse=[{matcher="^.*$",hooks=[{type="command",command=${tomlString(commands.agent)},timeout=${toolTimeout}}]}]`
   ];
 }
 

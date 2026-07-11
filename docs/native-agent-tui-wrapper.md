@@ -41,7 +41,7 @@ The implementation package:
 - transparent Unix PTY host;
 - temporary Claude hook settings;
 - per-process Codex hook declaration and trust resolution;
-- Bash pre/post tool transformations;
+- all-tool pre/post transformations for built-in, app, and MCP tools;
 - onboarding.
 
 ## Prompt path
@@ -63,21 +63,20 @@ The separate Enter event is important: Claude Code can leave pasted text in the
 composer when the bracketed-paste terminator and Enter arrive in one PTY write.
 The integration test caught and fixed this behavior.
 
-## Bash path
+## Tool path
 
-For a model-generated command such as:
+For any model-generated tool call, PrivacyAI registers wildcard `PreToolUse` and
+`PostToolUse` hooks. This includes built-in tools, app tools such as Gmail, and
+MCP tools.
 
-```bash
-printf '%s' '[API_KEY_1]' > .env
-```
+`PreToolUse` loads the current CLI session's map and recursively restores values
+inside objects and arrays immediately before execution. The selected tool
+receives the real local value while the model-visible tool call continues to
+contain the placeholder.
 
-`PreToolUse` loads the current CLI session's map and changes the command input
-immediately before execution. Bash receives the real local value. The model's
-stored tool call continues to contain the placeholder.
-
-After execution, `PostToolUse` replaces all known originals before the result is
-added to remote model context. A recognizable placeholder with no mapping is
-denied rather than executed.
+After execution, `PostToolUse` recursively replaces all known originals before
+the result is added to remote model context. A recognizable placeholder with no
+mapping is denied rather than executed.
 
 ## Native experience preserved
 
@@ -143,8 +142,26 @@ the real loaded model:
 pnpm --filter @privacy-ai/agent-bridge test:e2e:lmstudio
 ```
 
-It verified prompt sanitization, local reversible-map persistence, Bash-only
+It verified prompt sanitization, local reversible-map persistence, pre-tool
 restoration, successful local execution, and post-tool re-sanitization.
+
+### Native all-tool MCP verification
+
+A harmless local MCP server exposing `send_mail` was connected to the installed
+Codex TUI. The local privacy model changed a synthetic recipient to
+`contact1@example.com` before the task-model request. Codex generated the MCP
+call with that safe recipient, the wildcard `PreToolUse` hook restored the
+original recipient before the fake server received it, and `PostToolUse`
+returned a sanitized result to the model.
+
+The verification checked these boundaries separately:
+
+- the fake MCP server received the original synthetic recipient;
+- model-facing `response_item` records contained the safe replacement and never
+  the original;
+- Codex's local execution event retained the original recipient for the native
+  audit trail;
+- no real mail provider or external action was involved.
 
 ### Exact provider-boundary recorders
 
@@ -205,9 +222,10 @@ At the time of implementation:
 
 ## Deliberate limitations
 
-Phase one does not sanitize files, project instructions, skills, MCP resource
-contents, Edit/Write tools, or arbitrary local context. It protects prompts and
-model-generated Bash lifecycle data only.
+Phase one does not sanitize file contents, project instructions, skills, MCP
+resource contents, or arbitrary local context before those values enter the
+model conversation. It protects user prompts and every tool lifecycle event the
+native CLI exposes through `PreToolUse` and `PostToolUse`.
 
 Assistant prose remains placeholder-based. Restoring every placeholder by
 blindly rewriting terminal output would risk exposing real values inside local
@@ -217,6 +235,11 @@ boundary rather than generic PTY text replacement.
 The vault uses restrictive filesystem permissions but is not encrypted yet.
 Concurrent hook processes can still require a stronger locking strategy for
 production use.
+
+Codex local event records can retain restored tool arguments so the native UI
+and local audit trail show what actually executed. Provider-facing
+`response_item` records remain sanitized; the native fake-MCP verification
+explicitly checks both sides of this boundary.
 
 Windows needs a ConPTY implementation. The launcher fails explicitly on Windows
 instead of silently using a non-interactive or unsafe fallback.

@@ -30,19 +30,20 @@ transparent PTY reinjects sanitized prompt into the same composer
 official Claude Code / Codex provider request
 ```
 
-For model-generated Bash commands:
+For every model-generated tool call exposed by the native hook system,
+including built-in tools, app tools such as Gmail, and MCP tools:
 
 ```text
-model emits command with placeholder
+model emits tool arguments with placeholders
         │
         ▼
-PreToolUse restores mapped values immediately before local execution
+PreToolUse recursively restores mapped values immediately before execution
         │
         ▼
-Bash runs with the real value
+the selected tool runs with the real values
         │
         ▼
-PostToolUse replaces known real values before the result returns to the model
+PostToolUse recursively replaces known real values before the result returns to the model
 ```
 
 ## User commands
@@ -77,9 +78,11 @@ pnpm --filter @privacy-ai/agent-bridge test:e2e:ministral
 pnpm --filter @privacy-ai/agent-bridge test:e2e:lmstudio
 ```
 
-Both tests send a synthetic email through the actual local sanitizer, verify
-that the prompt is replaced before the model-facing boundary, restore the
-original only for local Bash execution, and sanitize the tool result again.
+Both local-model tests send a synthetic email through the actual sanitizer,
+verify that the prompt is replaced before the model-facing boundary, restore
+the original only immediately before tool execution, and sanitize the tool
+result again. The regular suite also drives the real hook executable with Gmail-
+and MCP-shaped events to verify all-tool argument restoration.
 
 ## Security properties
 
@@ -91,7 +94,7 @@ original only for local Bash execution, and sanitize the tool result again.
 - Sanitized reinjection has a one-time allowance, preventing an infinite hook
   loop.
 - Placeholder collisions are rebased across turns in the same session.
-- Unresolved recognizable placeholders fail closed before Bash execution.
+- Unresolved recognizable placeholders fail closed before any hooked tool executes.
 - Claude `--settings` overrides and Codex hook-disabling/config overrides are
   rejected while protection is active.
 - Codex hook hashes are discovered through the installed app-server and trusted
@@ -103,15 +106,16 @@ Protected now:
 
 - ordinary user prompts;
 - slash commands that include arguments;
-- model-generated Bash arguments;
-- known sensitive values in Bash stdout/stderr;
+- recursively nested arguments for every tool event exposed by Claude Code or
+  Codex hooks, including built-in tools, app tools such as Gmail, and MCP tools;
+- known sensitive values in every hooked tool result;
 - per-session reversible mappings.
 
 Not protected yet:
 
-- file reads and repository context;
+- new sensitive values introduced only by file contents or repository context
+  before they exist in the session map;
 - `AGENTS.md`, `CLAUDE.md`, skills, or system/project instructions;
-- arbitrary Edit/Write/Notebook tools;
 - direct shell commands entered by the user outside the model tool lifecycle;
 - brand-new sensitive values appearing only in tool output;
 - automatic restoration of placeholders in assistant prose.
@@ -129,8 +133,8 @@ argument is sanitized like any other prompt.
 - Codex 0.143.0 can replace model-visible post-tool feedback only as text; when
   sensitive output requires replacement, the current safe fallback can stop
   that turn.
-- The original prompt and restored command may remain in the user's local CLI
-  history/transcript and terminal display. This is deliberate: local state is
+- The original prompt and restored tool arguments may remain in the user's local
+  CLI history/transcript and terminal display. This is deliberate: local state is
   usable in real form, while provider-facing turns stay sanitized.
 - Session vault files are permission-protected but not yet encrypted at rest.
 

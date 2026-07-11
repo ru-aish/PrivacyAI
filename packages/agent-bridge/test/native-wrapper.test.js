@@ -21,7 +21,8 @@ import {
   processPromptSubmission,
   rebaseSessionAdditions,
   runOnboarding,
-  validateNativeArguments
+  validateNativeArguments,
+  writeClaudeSettings
 } from "../src/index.js";
 
 const PTY_HELPER = fileURLToPath(new URL("../bin/privacyai-pty.py", import.meta.url));
@@ -410,13 +411,20 @@ test("onboarding pulls a model name that is not downloaded", async () => {
   assert.deepEqual(commands, [["/test/ollama", ["pull", "custom-private-model:latest"]]]);
 });
 
-test("Codex hook arguments declare prompt and Bash lifecycle hooks", () => {
+test("native hook declarations cover every built-in, app, and MCP tool", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-all-tool-hooks-"));
+  const settingsPath = join(root, "claude-settings.json");
+  const settings = await writeClaudeSettings(settingsPath, { nodePath: "/usr/bin/node" });
+  assert.equal(settings.hooks.PreToolUse[0].matcher, "*");
+  assert.equal(settings.hooks.PostToolUse[0].matcher, "*");
+
   const args = buildCodexHookDeclarationArgs({ nodePath: "/usr/bin/node" });
   const joined = args.join(" ");
   assert.match(joined, /UserPromptSubmit/);
   assert.match(joined, /PreToolUse/);
   assert.match(joined, /PostToolUse/);
-  assert.match(joined, /\^Bash\$/);
+  assert.match(joined, /\^\.\*\$/);
+  assert.doesNotMatch(joined, /\^Bash\$/);
   assert.equal(codexEffectiveCwd(["resume", "--last", "-C", "/tmp/project"]), "/tmp/project");
 });
 
