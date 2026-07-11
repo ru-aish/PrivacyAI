@@ -55,26 +55,31 @@ privacyai claude
 privacyai codex
 ```
 
-`privacyai onboard` detects Ollama, lists every downloaded completion-capable
-Ollama model, and lets the user select one by number. The recommended default is
-`ministral-3:3b`; if it is not downloaded, pressing Enter downloads it. The
-onboarding flow writes a private local configuration, checks the selected
-model, and prints the project link.
+`privacyai onboard` scans both Ollama and a running LM Studio local server,
+filters out embedding-only models, and presents every usable downloaded LLM/VLM
+in one numbered menu. The recommended model remains Ministral 3 3B. If a usable
+Ministral copy is already available in either provider, pressing Enter chooses
+that copy; otherwise the Ollama `ministral-3:3b` model is offered for download.
+Selecting an LM Studio entry saves the explicit `lm-studio` provider and its
+local OpenAI-compatible base URL.
 
 If the configuration or local model is missing, protected launch fails closed
 and instructs the user to run `privacyai onboard`.
 
-To run the real local-model privacy lifecycle test with Ollama and the
-recommended model:
+To run the real local-model privacy lifecycle tests:
 
 ```bash
+# Ollama
 ollama serve
 pnpm --filter @privacy-ai/agent-bridge test:e2e:ministral
+
+# LM Studio (start the Local Server first)
+pnpm --filter @privacy-ai/agent-bridge test:e2e:lmstudio
 ```
 
-The test sends a synthetic email through the actual `ministral-3:3b` sanitizer,
-verifies that the prompt is replaced before the model-facing boundary, restores
-the original only for local Bash execution, and sanitizes the tool result again.
+Both tests send a synthetic email through the actual local sanitizer, verify
+that the prompt is replaced before the model-facing boundary, restore the
+original only for local Bash execution, and sanitize the tool result again.
 
 ## Security properties
 

@@ -98,16 +98,18 @@ PrivacyAI adds only the block-and-reinject lifecycle around protected prompts.
 
 ## Onboarding
 
-The recommended default is Ollama with `ministral-3:3b`:
+The recommended model is Ministral 3 3B, with Ollama and LM Studio supported as
+local sanitizer providers:
 
-1. Detect `ollama` on PATH.
-2. Query Ollama for downloaded models and keep the models that support text completion.
-3. Show `ministral-3:3b` first as the recommended choice, followed by every downloaded usable language model.
-4. Let the user select a downloaded model by number, press Enter for the recommended model, or type another Ollama model name.
-5. Skip the download when the selected model is already installed; otherwise run `ollama pull <model>` visibly.
-6. Save `~/.config/privacyai/config.json` with mode `0600`.
-7. Verify the selected model through the local Ollama API.
-8. Print the launch commands and the GitHub project link.
+1. Detect `ollama` on PATH and probe its local API for downloaded completion-capable models.
+2. Probe the LM Studio local server at `http://127.0.0.1:1234` by default.
+3. Use LM Studio's model metadata to include LLM/VLM entries and exclude embedding-only entries.
+4. Merge both providers into one numbered menu with provider, load state, quantization, and context metadata.
+5. Prefer an already-downloaded Ministral 3 3B copy; if neither provider has one, offer Ollama `ministral-3:3b` as the default download.
+6. Let the user select any listed model by number or type another Ollama model name.
+7. Save `provider`, `model`, and the provider-specific loopback base URL in `~/.config/privacyai/config.json` with mode `0600`.
+8. Verify the selected model through the corresponding local provider API.
+9. Print the launch commands and the GitHub project link.
 
 The launcher refuses to start protected mode when onboarding or the local model
 is missing.
@@ -129,6 +131,20 @@ model-facing prompt, the reversible mapping was saved locally, the original was
 restored only in the Bash command immediately before execution, the local file
 received the original value, and the post-tool hook converted the result back
 to the placeholder.
+
+### Real LM Studio local-model lifecycle
+
+The LM Studio server was discovered through its local model API, and onboarding
+selected `mistralai/ministral-3-3b` with provider `lm-studio` and base URL
+`http://127.0.0.1:1234/v1`. The executable-hook E2E command was then run against
+the real loaded model:
+
+```bash
+pnpm --filter @privacy-ai/agent-bridge test:e2e:lmstudio
+```
+
+It verified prompt sanitization, local reversible-map persistence, Bash-only
+restoration, successful local execution, and post-tool re-sanitization.
 
 ### Exact provider-boundary recorders
 

@@ -12,9 +12,11 @@ import {
   SessionVault,
   assertLocalPrivacyEndpoint,
   buildCodexHookDeclarationArgs,
+  buildModelChoices,
   codexEffectiveCwd,
   consumeAllowance,
   listDownloadedLanguageModels,
+  listLmStudioLanguageModels,
   loadPrivacyConfig,
   processPromptSubmission,
   rebaseSessionAdditions,
@@ -170,6 +172,131 @@ test("Ollama model discovery lists completion models and excludes embedding-only
   assert.deepEqual(models.map(item => item.name), ["ministral-3:3b", "llama3.2:3b"]);
 });
 
+test("LM Studio discovery lists LLM and VLM models and excludes embeddings", async () => {
+  const models = await listLmStudioLanguageModels({
+    baseURL: "http://127.0.0.1:1234/v1",
+    apiKey: "test-token",
+    fetch: async (url, init = {}) => {
+      assert.equal(url, "http://127.0.0.1:1234/api/v0/models");
+      assert.equal(init.headers.authorization, "Bearer test-token");
+      return jsonResponse({
+        data: [
+          {
+            id: "mistralai/ministral-3-3b",
+            type: "vlm",
+            state: "loaded",
+            quantization: "Q4_K_M",
+            max_context_length: 262144
+          },
+          {
+            id: "llama-3.2-3b-instruct",
+            type: "llm",
+            state: "not-loaded",
+            quantization: "Q4_K_M",
+            max_context_length: 131072
+          },
+          {
+            id: "text-embedding-bge-m3",
+            type: "embeddings",
+            state: "not-loaded"
+          }
+        ]
+      });
+    }
+  });
+
+  assert.deepEqual(models.map(item => item.name), [
+    "mistralai/ministral-3-3b",
+    "llama-3.2-3b-instruct"
+  ]);
+  assert.equal(models[0].provider, "lm-studio");
+  assert.equal(models[0].baseURL, "http://127.0.0.1:1234/v1");
+  assert.equal(models[0].state, "loaded");
+});
+
+test("a downloaded LM Studio Ministral outranks an unavailable Ollama default", () => {
+  const choices = buildModelChoices(
+    [],
+    [{ name: "mistralai/ministral-3-3b", state: "loaded", type: "vlm" }],
+    { includeOllamaDefault: true }
+  );
+
+  assert.equal(choices[0].provider, "lm-studio");
+  assert.equal(choices[0].name, "mistralai/ministral-3-3b");
+  assert.equal(choices[0].recommended, true);
+  assert.equal(choices[1].provider, "ollama");
+  assert.equal(choices[1].downloaded, false);
+});
+
+test("onboarding shows Ollama and LM Studio models in one numbered menu", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-multi-provider-"));
+  const configPath = join(root, "config.json");
+  const output = new PassThrough();
+  let text = "";
+  output.on("data", chunk => {
+    text += chunk.toString();
+  });
+
+  await runOnboarding({
+    configPath,
+    ollamaPath: "/test/ollama",
+    ask: async () => "2",
+    output,
+    listModels: async () => ["ministral-3:3b"],
+    listLmStudioModels: async () => [
+      {
+        name: "mistralai/ministral-3-3b",
+        type: "vlm",
+        state: "loaded",
+        quantizationLevel: "Q4_K_M",
+        maxContextLength: 262144
+      },
+      {
+        name: "llama-3.2-3b-instruct",
+        type: "llm",
+        state: "not-loaded",
+        quantizationLevel: "Q4_K_M",
+        maxContextLength: 131072
+      }
+    ],
+    fetch: async url => {
+      if (url.endsWith("/models")) {
+        return jsonResponse({ data: [{ id: "mistralai/ministral-3-3b" }] });
+      }
+      return jsonResponse({ models: [{ name: "ministral-3:3b" }] });
+    }
+  });
+
+  const loaded = await loadPrivacyConfig({ path: configPath });
+  assert.equal(loaded.config.provider, "lm-studio");
+  assert.equal(loaded.config.model, "mistralai/ministral-3-3b");
+  assert.equal(loaded.config.baseURL, "http://127.0.0.1:1234/v1");
+  assert.match(text, /1\. ministral-3:3b \(recommended, Ollama, downloaded/);
+  assert.match(text, /2\. mistralai\/ministral-3-3b \(LM Studio, loaded, VLM, Q4_K_M, 262K ctx/);
+  assert.match(text, /3\. llama-3\.2-3b-instruct \(LM Studio, not-loaded, LLM/);
+  assert.match(text, /Using LM Studio privacy model: mistralai\/ministral-3-3b/);
+});
+
+test("LM Studio-only onboarding works when Ollama is not installed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-lm-only-"));
+  const configPath = join(root, "config.json");
+
+  await runOnboarding({
+    configPath,
+    ollamaPath: null,
+    ask: async () => "",
+    output: new PassThrough(),
+    listLmStudioModels: async () => [
+      { name: "mistralai/ministral-3-3b", type: "vlm", state: "loaded" }
+    ],
+    fetch: async () => jsonResponse({ data: [{ id: "mistralai/ministral-3-3b" }] })
+  });
+
+  const loaded = await loadPrivacyConfig({ path: configPath });
+  assert.equal(loaded.config.provider, "lm-studio");
+  assert.equal(loaded.config.model, "mistralai/ministral-3-3b");
+});
+
 test("onboarding recommends Ministral 3 3B and shows every downloaded language model", async () => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-"));
   const configPath = join(root, "config", "config.json");
@@ -189,6 +316,7 @@ test("onboarding recommends Ministral 3 3B and shows every downloaded language m
       { name: "llama3.2:3b", parameterSize: "3.0B", capabilities: ["completion"] },
       { name: "ministral-3:3b", parameterSize: "3.2B", capabilities: ["completion"] }
     ],
+    listLmStudioModels: async () => [],
     runCommand: async (command, args) => {
       commands.push([command, args]);
       return 0;
@@ -201,9 +329,9 @@ test("onboarding recommends Ministral 3 3B and shows every downloaded language m
   assert.equal(loaded.configured, true);
   assert.equal(loaded.config.model, DEFAULT_PRIVACY_MODEL);
   assert.equal((await stat(configPath)).mode & 0o777, 0o600);
-  assert.match(text, /1\. ministral-3:3b \(recommended, downloaded/);
-  assert.match(text, /2\. llama3\.2:3b \(downloaded/);
-  assert.match(text, /Using downloaded local privacy model: ministral-3:3b/);
+  assert.match(text, /1\. ministral-3:3b \(recommended, Ollama, downloaded/);
+  assert.match(text, /2\. llama3\.2:3b \(Ollama, downloaded/);
+  assert.match(text, /Using Ollama privacy model: ministral-3:3b/);
   assert.match(text, /privacyai claude/);
   assert.match(text, /github.com\/ru-aish\/PrivacyAI/);
 });
@@ -224,6 +352,7 @@ test("onboarding pulls the recommended Ministral model when it is not downloaded
     ask: async () => "",
     output,
     listModels: async () => ["llama3.2:3b"],
+    listLmStudioModels: async () => [],
     runCommand: async (command, args) => {
       commands.push([command, args]);
       return 0;
@@ -232,7 +361,7 @@ test("onboarding pulls the recommended Ministral model when it is not downloaded
   });
 
   assert.deepEqual(commands, [["/test/ollama", ["pull", "ministral-3:3b"]]]);
-  assert.match(text, /1\. ministral-3:3b \(recommended, not downloaded/);
+  assert.match(text, /1\. ministral-3:3b \(recommended, Ollama, not downloaded/);
   assert.equal((await loadPrivacyConfig({ path: configPath })).config.model, DEFAULT_PRIVACY_MODEL);
 });
 
@@ -247,6 +376,7 @@ test("onboarding can select a downloaded model by number without pulling it", as
     ask: async () => "2",
     output: new PassThrough(),
     listModels: async () => ["ministral-3:3b", "llama3.2:3b"],
+    listLmStudioModels: async () => [],
     runCommand: async (command, args) => {
       commands.push([command, args]);
       return 0;
@@ -269,6 +399,7 @@ test("onboarding pulls a model name that is not downloaded", async () => {
     ask: async () => "custom-private-model:latest",
     output: new PassThrough(),
     listModels: async () => ["ministral-3:3b"],
+    listLmStudioModels: async () => [],
     runCommand: async (command, args) => {
       commands.push([command, args]);
       return 0;

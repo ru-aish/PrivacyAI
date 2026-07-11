@@ -121,10 +121,12 @@ privacyai claude
 privacyai codex
 ```
 
-The original prompt is sanitized locally before the official CLI sends it, and
-model-generated Bash placeholders are restored immediately before local
-execution. Native local session history may retain real values by design; the
-remote provider receives the sanitized conversation. Current support is Linux
+Onboarding scans both Ollama and a running LM Studio local server and lets the
+user choose any usable downloaded language model. The original prompt is then
+sanitized locally before the official CLI sends it, and model-generated Bash
+placeholders are restored immediately before local execution. Native local
+session history may retain real values by design; the remote provider receives
+the sanitized conversation. Current support is Linux
 and macOS; the phase-one boundary does not yet include file reads, project
 instructions, skills, or arbitrary file tools.
 See `docs/native-agent-tui-wrapper.md` for the design and verified results.

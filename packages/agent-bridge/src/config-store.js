@@ -46,7 +46,7 @@ export function normalizeConfig(value) {
 
   if (!model) throw new TypeError("PrivacyAI configuration requires a model.");
   if (!baseURL) throw new TypeError("PrivacyAI configuration requires a baseURL.");
-  if (!new Set(["ollama", "openai-compatible"]).has(provider)) {
+  if (!new Set(["ollama", "lm-studio", "openai-compatible"]).has(provider)) {
     throw new TypeError(`Unsupported PrivacyAI provider: ${provider}`);
   }
   assertLocalPrivacyEndpoint(baseURL);

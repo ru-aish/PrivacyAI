@@ -11,10 +11,10 @@ privacyai claude
 privacyai codex
 ```
 
-During onboarding, PrivacyAI lists the downloaded Ollama language models that
-support text completion. `ministral-3:3b` is shown first as the recommended
-choice; select another downloaded model by number or type any Ollama model name
-to download it.
+During onboarding, PrivacyAI scans Ollama and a running LM Studio local server,
+then lists every usable downloaded LLM/VLM in one numbered menu. Embedding-only
+models are excluded. Ministral 3 3B remains recommended; select any Ollama or LM
+Studio entry by number, or type another Ollama model name to download it.
 
 The implementation lives in `@privacy-ai/agent-bridge`; this package owns only
 the public `privacyai` command so there is one install surface and one tested

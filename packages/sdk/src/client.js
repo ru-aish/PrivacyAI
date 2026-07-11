@@ -76,7 +76,10 @@ function createProvider(config) {
   if (config.provider === "ollama") {
     return new OllamaProvider(config);
   }
-  return new OpenAICompatibleProvider(config);
+  if (config.provider === "lm-studio" || config.provider === "openai-compatible") {
+    return new OpenAICompatibleProvider(config);
+  }
+  throw new TypeError(`Unsupported PrivateAI provider: ${config.provider}`);
 }
 
 function isProviderObject(provider) {

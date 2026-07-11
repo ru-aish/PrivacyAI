@@ -17,10 +17,13 @@ export {
   writeClaudeSettings
 } from "./native-hooks.js";
 export {
+  DEFAULT_LM_STUDIO_BASE_URL,
+  DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_PRIVACY_MODEL,
   PROJECT_URL,
   buildModelChoices,
   listDownloadedLanguageModels,
+  listLmStudioLanguageModels,
   resolveModelSelection,
   runOnboarding
 } from "./onboard.js";
