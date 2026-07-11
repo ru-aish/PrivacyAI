@@ -1,0 +1,30 @@
+{
+  "name": "@privacy-ai/agent-bridge",
+  "version": "0.0.1",
+  "description": "Local prompt and Bash privacy engine for native agent CLIs.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./cli": "./src/cli.js"
+  },
+  "bin": {
+    "privacyai-agent-hook": "./bin/privacyai-agent-hook.js",
+    "privacyai-prompt-hook": "./bin/privacyai-prompt-hook.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@privacy-ai/sdk": "workspace:0.0.2"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "license": "MIT",
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ]
+}

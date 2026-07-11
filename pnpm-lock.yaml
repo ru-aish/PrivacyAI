@@ -34,6 +34,18 @@ importers:
         specifier: workspace:*
         version: link:../../packages/sdk
 
+  packages/agent-bridge:
+    dependencies:
+      '@privacy-ai/sdk':
+        specifier: workspace:0.0.2
+        version: link:../sdk
+
+  packages/agent-tui:
+    dependencies:
+      '@privacy-ai/agent-bridge':
+        specifier: workspace:0.0.1
+        version: link:../agent-bridge
+
   packages/sdk: {}
 
 packages:
