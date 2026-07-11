@@ -109,3 +109,22 @@ console.log(safePrompt);
 * **Extension Source:** [apps/browser-extension/README.md](apps/browser-extension/README.md)
 * **Architecture Docs:** [docs/architecture.md](docs/architecture.md)
 * **Code Examples:** [examples/README.md](examples/README.md)
+## Native Claude Code and Codex protection
+
+PrivacyAI can wrap the user's existing agent CLI without proxying inference or
+replacing its terminal interface:
+
+```bash
+npm install --global @privacy-ai/agent-tui
+privacyai onboard
+privacyai claude
+privacyai codex
+```
+
+The original prompt is sanitized locally before the official CLI sends it, and
+model-generated Bash placeholders are restored immediately before local
+execution. Native local session history may retain real values by design; the
+remote provider receives the sanitized conversation. Current support is Linux
+and macOS; the phase-one boundary does not yet include file reads, project
+instructions, skills, or arbitrary file tools.
+See `docs/native-agent-tui-wrapper.md` for the design and verified results.
