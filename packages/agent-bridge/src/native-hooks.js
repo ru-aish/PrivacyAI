@@ -41,6 +41,14 @@ export async function writeClaudeSettings(path, options = {}) {
           ]
         }
       ],
+      PostToolUseFailure: [
+        {
+          matcher: "*",
+          hooks: [
+            { type: "command", command: commands.agent, timeout: options.toolTimeout || 30 }
+          ]
+        }
+      ],
       PostToolBatch: [
         {
           hooks: [

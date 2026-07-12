@@ -686,6 +686,8 @@ test("native hook declarations cover every built-in, app, plugin, and MCP tool",
   assert.equal(settings.disableAllHooks, false);
   assert.equal(settings.hooks.PreToolUse[0].matcher, "*");
   assert.equal(settings.hooks.PostToolUse[0].matcher, "*");
+  assert.equal(settings.hooks.PostToolUseFailure[0].matcher, "*");
+  assert.equal(settings.hooks.PostToolUseFailure[0].hooks[0].timeout, 30);
   assert.equal(settings.hooks.PostToolBatch[0].matcher, undefined);
 
   const args = buildCodexHookDeclarationArgs({ nodePath: "/usr/bin/node" });
