@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -76,13 +77,16 @@ export function assertLocalPrivacyEndpoint(baseURL, options = {}) {
   }
 
   const hostname = parsed.hostname.toLowerCase();
+  const unbracketedHostname = hostname.startsWith("[") && hostname.endsWith("]")
+    ? hostname.slice(1, -1)
+    : hostname;
+  const isIpv4Loopback =
+    isIP(unbracketedHostname) === 4 && unbracketedHostname.split(".")[0] === "127";
   const isLoopback =
     hostname === "localhost" ||
     hostname.endsWith(".localhost") ||
-    hostname === "127.0.0.1" ||
-    hostname.startsWith("127.") ||
-    hostname === "[::1]" ||
-    hostname === "::1";
+    isIpv4Loopback ||
+    unbracketedHostname === "::1";
 
   if (!isLoopback) {
     throw new TypeError(

@@ -46,6 +46,7 @@ export {
   runOnboarding
 } from "./onboard.js";
 export { createPrivacySanitizer, normalizeSanitizerResult } from "./privacy-sanitizer.js";
+export { isProcessAlive, isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
 export {
   consumeAllowance,
   createAllowance,

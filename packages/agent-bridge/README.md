@@ -79,7 +79,10 @@ The gateway fails closed when:
   shape-preserving replacement field.
 
 Existing placeholders are shielded while discovering new values, preventing a
-fake email or other placeholder from being classified again and rotated.
+fake email or other placeholder from being classified again and rotated. The
+unresolved-placeholder guard shares the SDK's complete generated-dummy shapes,
+scans structured keys as well as values, and fails closed on transformed-key
+collisions or prototype-like keys.
 
 ## Startup-context isolation
 
@@ -112,9 +115,10 @@ large startup context blocks launch.
 
 Session maps are stored under
 `~/.local/share/privacyai/agent-sessions/` in hashed `0600` files. Updates use a
-per-session lock with timeout, dead-process/stale-lock recovery, atomic rename,
-and a single read-modify-write transaction, preventing parallel tool calls from
-silently losing newly discovered mappings.
+per-session lock with timeout, unique ownership tokens, Linux process-start
+identity checks for PID reuse, compare-before-delete cleanup, atomic rename, and
+a single read-modify-write transaction. Parallel tool calls cannot silently lose
+new mappings, and an old owner cannot remove a replacement owner's lock.
 
 The vault is permission-protected but not encrypted at rest yet.
 
@@ -142,7 +146,8 @@ privacyai agy --print "fresh one-shot prompt"
 ```
 
 Onboarding supports loopback Ollama and LM Studio providers and refuses remote
-sanitizer endpoints by default.
+sanitizer endpoints by default. Loopback validation parses literal IP addresses
+instead of trusting hostname prefixes such as `127.evil.example`.
 
 ## Tests
 
@@ -155,7 +160,9 @@ The regular suite covers prompt reinjection, placeholder collisions, newly
 discovered values in strings and object keys, failure paths, invalid structured
 output, oversized results, parallel vault writers, strict Codex/AGY isolation,
 credential-only homes, startup-file scanning, native context expansion,
-prior-turn prompt leaks, and provider-input canary failures. Optional E2Es exercise local Ollama/LM Studio and
+prior-turn prompt leaks, every SDK-generated dummy shape, extensionless native
+`@file` expansion, lock ownership/PID reuse, split UTF-8 startup output, and
+provider-input canary failures. Optional E2Es exercise local Ollama/LM Studio and
 an installed Claude Code mock-provider/MCP lifecycle when their prerequisites
 are present.
 

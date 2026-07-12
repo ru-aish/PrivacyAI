@@ -123,6 +123,7 @@ def main() -> int:
         if stdin_is_tty:
             tty.setraw(stdin_fd)
 
+        inputs = [stdin_fd, master_fd]
         while child_status is None:
             now = time.monotonic()
             due = [item for item in scheduled if item[0] <= now]
@@ -141,11 +142,16 @@ def main() -> int:
             if scheduled:
                 timeout = max(0.0, min(timeout, scheduled[0][0] - now))
 
-            readable, _, _ = select.select([stdin_fd, master_fd], [], [], timeout)
+            readable, _, _ = select.select(inputs, [], [], timeout)
             if stdin_fd in readable:
-                data = os.read(stdin_fd, 65536)
+                try:
+                    data = os.read(stdin_fd, 65536)
+                except OSError:
+                    data = b""
                 if data:
                     os.write(master_fd, data)
+                else:
+                    inputs.remove(stdin_fd)
 
             if master_fd in readable:
                 try:

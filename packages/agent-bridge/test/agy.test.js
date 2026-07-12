@@ -114,14 +114,14 @@ test("AGY global hook installation merges existing hooks and restores exact byte
 
   const installed = JSON.parse(await readFile(hooksPath, "utf8"));
   assert.deepEqual(installed.existing, { enabled: false });
-  assert.match(
-    installed["privacyai-agent-bridge-test"].PreToolUse[0].hooks[0].command,
-    /'\/test\/node'.*privacyai-agy-hook\.js.*--session-map/
-  );
-  assert.equal((await stat(hooksPath)).mode & 0o777, 0o640);
+  const installedCommand = installed["privacyai-agent-bridge-test"].PreToolUse[0].hooks[0].command;
+  assert.match(installedCommand, /'\/test\/node'.*privacyai-agy-hook\.js.*--session-map/);
+  assert.doesNotMatch(installedCommand, /test-token|--session-token/);
+  assert.equal((await stat(hooksPath)).mode & 0o777, 0o600);
 
   await cleanup();
   assert.equal(await readFile(hooksPath, "utf8"), original);
+  assert.equal((await stat(hooksPath)).mode & 0o777, 0o640);
 });
 
 test("AGY hook cleanup preserves concurrent external hook changes", async () => {
@@ -167,6 +167,60 @@ test("AGY hook installation recovers a lock owned by a dead process", async () =
   });
   assert.ok(JSON.parse(await readFile(hooksPath, "utf8"))["privacyai-agent-bridge-test"]);
   await cleanup();
+});
+
+test(
+  "AGY hook installation recovers a recycled-PID lock on Linux",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const root = await mkdtemp(join(tmpdir(), "privacyai-agy-recycled-lock-"));
+    const hooksPath = join(root, "hooks.json");
+    const lockPath = join(root, "hook.lock");
+    const mapPath = join(root, "map.json");
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        pid: process.pid,
+        createdAt: Date.now(),
+        token: "old-owner",
+        processStart: "definitely-not-the-current-process"
+      })}\n`,
+      { mode: 0o600 }
+    );
+    await writeFile(mapPath, '{"sessionToken":"test-token","sessionMap":{}}\n');
+
+    const cleanup = await installAgyGlobalHook({
+      hooksPath,
+      lockPath,
+      hookName: "privacyai-agent-bridge-test",
+      mapPath,
+      sessionToken: "test-token",
+      lockTimeoutMs: 500
+    });
+    assert.ok(JSON.parse(await readFile(hooksPath, "utf8"))["privacyai-agent-bridge-test"]);
+    await cleanup();
+  }
+);
+
+test("AGY cleanup preserves a replacement lock owner", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-lock-owner-"));
+  const hooksPath = join(root, "hooks.json");
+  const lockPath = join(root, "hook.lock");
+  const mapPath = join(root, "map.json");
+  await writeFile(mapPath, '{"sessionToken":"test-token","sessionMap":{}}\n');
+
+  const cleanup = await installAgyGlobalHook({
+    hooksPath,
+    lockPath,
+    hookName: "privacyai-agent-bridge-test",
+    mapPath,
+    sessionToken: "test-token"
+  });
+  const replacement = `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "replacement-owner" })}\n`;
+  await writeFile(lockPath, replacement, { mode: 0o600 });
+
+  await cleanup();
+  assert.equal(await readFile(lockPath, "utf8"), replacement);
 });
 
 test("AGY launch sanitizes the prompt before spawning and keeps the guard installed", async () => {
@@ -215,9 +269,9 @@ test("AGY launch sanitizes the prompt before spawning and keeps the guard instal
 
 test("AGY hook executable ignores unrelated AGY processes before reading the session map", async () => {
   const result = await runHook(
-    ["--session-map", "/definitely/missing/map.json", "--session-token", "expected"],
+    ["--session-map", "/definitely/missing/map.json"],
     { toolCall: { name: "run_command", args: { CommandLine: "pwd" } } },
-    { PRIVACYAI_AGY_SESSION_TOKEN: "different" }
+    {}
   );
   assert.equal(result.code, 0);
   assert.deepEqual(JSON.parse(result.stdout), {
@@ -237,7 +291,7 @@ test("AGY hook executable enforces the map only for its scoped process", async (
     })
   );
   const result = await runHook(
-    ["--session-map", mapPath, "--session-token", "expected"],
+    ["--session-map", mapPath],
     { toolCall: { name: "run_command", args: { CommandLine: "pwd" } } },
     { PRIVACYAI_AGY_SESSION_TOKEN: "expected" }
   );
@@ -256,6 +310,7 @@ test("AGY hook config uses wildcard pre-tool matching", () => {
   const spec = config["privacyai-agent-bridge-test"].PreToolUse[0];
   assert.equal(spec.matcher, "*");
   assert.equal(spec.hooks[0].timeout, 9);
+  assert.doesNotMatch(spec.hooks[0].command, /test-token|--session-token/);
 });
 
 function runHook(args, event, env = {}) {

@@ -1,7 +1,9 @@
-import { restore as restoreSdkText } from "@privacy-ai/sdk";
+import { GENERATED_DUMMY_PATTERN_SOURCE, restore as restoreSdkText } from "@privacy-ai/sdk";
 
-const DEFAULT_PLACEHOLDER_PATTERN =
-  /\[[A-Z][A-Z0-9_]*_\d+\]|gsk_dummy_\d+_redacted|AKIADUMMY\d+KEY|contact\d+@example\.com|redacted_secret_\d+|credential_\d+|SensitiveValue\d+/g;
+const DEFAULT_PLACEHOLDER_PATTERN = new RegExp(
+  String.raw`(?:\[[A-Z][A-Z0-9_]*_\d+\]|${GENERATED_DUMMY_PATTERN_SOURCE})`,
+  "gi"
+);
 
 export function restoreText(text, sessionMap = {}) {
   if (typeof text !== "string") return text;
@@ -17,7 +19,7 @@ export function sanitizeKnownText(text, sessionMap = {}) {
     .sort((left, right) => right[1].length - left[1].length);
 
   for (const [dummy, original] of replacements) {
-    sanitized = sanitized.split(original).join(dummy);
+    sanitized = sanitized.replace(new RegExp(escapeRegExp(original), "gi"), () => dummy);
   }
 
   return sanitized;
@@ -28,9 +30,22 @@ export function transformValue(value, transformText) {
   if (Array.isArray(value)) return value.map(item => transformValue(item, transformText));
 
   if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, transformValue(item, transformText)])
-    );
+    const transformed = {};
+    for (const [key, item] of Object.entries(value)) {
+      const transformedKey = transformText(key);
+      if (Object.hasOwn(transformed, transformedKey)) {
+        const error = new Error("PrivacyAI blocked a structured value because key transformation caused a collision.");
+        error.code = "PRIVACYAI_TRANSFORM_KEY_COLLISION";
+        throw error;
+      }
+      Object.defineProperty(transformed, transformedKey, {
+        value: transformValue(item, transformText),
+        enumerable: true,
+        configurable: true,
+        writable: true
+      });
+    }
+    return transformed;
   }
 
   return value;
@@ -56,4 +71,8 @@ export function findUnresolvedPlaceholders(value, pattern = DEFAULT_PLACEHOLDER_
 
 export function valuesEqual(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

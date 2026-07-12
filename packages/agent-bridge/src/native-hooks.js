@@ -134,11 +134,14 @@ function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs }) {
     }, timeoutMs);
 
     child.on("error", error => finish(error));
+    child.stdin.on("error", error => finish(error));
+    child.stderr.setEncoding("utf8");
     child.stderr.on("data", chunk => {
-      stderr += chunk.toString();
+      stderr += chunk;
     });
+    child.stdout.setEncoding("utf8");
     child.stdout.on("data", chunk => {
-      stdoutBuffer += chunk.toString();
+      stdoutBuffer += chunk;
       let newline;
       while ((newline = stdoutBuffer.indexOf("\n")) !== -1) {
         const line = stdoutBuffer.slice(0, newline).trim();

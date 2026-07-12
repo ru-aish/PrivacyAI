@@ -69,3 +69,31 @@ export function generateDummy(type, index = 1) {
       return `SensitiveValue${slot}`;
   }
 }
+
+
+const GENERATED_DUMMY_PATTERN_PARTS = [
+  String.raw`contact\d+@example\.com`,
+  String.raw`\+1 \(555\) 010-\d{4}`,
+  String.raw`10\.0\.0\.\d+`,
+  String.raw`000-00-\d{4}`,
+  String.raw`4111 1111 1111 \d{4}`,
+  String.raw`gsk_dummy_\d+_redacted`,
+  String.raw`AKIADUMMY\d+KEY`,
+  String.raw`credential_\d+`,
+  String.raw`redacted_secret_\d+`,
+  String.raw`user\d+`,
+  String.raw`MRN-\d{5}`,
+  String.raw`MEDICAL-ID-\d+`,
+  String.raw`\b1\d{4}\b`,
+  String.raw`SensitiveValue\d+`,
+  ...PERSON_NAMES.map(escapeRegExp),
+  ...ORGANIZATION_NAMES.map(escapeRegExp),
+  ...LOCATION_NAMES.map(escapeRegExp)
+];
+
+export const GENERATED_DUMMY_PATTERN_SOURCE =
+  `(?:${GENERATED_DUMMY_PATTERN_PARTS.join("|")})`;
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

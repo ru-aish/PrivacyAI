@@ -196,8 +196,9 @@ function normalizePromptSessionMap(value) {
 
 function assertPromptContainsNoMappedOriginals(prompt, sessionMap) {
   let leakCount = 0;
+  const normalizedPrompt = prompt.toLocaleLowerCase("en-US");
   for (const original of Object.values(sessionMap)) {
-    if (prompt.includes(original)) leakCount += 1;
+    if (normalizedPrompt.includes(original.toLocaleLowerCase("en-US"))) leakCount += 1;
   }
   if (leakCount === 0) return;
 
@@ -212,7 +213,7 @@ function assertPromptContainsNoMappedOriginals(prompt, sessionMap) {
 function nativeContextIngress(prompt) {
   const value = String(prompt);
   if (/^\s*!/.test(value)) return "a native shell escape";
-  if (/(^|[\s([{"'])@(?:~?\/|\.{1,2}\/|[A-Za-z0-9_.-]+(?:\/[^\s)\]}"']+|\.[A-Za-z0-9]{1,12}\b))/.test(value)) {
+  if (/(^|[\s([{"'])@[^\s)\]}"',]+/.test(value)) {
     return "a native file/context mention";
   }
   return null;

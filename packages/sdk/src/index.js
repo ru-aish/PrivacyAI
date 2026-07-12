@@ -13,7 +13,7 @@ export {
 } from "./prompts.js";
 export { AiSanitizer, SANITIZATION_MODES, parseSanitizerJson } from "./ai-sanitizer.js";
 export { ContextCompactor, parseCompactorJson } from "./context-compactor.js";
-export { generateDummy } from "./dummy-data.js";
+export { generateDummy, GENERATED_DUMMY_PATTERN_SOURCE } from "./dummy-data.js";
 export { localSanitize } from "./local-sanitizer.js";
 export { PrivacyGuardianError, ProviderError } from "./errors.js";
 

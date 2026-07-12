@@ -281,6 +281,7 @@ function sessionMapToDetections(originalText, sessionMap, detectorDetections) {
   const lowerOriginal = originalText.toLowerCase();
 
   for (const [dummy, original] of Object.entries(sessionMap)) {
+    if (typeof dummy !== "string" || typeof original !== "string" || !dummy || !original) continue;
     const lowerValue = original.toLowerCase();
     const type = inferModelDetectionType(dummy, original, detectorDetections);
     let searchIndex = 0;
@@ -408,6 +409,7 @@ function fixSessionMapOrientation(originalText, safePrompt, sessionMap) {
   const lowerSafe = safePrompt.toLowerCase();
 
   for (const [key, value] of Object.entries(sessionMap)) {
+    if (typeof key !== "string" || typeof value !== "string" || !key || !value) continue;
     const keyInOriginal = lowerOriginal.includes(key.toLowerCase());
     const valueInOriginal = lowerOriginal.includes(value.toLowerCase());
     const keyInSafe = lowerSafe.includes(key.toLowerCase());
@@ -436,6 +438,7 @@ function removeInvalidSessionMapEntries(originalText, sessionMap) {
   const lowerOriginal = originalText.toLowerCase();
 
   for (const [dummy, original] of Object.entries(sessionMap)) {
+    if (typeof dummy !== "string" || typeof original !== "string" || !dummy || !original) continue;
     if (dummy === original) continue;
     if (!lowerOriginal.includes(original.toLowerCase())) continue;
     if (/\r|\n/.test(original)) continue;
@@ -480,8 +483,16 @@ function looksLikeSecret(value) {
 }
 
 function findDummyForOriginal(sessionMap, original) {
+  if (typeof original !== "string" || !original) return undefined;
   const target = original.toLowerCase();
-  return Object.entries(sessionMap).find(([, value]) => value.toLowerCase() === target)?.[0];
+  return Object.entries(sessionMap).find(
+    ([dummy, value]) =>
+      typeof dummy === "string" &&
+      typeof value === "string" &&
+      dummy.length > 0 &&
+      value.length > 0 &&
+      value.toLowerCase() === target
+  )?.[0];
 }
 
 function createUniqueDummy(type, index, sourceText, sessionMap) {

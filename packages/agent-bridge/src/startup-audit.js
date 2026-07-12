@@ -139,9 +139,10 @@ export function captureCodexPromptInput(options) {
         "PrivacyAI could not start Codex's local startup-input audit."
       ));
     });
+    child.stdout.setEncoding("utf8");
     child.stdout.on("data", chunk => {
-      stdout += chunk.toString();
-      stdoutBytes += chunk.length;
+      stdout += chunk;
+      stdoutBytes += Buffer.byteLength(chunk, "utf8");
       if (stdoutBytes > maxBytes) {
         finish(startupAuditError(
           "PRIVACYAI_CODEX_CAPTURE_TOO_LARGE",
@@ -158,7 +159,7 @@ export function captureCodexPromptInput(options) {
         ));
       }
     });
-    child.on("exit", code => {
+    child.on("close", code => {
       if (settled) return;
       if (code !== 0) {
         finish(startupAuditError(

@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+
+import { generateDummy } from "@privacy-ai/sdk";
 import { fileURLToPath } from "node:url";
 
 import {
   SessionVault,
+  findUnresolvedPlaceholders,
   processHookEvent,
   restoreValue,
   sanitizeKnownValue,
@@ -23,14 +26,16 @@ const sessionMap = {
 
 const passThroughSanitizer = async text => ({ sanitizedPrompt: text, sessionMap: {} });
 
-test("recursively restores tool arguments without changing object keys", () => {
+test("recursively restores tool arguments including structured object keys", () => {
   const input = {
     command: "echo [PERSON_1]",
+    "[PERSON_1]": "owner",
     nested: ["[API_KEY_1]", { path: "/tmp/[PERSON_1]" }]
   };
 
   assert.deepEqual(restoreValue(input, sessionMap), {
     command: "echo Ada Lovelace",
+    "Ada Lovelace": "owner",
     nested: ["sk-local-secret", { path: "/tmp/Ada Lovelace" }]
   });
 });
@@ -45,6 +50,53 @@ test("recursively sanitizes known originals in tool output", () => {
     stdout: "[PERSON_1] used [API_KEY_1]",
     metadata: ["owner=[PERSON_1]"]
   });
+});
+
+test("known-value sanitization is case-insensitive in keys and values", () => {
+  assert.deepEqual(
+    sanitizeKnownValue(
+      {
+        "JOHN.SMITH@EXAMPLE.TEST": "Owner john.smith@example.test"
+      },
+      { "contact1@example.com": "John.Smith@Example.Test" }
+    ),
+    {
+      "contact1@example.com": "Owner contact1@example.com"
+    }
+  );
+});
+
+test("unresolved placeholder detection covers every SDK-generated dummy shape", () => {
+  const types = [
+    "EMAIL", "PHONE", "PERSON", "ORGANIZATION", "LOCATION", "IP_ADDRESS",
+    "SSN", "CREDIT_CARD", "API_KEY", "AWS_ACCESS_KEY", "ZIP", "URL_CREDENTIAL",
+    "URL_QUERY_SECRET", "CONNECTION_STRING_CREDENTIAL", "MRN", "MEDICAL_ID", "OTHER"
+  ];
+
+  for (const type of types) {
+    const dummy = generateDummy(type, 1);
+    assert.equal(
+      findUnresolvedPlaceholders({ [dummy]: `value=${dummy}` }).length > 0,
+      true,
+      `expected unresolved detection for ${type}: ${dummy}`
+    );
+  }
+});
+
+test("structured key transformation preserves prototype-like keys as data", () => {
+  const input = JSON.parse('{"__proto__":"[PERSON_1]","constructor":"[API_KEY_1]"}');
+  const restored = restoreValue(input, sessionMap);
+  assert.equal(Object.getPrototypeOf(restored), Object.prototype);
+  assert.equal(Object.hasOwn(restored, "__proto__"), true);
+  assert.equal(restored.__proto__, "Ada Lovelace");
+  assert.equal(restored.constructor, "sk-local-secret");
+});
+
+test("structured key transformation fails closed on collisions", () => {
+  assert.throws(
+    () => restoreValue({ "[PERSON_1]": 1, "Ada Lovelace": 2 }, sessionMap),
+    error => error?.code === "PRIVACYAI_TRANSFORM_KEY_COLLISION"
+  );
 });
 
 test("context gateway skips meaningless top-level null and boolean results", async () => {
@@ -491,6 +543,60 @@ test("SessionVault serializes concurrent map extensions without losing updates",
     "[API_KEY_1]": "sk-parallel-secret",
     "[PERSON_1]": "Parallel Person"
   });
+});
+
+test(
+  "SessionVault recovers a recycled-PID lock on Linux",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), "privacyai-agent-vault-pid-reuse-"));
+    const vault = new SessionVault({ baseDir });
+    const sessionId = "recycled-pid-session";
+    const lockPath = `${vault.pathForSession(sessionId)}.lock`;
+    await writeFile(
+      lockPath,
+      `${JSON.stringify({
+        pid: process.pid,
+        createdAt: Date.now(),
+        token: "old-owner",
+        processStart: "definitely-not-the-current-process"
+      })}\n`,
+      { mode: 0o600 }
+    );
+
+    await vault.merge(
+      sessionId,
+      { "[EMAIL_1]": "recovered@example.test" },
+      { lockTimeoutMs: 500 }
+    );
+    assert.equal((await vault.load(sessionId)).sessionMap["[EMAIL_1]"], "recovered@example.test");
+  }
+);
+
+test("SessionVault release preserves a replacement lock owned by another process", async () => {
+  const baseDir = await mkdtemp(join(tmpdir(), "privacyai-agent-vault-owner-"));
+  const vault = new SessionVault({ baseDir });
+  const sessionId = "owner-session";
+  let resumeUpdater;
+  let markAcquired;
+  const acquired = new Promise(resolve => { markAcquired = resolve; });
+  const gate = new Promise(resolve => { resumeUpdater = resolve; });
+
+  const update = vault.update(sessionId, async current => {
+    markAcquired();
+    await gate;
+    return { ...current.sessionMap, "[EMAIL_1]": "owner@example.test" };
+  });
+  await acquired;
+
+  const lockPath = `${vault.pathForSession(sessionId)}.lock`;
+  const replacement = `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "replacement-owner" })}
+`;
+  await writeFile(lockPath, replacement, { mode: 0o600 });
+  resumeUpdater();
+  await update;
+
+  assert.equal(await readFile(lockPath, "utf8"), replacement);
 });
 
 function runHook(event, env) {

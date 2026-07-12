@@ -1,7 +1,9 @@
-import { createHash } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+
+import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
 
 const VAULT_VERSION = 1;
 
@@ -124,8 +126,10 @@ async function acquireSessionLock(lockPath, options = {}) {
 
   while (true) {
     try {
-      await createSessionLockFile(lockPath);
-      return async () => rm(lockPath, { force: true });
+      const owner = await createSessionLockFile(lockPath);
+      return async () => {
+        await removeLockIfUnchanged(lockPath, owner);
+      };
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
       if (await removeStaleSessionLock(lockPath, staleMs)) continue;
@@ -140,44 +144,46 @@ async function acquireSessionLock(lockPath, options = {}) {
 }
 
 async function createSessionLockFile(lockPath) {
-  const handle = await open(lockPath, "wx", 0o600);
-  try {
-    await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: Date.now() })}\n`);
-    await handle.close();
-  } catch (error) {
-    await handle.close().catch(() => {});
-    await rm(lockPath, { force: true }).catch(() => {});
-    throw error;
-  }
+  const owner = `${JSON.stringify({
+    pid: process.pid,
+    createdAt: Date.now(),
+    token: randomUUID(),
+    processStart: await readProcessStartIdentity(process.pid)
+  })}\n`;
+  await writeFile(lockPath, owner, { flag: "wx", mode: 0o600 });
+  return owner;
 }
 
 async function removeStaleSessionLock(lockPath, staleMs) {
+  let serialized;
   let record;
   try {
-    record = JSON.parse(await readFile(lockPath, "utf8"));
+    serialized = await readFile(lockPath, "utf8");
+    record = JSON.parse(serialized);
   } catch (error) {
     if (error?.code === "ENOENT") return true;
-    const age = Date.now() - Number((await stat(lockPath)).mtimeMs || 0);
-    if (age <= staleMs) return false;
-    await rm(lockPath, { force: true });
-    return true;
+    let metadata;
+    try {
+      metadata = await stat(lockPath);
+    } catch (statError) {
+      if (statError?.code === "ENOENT") return true;
+      throw statError;
+    }
+    if (Date.now() - Number(metadata.mtimeMs || 0) <= staleMs) return false;
+    return removeLockIfUnchanged(lockPath, serialized || "");
   }
 
-  const age = Date.now() - Number(record?.createdAt || 0);
-  const pid = Number(record?.pid);
-  if (age > staleMs || !isProcessAlive(pid)) {
-    await rm(lockPath, { force: true });
-    return true;
-  }
-  return false;
+  if (await isSameLiveProcess(record)) return false;
+  return removeLockIfUnchanged(lockPath, serialized);
 }
 
-function isProcessAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+async function removeLockIfUnchanged(lockPath, expected) {
   try {
-    process.kill(pid, 0);
+    if (await readFile(lockPath, "utf8") !== expected) return false;
+    await rm(lockPath);
     return true;
   } catch (error) {
-    return error?.code !== "ESRCH";
+    if (error?.code === "ENOENT") return true;
+    throw error;
   }
 }

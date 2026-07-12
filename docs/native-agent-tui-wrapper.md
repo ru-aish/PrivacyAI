@@ -58,8 +58,8 @@ The implementation package now contains:
 - loopback-local sanitizer configuration and health checks;
 - prompt blocking and one-time PTY reinjection;
 - a structured context gateway for model-visible results;
-- stable placeholder rebasing and shielding;
-- transactional per-session vault updates;
+- stable placeholder rebasing, complete SDK-dummy recognition, and shielding;
+- transactional per-session vault updates with owner identity;
 - native hook generation and Codex hook trust discovery;
 - credential-only runtime-home isolation;
 - Codex model-visible startup capture and canary verification;
@@ -143,6 +143,10 @@ This protects object keys and keeps one newly discovered value mapped to one
 stable placeholder throughout a result. It also avoids rotating existing fake
 emails or other placeholder values when the local classifier sees them again.
 
+Object keys are transformed alongside values. Prototype-like names remain
+ordinary data properties, and two keys that collapse to the same restored name
+block the tool call rather than overwrite one another.
+
 The gateway fails closed if:
 
 - the sanitizer does not return text;
@@ -202,7 +206,10 @@ upstream replacement boundary can adopt it without redesigning session state.
 AGY can deny a tool but cannot rewrite tool arguments or outputs. The earlier
 behavior allowed tools when a clean prompt created no session map; that was
 unsafe because the tool itself could discover the first secret. P0 removes that
-exception. Every scoped tool call is denied for every protected AGY launch.
+exception. Every scoped tool call is denied for every protected AGY launch. The
+scope token exists only in the child environment and private session-map file;
+it is never persisted in the global hook command, and the installed hook file is
+forced to `0600` until exact cleanup restores its previous bytes and mode.
 
 ## Startup-context boundary
 
@@ -260,7 +267,9 @@ Any high-risk private detection or unclassifiably large context blocks startup.
 ## Session vault and concurrency
 
 Session IDs are hashed before becoming filenames. Records and temporary files
-use `0600`; directories use `0700`; writes use atomic rename.
+use `0600`; directories use `0700`; writes use atomic rename. Lock records carry
+a random ownership token and, on Linux, the process start identity so recycled
+PIDs are not mistaken for the original owner.
 
 P0 adds a per-session transaction lock:
 
@@ -276,9 +285,10 @@ atomic save
 release lock
 ```
 
-A bounded retry loop handles contention. Locks from dead processes or older than
-the stale threshold are removed. Parallel prompt/tool writers can no longer
-silently overwrite each other's additions.
+A bounded retry loop handles contention. Dead or recycled-PID locks are removed
+only when the observed ownership record is unchanged; active owners are never
+expired merely because time passed. Parallel prompt/tool writers can no longer
+silently overwrite each other's additions or delete a replacement lock.
 
 The vault is still plaintext under local filesystem permissions; encryption or
 OS-keyring storage remains separate hardening work.

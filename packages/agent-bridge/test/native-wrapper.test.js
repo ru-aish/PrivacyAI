@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -15,6 +15,7 @@ import {
   auditClaudeStartupContext,
   auditCodexStartupContext,
   buildCodexHookDeclarationArgs,
+  captureCodexPromptInput,
   buildCodexIsolationArgs,
   buildModelChoices,
   codexEffectiveCwd,
@@ -188,6 +189,10 @@ test("session placeholder collisions are rebased across turns", () => {
 test("remote sanitizer endpoints are rejected unless explicitly allowed", () => {
   assert.doesNotThrow(() => assertLocalPrivacyEndpoint("http://127.0.0.1:11434"));
   assert.doesNotThrow(() => assertLocalPrivacyEndpoint("http://localhost:11434"));
+  assert.doesNotThrow(() => assertLocalPrivacyEndpoint("http://127.25.10.9:11434"));
+  assert.doesNotThrow(() => assertLocalPrivacyEndpoint("http://[::1]:11434"));
+  assert.throws(() => assertLocalPrivacyEndpoint("http://127.evil.example:11434"), /remote sanitizer endpoint/);
+  assert.throws(() => assertLocalPrivacyEndpoint("http://127.0.0.1.evil.example:11434"), /remote sanitizer endpoint/);
   assert.throws(() => assertLocalPrivacyEndpoint("https://privacy.example.com/v1"), /remote sanitizer endpoint/);
   assert.doesNotThrow(() =>
     assertLocalPrivacyEndpoint("https://privacy.example.com/v1", { allowRemote: true })
@@ -271,7 +276,14 @@ test("only non-contextual native slash commands bypass prompt sanitization", asy
   assert.equal(blocked.output.decision, "block");
   assert.match(blocked.output.reason, /inject files, history, diffs/);
 
-  for (const prompt of ["Summarize @README.md", "Inspect @src/config.ts", "!cat .env"]) {
+  for (const prompt of [
+    "Summarize @README.md",
+    "Inspect @src/config.ts",
+    "Read @Dockerfile",
+    "Compare @LICENSE",
+    "Ask @alice",
+    "!cat .env"
+  ]) {
     const ingress = await processPromptSubmission(
       { hook_event_name: "UserPromptSubmit", session_id: `native-ingress-${prompt}`, prompt },
       { runtimeDir, sanitizer: async () => { throw new Error("native ingress must not reach sanitizer"); } }
@@ -601,6 +613,38 @@ test("runtime isolation copies only credential material into private agent homes
   assert.equal(claude.env.OTEL_LOG_RAW_API_BODIES, "0");
   assert.equal(claude.env.OTEL_LOG_TOOL_DETAILS, "0");
   assert.equal(claude.env.OTEL_LOG_USER_PROMPTS, "0");
+});
+
+test("Codex startup capture drains UTF-8 output before parsing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-capture-"));
+  const fakeCodex = join(root, "fake-codex.js");
+  await writeFile(
+    fakeCodex,
+    [
+      "#!/usr/bin/env node",
+      "const prefix = Buffer.from('[{\"text\":\"');",
+      "const euro = Buffer.from('€');",
+      "const suffix = Buffer.from('\"}]');",
+      "process.stdout.write(prefix);",
+      "process.stdout.write(euro.subarray(0, 1));",
+      "setTimeout(() => {",
+      "  process.stdout.write(euro.subarray(1));",
+      "  process.stdout.end(suffix);",
+      "}, 5);"
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  await chmod(fakeCodex, 0o755);
+
+  const result = await captureCodexPromptInput({
+    codexPath: fakeCodex,
+    args: [],
+    cwd: root,
+    env: process.env,
+    prompt: "ignored",
+    timeoutMs: 5000
+  });
+  assert.deepEqual(result, [{ text: "€" }]);
 });
 
 test("Codex startup audit captures serialized model input and verifies the local canary", async () => {

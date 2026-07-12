@@ -6,7 +6,6 @@ import {
   chmod,
   mkdir,
   mkdtemp,
-  open,
   readFile,
   rename,
   rm,
@@ -21,6 +20,7 @@ import { loadPrivacyConfig } from "./config-store.js";
 import { resolveExecutable } from "./executable.js";
 import { checkPrivacyModel } from "./model-health.js";
 import { createPrivacySanitizer } from "./privacy-sanitizer.js";
+import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
 
 const AGY_HOOK_PATH = fileURLToPath(new URL("../bin/privacyai-agy-hook.js", import.meta.url));
 const HOOK_PREFIX = "privacyai-agent-bridge-";
@@ -156,16 +156,13 @@ export function parseAgyArguments(args) {
 
 export function buildAgyHookConfig(options) {
   if (!options?.mapPath) throw new TypeError("AGY hook configuration requires mapPath.");
-  if (!options?.sessionToken) throw new TypeError("AGY hook configuration requires sessionToken.");
   const hookName = options.hookName || `${HOOK_PREFIX}${process.pid}`;
   const nodePath = options.nodePath || process.execPath;
   const command = [
     nodePath,
     AGY_HOOK_PATH,
     "--session-map",
-    options.mapPath,
-    "--session-token",
-    options.sessionToken
+    options.mapPath
   ].map(shellQuote).join(" ");
 
   return {
@@ -211,7 +208,7 @@ export async function installAgyGlobalHook(options) {
       ...baseObject,
       ...buildAgyHookConfig({ ...options, hookName })
     };
-    await atomicWriteJson(hooksPath, installedObject, originalMode || 0o600);
+    await atomicWriteJson(hooksPath, installedObject, 0o600);
 
     let cleaned = false;
     return async () => {
@@ -287,11 +284,15 @@ async function acquireFileLock(lockPath, options = {}) {
 
   while (true) {
     try {
-      const handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${process.pid}\n`);
-      await handle.close();
+      const owner = `${JSON.stringify({
+        pid: process.pid,
+        createdAt: Date.now(),
+        token: randomUUID(),
+        processStart: await readProcessStartIdentity(process.pid)
+      })}\n`;
+      await writeFile(lockPath, owner, { flag: "wx", mode: 0o600 });
       return async () => {
-        await rm(lockPath, { force: true });
+        await removeLockIfUnchanged(lockPath, owner);
       };
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
@@ -305,22 +306,31 @@ async function acquireFileLock(lockPath, options = {}) {
 }
 
 async function removeStaleLock(lockPath) {
-  let pid;
+  let serialized;
+  let record;
   try {
-    pid = Number((await readFile(lockPath, "utf8")).trim());
+    serialized = await readFile(lockPath, "utf8");
+    const trimmed = serialized.trim();
+    record = trimmed.startsWith("{")
+      ? JSON.parse(trimmed)
+      : { pid: Number(trimmed), createdAt: 0, token: "legacy" };
   } catch (error) {
     if (error?.code === "ENOENT") return true;
     return false;
   }
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
 
+  if (await isSameLiveProcess(record)) return false;
+  return removeLockIfUnchanged(lockPath, serialized);
+}
+
+async function removeLockIfUnchanged(lockPath, expected) {
   try {
-    process.kill(pid, 0);
-    return false;
-  } catch (error) {
-    if (error?.code !== "ESRCH") return false;
-    await rm(lockPath, { force: true });
+    if (await readFile(lockPath, "utf8") !== expected) return false;
+    await rm(lockPath);
     return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    throw error;
   }
 }
 

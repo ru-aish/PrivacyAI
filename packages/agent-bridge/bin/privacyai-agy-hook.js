@@ -5,10 +5,10 @@ import { processAgyHookEvent } from "../src/agy-hook-adapter.js";
 
 try {
   const mapPath = requiredArgument("--session-map");
-  const expectedToken = requiredArgument("--session-token");
+  const processToken = process.env.PRIVACYAI_AGY_SESSION_TOKEN || "";
   const event = JSON.parse(await readStdin());
 
-  if (process.env.PRIVACYAI_AGY_SESSION_TOKEN !== expectedToken) {
+  if (!processToken) {
     process.stdout.write(
       JSON.stringify({
         decision: "allow",
@@ -17,7 +17,7 @@ try {
     );
   } else {
     const record = JSON.parse(await readFile(mapPath, "utf8"));
-    if (record?.sessionToken !== expectedToken) {
+    if (record?.sessionToken !== processToken) {
       throw new Error("session token mismatch");
     }
     const sessionMap = record?.sessionMap && typeof record.sessionMap === "object"

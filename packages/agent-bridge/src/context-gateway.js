@@ -67,8 +67,9 @@ export function assertNoProtectedOriginals(serializedPayload, sessionMap = {}) {
   }
 
   let leakCount = 0;
+  const normalizedPayload = serializedPayload.toLocaleLowerCase("en-US");
   for (const original of Object.values(normalizeSessionMap(sessionMap))) {
-    if (serializedPayload.includes(original)) leakCount += 1;
+    if (normalizedPayload.includes(original.toLocaleLowerCase("en-US"))) leakCount += 1;
   }
 
   if (leakCount > 0) {

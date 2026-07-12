@@ -37,6 +37,20 @@ test("ai sanitizer returns safe_prompt and session_map from local AI", async () 
   assert.equal(result.privacySource, "ai-sanitizer");
 });
 
+test("ai sanitizer drops empty session-map originals instead of looping", async () => {
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({
+      safe_prompt: "Public text",
+      session_map: { "[PRIVATE_VALUE_1]": "" }
+    }),
+    loadEnv: false
+  });
+
+  const result = await sanitizer.sanitize("Public text");
+  assert.equal(result.sanitizedText, "Public text");
+  assert.deepEqual(result.sessionMap, {});
+});
+
 test("restore replaces dummy stand-ins with original values", () => {
   const text = "Email contact1@example.com and phone +1 (555) 010-0001.";
   const restored = restore(text, {
