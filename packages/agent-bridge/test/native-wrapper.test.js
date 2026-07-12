@@ -11,13 +11,18 @@ import {
   DEFAULT_PRIVACY_MODEL,
   SessionVault,
   assertLocalPrivacyEndpoint,
+  assertNoProtectedOriginals,
+  auditClaudeStartupContext,
+  auditCodexStartupContext,
   buildCodexHookDeclarationArgs,
+  buildCodexIsolationArgs,
   buildModelChoices,
   codexEffectiveCwd,
   consumeAllowance,
   listDownloadedLanguageModels,
   listLmStudioLanguageModels,
   loadPrivacyConfig,
+  prepareAgentRuntimeIsolation,
   processPromptSubmission,
   rebaseSessionAdditions,
   runOnboarding,
@@ -115,6 +120,11 @@ test("argument guards reject flags that can replace privacy hooks", () => {
   assert.throws(() => validateNativeArguments("claude", ["--safe-mode"]), /disables privacy hooks/);
   assert.throws(() => validateNativeArguments("codex", ["--disable", "hooks"]), /hooks disabled/);
   assert.throws(() => validateNativeArguments("codex", ["-c", "hooks.UserPromptSubmit=[]"]), /reserves/);
+  assert.throws(() => validateNativeArguments("codex", ["resume", "--last"]), /fresh-session boundary/);
+  assert.throws(() => validateNativeArguments("codex", ["--enable", "shell_tool"]), /cannot enable/);
+  assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"]), /prompt-only isolation/);
+  assert.throws(() => validateNativeArguments("claude", ["--resume", "session"]), /isolated startup context/);
+  assert.throws(() => validateNativeArguments("claude", ["--plugin-dir", "plugin"]), /isolated startup context/);
   assert.doesNotThrow(() => validateNativeArguments("claude", ["--model", "sonnet"]));
 });
 
@@ -136,7 +146,7 @@ test("Claude environment guards reject hook-disabling modes", () => {
   assert.doesNotThrow(() => validateNativeEnvironment("codex", { CLAUDE_CODE_SIMPLE: "1" }));
 });
 
-test("native slash commands without arguments bypass prompt sanitization", async () => {
+test("only non-contextual native slash commands bypass prompt sanitization", async () => {
   const runtimeDir = await mkdtemp(join(tmpdir(), "privacyai-slash-"));
   const result = await processPromptSubmission(
     {
@@ -154,17 +164,41 @@ test("native slash commands without arguments bypass prompt sanitization", async
   assert.equal(result, null);
 
   let called = false;
-  await processPromptSubmission(
+  const blocked = await processPromptSubmission(
     { hook_event_name: "UserPromptSubmit", session_id: "native-session-3", prompt: "/review DEMO_PRIVATE_VALUE" },
     {
       runtimeDir,
-      sanitizer: async prompt => {
+      sanitizer: async () => {
         called = true;
-        return { sanitizedPrompt: prompt.replace("DEMO_PRIVATE_VALUE", "[API_KEY_1]"), sessionMap: { "[API_KEY_1]": "DEMO_PRIVATE_VALUE" } };
+        throw new Error("context-loading slash command must be blocked before sanitization");
       }
     }
   );
-  assert.equal(called, true);
+  assert.equal(called, false);
+  assert.equal(blocked.output.decision, "block");
+  assert.match(blocked.output.reason, /inject files, history, diffs/);
+
+  for (const prompt of ["Summarize @README.md", "Inspect @src/config.ts", "!cat .env"]) {
+    const ingress = await processPromptSubmission(
+      { hook_event_name: "UserPromptSubmit", session_id: `native-ingress-${prompt}`, prompt },
+      { runtimeDir, sanitizer: async () => { throw new Error("native ingress must not reach sanitizer"); } }
+    );
+    assert.equal(ingress.output.decision, "block");
+    assert.match(ingress.output.reason, /expands it after prompt sanitization/);
+  }
+
+  const ordinaryEmail = await processPromptSubmission(
+    {
+      hook_event_name: "UserPromptSubmit",
+      session_id: "ordinary-email",
+      prompt: "Email user@example.test"
+    },
+    {
+      runtimeDir,
+      sanitizer: async prompt => ({ sanitizedPrompt: prompt, sessionMap: {} })
+    }
+  );
+  assert.equal(ordinaryEmail, null);
 });
 
 test("Ollama model discovery lists completion models and excludes embedding-only models", async () => {
@@ -430,6 +464,122 @@ test("onboarding pulls a model name that is not downloaded", async () => {
   });
 
   assert.deepEqual(commands, [["/test/ollama", ["pull", "custom-private-model:latest"]]]);
+});
+
+
+test("runtime isolation copies only credential material into private agent homes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-runtime-isolation-"));
+  const runtimeDir = join(root, "runtime");
+  const codexSource = join(root, "codex-source");
+  const claudeSource = join(root, "claude-source");
+  await mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+  await mkdir(codexSource, { recursive: true, mode: 0o700 });
+  await mkdir(claudeSource, { recursive: true, mode: 0o700 });
+  await writeFile(join(codexSource, "auth.json"), '{"token":"local-only"}\n', { mode: 0o600 });
+  await writeFile(join(codexSource, "AGENTS.md"), "DO_NOT_COPY_THIS_CONTEXT\n", { mode: 0o600 });
+  await writeFile(join(claudeSource, ".credentials.json"), '{"token":"local-only"}\n', { mode: 0o600 });
+  await writeFile(join(claudeSource, "CLAUDE.md"), "DO_NOT_COPY_THIS_CONTEXT\n", { mode: 0o600 });
+
+  const codex = await prepareAgentRuntimeIsolation("codex", runtimeDir, { codexHome: codexSource });
+  assert.equal(JSON.parse(await readFile(join(codex.targetHome, "auth.json"), "utf8")).token, "local-only");
+  await assert.rejects(readFile(join(codex.targetHome, "AGENTS.md"), "utf8"), /ENOENT/);
+  assert.equal((await stat(codex.targetHome)).mode & 0o777, 0o700);
+  assert.equal((await stat(join(codex.targetHome, "auth.json"))).mode & 0o777, 0o600);
+  assert.deepEqual(codex.args, buildCodexIsolationArgs());
+
+  const claude = await prepareAgentRuntimeIsolation("claude", runtimeDir, {
+    claudeConfigDir: claudeSource
+  });
+  assert.equal(
+    JSON.parse(await readFile(join(claude.targetHome, ".credentials.json"), "utf8")).token,
+    "local-only"
+  );
+  await assert.rejects(readFile(join(claude.targetHome, "CLAUDE.md"), "utf8"), /ENOENT/);
+  assert.equal(await readFile(claude.emptyMcpPath, "utf8"), "{}\n");
+  assert.deepEqual(claude.args.slice(0, 2), ["--setting-sources", "user"]);
+  assert.equal(claude.args.includes("--strict-mcp-config"), true);
+  assert.equal(claude.args.includes("--disable-slash-commands"), true);
+});
+
+test("Codex startup audit captures serialized model input and verifies the local canary", async () => {
+  const audit = await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    canaryOriginal: "raw-provider-canary-secret",
+    canaryPlaceholder: "[PRIVACYAI_PROVIDER_CANARY_TEST]",
+    capture: async ({ prompt }) => [
+      { type: "message", role: "developer", content: [{ type: "input_text", text: "safe startup" }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: prompt }] }
+    ],
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+  });
+
+  assert.equal(audit.itemCount, 2);
+  assert.equal(audit.canaryPlaceholder, "[PRIVACYAI_PROVIDER_CANARY_TEST]");
+  assert.equal(audit.serializedBytes > 0, true);
+});
+
+test("Codex startup audit fails if the serialized provider input contains its raw canary", async () => {
+  await assert.rejects(
+    auditCodexStartupContext({
+      codexPath: "/test/codex",
+      cwd: process.cwd(),
+      canaryOriginal: "raw-provider-canary-secret",
+      canaryPlaceholder: "[PRIVACYAI_PROVIDER_CANARY_TEST]",
+      capture: async ({ prompt }) => [{ prompt, leaked: "raw-provider-canary-secret" }],
+      sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+    }),
+    error => error?.code === "PRIVACYAI_PROVIDER_PAYLOAD_LEAK"
+  );
+});
+
+test("Codex startup audit blocks high-risk values already present in implicit context", async () => {
+  await assert.rejects(
+    auditCodexStartupContext({
+      codexPath: "/test/codex",
+      cwd: process.cwd(),
+      capture: async ({ prompt }) => [{ prompt, instructions: "Contact startup.private@example.test" }],
+      sanitizer: async text => ({
+        sanitizedPrompt: text.replace("startup.private@example.test", "[EMAIL_1]"),
+        sessionMap: { "[EMAIL_1]": "startup.private@example.test" }
+      })
+    }),
+    error => error?.code === "PRIVACYAI_UNSAFE_STARTUP_CONTEXT" && error.detectionCount === 1
+  );
+});
+
+test("Claude startup audit scans project instructions, skills, commands, agents, and plugins", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-claude-startup-"));
+  await mkdir(join(root, ".git"), { recursive: true });
+  await mkdir(join(root, ".claude", "skills", "private-skill"), { recursive: true });
+  await writeFile(join(root, "CLAUDE.md"), "Safe project instructions\n");
+  await writeFile(
+    join(root, ".claude", "skills", "private-skill", "SKILL.md"),
+    "Owner: startup.private@example.test\n"
+  );
+
+  await assert.rejects(
+    auditClaudeStartupContext({
+      cwd: root,
+      sanitizer: async text => ({
+        sanitizedPrompt: text.replace("startup.private@example.test", "[EMAIL_1]"),
+        sessionMap: { "[EMAIL_1]": "startup.private@example.test" }
+      })
+    }),
+    error => error?.code === "PRIVACYAI_UNSAFE_STARTUP_CONTEXT"
+  );
+});
+
+test("provider-bound assertion never includes the protected value in diagnostics", () => {
+  const secret = "do-not-print-this-provider-secret";
+  assert.throws(
+    () => assertNoProtectedOriginals(`payload=${secret}`, { "[API_KEY_1]": secret }),
+    error => {
+      assert.equal(error.code, "PRIVACYAI_PROVIDER_PAYLOAD_LEAK");
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      return true;
+    }
+  );
 });
 
 test("native hook declarations cover every built-in, app, plugin, and MCP tool", async () => {

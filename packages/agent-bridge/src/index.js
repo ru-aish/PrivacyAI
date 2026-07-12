@@ -14,6 +14,12 @@ export {
   savePrivacyConfig
 } from "./config-store.js";
 export { resolveExecutable } from "./executable.js";
+export { buildCodexIsolationArgs, prepareAgentRuntimeIsolation } from "./runtime-isolation.js";
+export {
+  auditClaudeStartupContext,
+  auditCodexStartupContext,
+  captureCodexPromptInput
+} from "./startup-audit.js";
 export { processHookEvent } from "./hook-adapter.js";
 export {
   launchNativeTui,

@@ -7,12 +7,15 @@ import { fileURLToPath } from "node:url";
 import { loadPrivacyConfig } from "./config-store.js";
 import { resolveExecutable } from "./executable.js";
 import { checkPrivacyModel } from "./model-health.js";
+import { createPrivacySanitizer } from "./privacy-sanitizer.js";
 import {
   buildCodexHookDeclarationArgs,
   codexEffectiveCwd,
   discoverCodexHookTrust,
   writeClaudeSettings
 } from "./native-hooks.js";
+import { prepareAgentRuntimeIsolation } from "./runtime-isolation.js";
+import { auditClaudeStartupContext, auditCodexStartupContext } from "./startup-audit.js";
 
 const PTY_HELPER = fileURLToPath(new URL("../bin/privacyai-pty.py", import.meta.url));
 
@@ -52,25 +55,46 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   };
 
   try {
+    const isolation = await prepareAgentRuntimeIsolation(flavor, runtimeDir, { ...options, env });
+    Object.assign(env, isolation.env);
     validateNativeEnvironment(flavor, env);
+    const sanitizer = options.sanitizer || createPrivacySanitizer(loaded.config, options);
     let childArgs;
     let cwd = options.cwd || process.cwd();
 
     if (flavor === "claude") {
       const settingsPath = join(runtimeDir, "claude-settings.json");
       await writeClaudeSettings(settingsPath, options);
-      childArgs = ["--settings", settingsPath, ...userArgs];
+      await (options.auditClaudeStartupContext || auditClaudeStartupContext)({
+        cwd,
+        sanitizer,
+        maxContextChars: options.startupContextMaxChars,
+        maxFiles: options.startupContextMaxFiles
+      });
+      childArgs = ["--settings", settingsPath, ...isolation.args, ...userArgs];
     } else {
       cwd = resolve(codexEffectiveCwd(userArgs, cwd));
       const declarations = buildCodexHookDeclarationArgs(options);
       const trust = await discoverCodexHookTrust({
         ...options,
         codexPath: binary,
-        declarationArgs: declarations,
+        declarationArgs: [...isolation.args, ...declarations],
         cwd,
         env
       });
-      childArgs = [...declarations, ...trust.stateArgs, ...userArgs];
+      const privacyArgs = [...isolation.args, ...declarations, ...trust.stateArgs];
+      await (options.auditCodexStartupContext || auditCodexStartupContext)({
+        codexPath: binary,
+        args: privacyArgs,
+        cwd,
+        env,
+        sanitizer,
+        capture: options.captureCodexPromptInput,
+        timeoutMs: options.startupAuditTimeoutMs,
+        maxBytes: options.startupAuditMaxBytes,
+        maxContextChars: options.startupContextMaxChars
+      });
+      childArgs = [...privacyArgs, ...userArgs];
     }
 
     return await spawnInherited(
@@ -109,25 +133,79 @@ export function validateNativeArguments(flavor, args) {
   if (!Array.isArray(args)) throw new TypeError("Agent arguments must be an array.");
 
   if (flavor === "claude") {
-    for (let index = 0; index < args.length; index += 1) {
-      const arg = String(args[index]);
+    const isolatedFlags = new Set([
+      "--settings",
+      "--setting-sources",
+      "--mcp-config",
+      "--strict-mcp-config",
+      "--plugin-dir",
+      "--agents",
+      "--tools",
+      "--allowedTools",
+      "--disallowedTools",
+      "--system-prompt",
+      "--append-system-prompt",
+      "--continue",
+      "-c",
+      "--resume",
+      "-r",
+      "--fork-session",
+      "--print",
+      "-p",
+      "--input-format",
+      "--output-format",
+      "--json-schema",
+      "--replay-user-messages",
+      "--session-id",
+      "--from-pr",
+      "--ide",
+      "--chrome",
+      "--dangerously-skip-permissions",
+      "--disable-slash-commands"
+    ]);
+    for (const rawArg of args) {
+      const arg = String(rawArg);
       if (arg === "--bare" || arg === "--safe-mode") {
         throw new Error(`PrivacyAI cannot launch Claude with ${arg} because it disables privacy hooks.`);
       }
-      if (arg === "--settings" || arg.startsWith("--settings=")) {
-        throw new Error("PrivacyAI cannot accept Claude --settings yet because it could replace the privacy hooks.");
-      }
-      if (arg === "--setting-sources" || arg.startsWith("--setting-sources=")) {
-        throw new Error("PrivacyAI cannot override Claude setting sources while privacy protection is active.");
+      const flag = arg.split("=", 1)[0];
+      if (isolatedFlags.has(flag)) {
+        throw new Error(
+          `PrivacyAI reserves Claude ${flag} while isolated startup context and privacy hooks are active.`
+        );
       }
     }
     return;
   }
 
   if (flavor === "codex") {
+    const blockedFlags = new Set([
+      "--search",
+      "-i",
+      "--image",
+      "--add-dir",
+      "-p",
+      "--profile",
+      "--dangerously-bypass-hook-trust",
+      "--dangerously-bypass-approvals-and-sandbox"
+    ]);
+    const blockedCommands = new Set(["resume", "fork", "exec", "review", "mcp-server", "app-server"]);
+
     for (let index = 0; index < args.length; index += 1) {
       const arg = String(args[index]);
       const next = String(args[index + 1] || "");
+      if (blockedCommands.has(arg)) {
+        throw new Error(`PrivacyAI cannot launch Codex ${arg} because prior or implicit context bypasses this fresh-session boundary.`);
+      }
+      if (blockedFlags.has(arg) || [...blockedFlags].some(flag => arg.startsWith(`${flag}=`))) {
+        throw new Error(`PrivacyAI reserves Codex ${arg.split("=", 1)[0]} while prompt-only isolation is active.`);
+      }
+      if (arg === "--enable" && next !== "hooks") {
+        throw new Error(`PrivacyAI cannot enable Codex feature ${next || "<missing>"} in prompt-only isolation.`);
+      }
+      if (arg.startsWith("--enable=") && arg.slice("--enable=".length) !== "hooks") {
+        throw new Error(`PrivacyAI cannot enable Codex feature ${arg.slice("--enable=".length)} in prompt-only isolation.`);
+      }
       if (arg === "--disable" && next === "hooks") {
         throw new Error("PrivacyAI cannot launch Codex with hooks disabled.");
       }
@@ -139,6 +217,9 @@ export function validateNativeArguments(flavor, args) {
       }
       if (/^--config=(?:.*\.)?hooks(?:\.|=)|^--config=features\.hooks=/.test(arg)) {
         throw new Error("PrivacyAI reserves Codex hook configuration while privacy protection is active.");
+      }
+      if (arg === "-c" || arg === "--config" || arg.startsWith("--config=")) {
+        throw new Error("PrivacyAI reserves Codex configuration overrides while isolated startup context is active.");
       }
     }
   }

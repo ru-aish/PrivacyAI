@@ -75,24 +75,22 @@ test("AGY pre-tool hook isolates all tools when the prompt contains private data
     }
   );
 
-  assert.deepEqual(
-    processAgyHookEvent({ toolCall: { name: "run_command", args: { CommandLine: "pwd" } } }, map),
-    {
-      decision: "deny",
-      reason:
-        "PrivacyAI isolated tools for this AGY turn because the prompt contains private data and the current AGY hook API cannot sanitize tool results."
-    }
+  const cleanArgs = processAgyHookEvent(
+    { toolCall: { name: "run_command", args: { CommandLine: "pwd" } } },
+    map
   );
+  assert.equal(cleanArgs.decision, "deny");
+  assert.match(cleanArgs.reason, /prompt-only isolation/);
 });
 
-test("AGY pre-tool hook allows clean calls only when no private mapping exists", () => {
-  assert.equal(
-    processAgyHookEvent(
-      { toolCall: { name: "run_command", args: { CommandLine: "pwd" } } },
-      {}
-    ).decision,
-    "allow"
+test("AGY pre-tool hook isolates clean tool calls even when the prompt map is empty", () => {
+  const result = processAgyHookEvent(
+    { toolCall: { name: "run_command", args: { CommandLine: "pwd" } } },
+    {}
   );
+  assert.equal(result.decision, "deny");
+  assert.match(result.reason, /prompt-only isolation/);
+  assert.match(result.reason, /newly discovered private data/);
   assert.deepEqual(processAgyHookEvent({ toolCall: null }, {}), {});
 });
 
@@ -211,7 +209,7 @@ test("AGY launch sanitizes the prompt before spawning and keeps the guard instal
   assert.equal(observed.options.cwd, root);
   assert.equal(observed.options.env.PRIVACYAI_AGENT_FLAVOR, "agy");
   assert.equal(observed.options.env.PRIVACYAI_AGY_SESSION_TOKEN, "launch-token");
-  assert.match(warning, /tools are isolated/);
+  assert.match(warning, /all tools are isolated/);
   await assert.rejects(readFile(hooksPath), error => error?.code === "ENOENT");
 });
 
@@ -244,7 +242,7 @@ test("AGY hook executable enforces the map only for its scoped process", async (
     { PRIVACYAI_AGY_SESSION_TOKEN: "expected" }
   );
   assert.equal(result.code, 0);
-  assert.match(JSON.parse(result.stdout).reason, /isolated tools/);
+  assert.match(JSON.parse(result.stdout).reason, /prompt-only isolation/);
 });
 
 test("AGY hook config uses wildcard pre-tool matching", () => {

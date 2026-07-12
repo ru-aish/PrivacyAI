@@ -34,17 +34,10 @@ export function processAgyHookEvent(event, sessionMap = {}) {
     };
   }
 
-  if (Object.keys(sessionMap).length > 0) {
-    return {
-      decision: "deny",
-      reason:
-        "PrivacyAI isolated tools for this AGY turn because the prompt contains private data " +
-        "and the current AGY hook API cannot sanitize tool results."
-    };
-  }
-
   return {
-    decision: "allow",
-    reason: "PrivacyAI found no protected session values in this AGY turn."
+    decision: "deny",
+    reason:
+      "PrivacyAI runs AGY in prompt-only isolation because AGY cannot sanitize newly discovered " +
+      "private data in tool results, errors, or resources."
   };
 }

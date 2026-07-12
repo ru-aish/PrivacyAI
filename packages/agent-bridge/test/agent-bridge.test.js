@@ -61,6 +61,21 @@ test("PreToolUse returns a Claude/Codex-compatible updatedInput envelope", async
   });
 });
 
+test("Codex defaults to prompt-only isolation before every tool call", async () => {
+  const result = await processHookEvent(
+    {
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "pwd" }
+    },
+    { sessionMap: {}, flavor: "codex" }
+  );
+
+  assert.equal(result.hookSpecificOutput.permissionDecision, "deny");
+  assert.match(result.hookSpecificOutput.permissionDecisionReason, /prompt-only isolation/);
+  assert.match(result.hookSpecificOutput.permissionDecisionReason, /failed, cancelled, deferred/);
+});
+
 test("PreToolUse restores Gmail and arbitrary MCP tool arguments", async () => {
   const allToolMap = {
     "contact1@example.com": "intended.recipient@example.test",
@@ -77,7 +92,7 @@ test("PreToolUse restores Gmail and arbitrary MCP tool arguments", async () => {
         body: "hi"
       }
     },
-    { sessionMap: allToolMap, flavor: "codex" }
+    { sessionMap: allToolMap, flavor: "codex", toolPolicy: "gateway" }
   );
   assert.deepEqual(gmail.hookSpecificOutput.updatedInput, {
     to: "intended.recipient@example.test",
@@ -115,7 +130,7 @@ test("PreToolUse restores Gmail and arbitrary MCP tool arguments", async () => {
           'const r = await tools.mcp__codex_apps__gmail_send_email({to:"contact1@example.com",subject:"hi",body:"hi"});'
       }
     },
-    { sessionMap: allToolMap, flavor: "codex" }
+    { sessionMap: allToolMap, flavor: "codex", toolPolicy: "gateway" }
   );
   assert.equal(
     codexAppWrapper.hookSpecificOutput.updatedInput.input.includes(
@@ -238,7 +253,7 @@ test("Codex PostToolUse uses sanitized feedback replacement", async () => {
       hook_event_name: "PostToolUse",
       tool_response: { stdout: "Ada Lovelace", code: 0 }
     },
-    { sessionMap, flavor: "codex", sanitizer: passThroughSanitizer }
+    { sessionMap, flavor: "codex", sanitizer: passThroughSanitizer, toolPolicy: "gateway" }
   );
 
   assert.equal(result.continue, false);
@@ -342,7 +357,24 @@ test("context gateway rejects oversized atomic tool results instead of partially
   );
 });
 
-test("agent hook executable restores Gmail inputs and sanitizes arbitrary tool outputs", async () => {
+test("agent hook executable denies Codex tools in strict prompt-only mode", async () => {
+  const result = await runHook(
+    {
+      hook_event_name: "PreToolUse",
+      session_id: "strict-codex-session",
+      tool_name: "Bash",
+      tool_input: { command: "pwd" }
+    },
+    { ...process.env, PRIVACYAI_AGENT_FLAVOR: "codex" }
+  );
+
+  assert.equal(result.code, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
+  assert.match(output.hookSpecificOutput.permissionDecisionReason, /prompt-only isolation/);
+});
+
+test("agent hook executable restores Claude tool inputs and sanitizes arbitrary outputs", async () => {
   const baseDir = await mkdtemp(join(tmpdir(), "privacyai-all-tool-hook-"));
   const sessionId = "all-tool-executable-session";
   const vault = new SessionVault({ baseDir });
@@ -354,7 +386,7 @@ test("agent hook executable restores Gmail inputs and sanitizes arbitrary tool o
   const env = {
     ...process.env,
     PRIVACYAI_AGENT_VAULT_DIR: baseDir,
-    PRIVACYAI_AGENT_FLAVOR: "codex"
+    PRIVACYAI_AGENT_FLAVOR: "claude"
   };
   const pre = await runHook(
     {

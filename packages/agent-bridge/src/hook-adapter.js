@@ -22,7 +22,7 @@ export async function processHookEvent(event, options = {}) {
   const eventName = event.hook_event_name;
 
   if (eventName === "PreToolUse") {
-    return processPreToolUse(event, sessionMap);
+    return processPreToolUse(event, sessionMap, flavor, options);
   }
 
   if (eventName === "PostToolUse") {
@@ -36,7 +36,19 @@ export async function processHookEvent(event, options = {}) {
   return null;
 }
 
-function processPreToolUse(event, sessionMap) {
+function processPreToolUse(event, sessionMap, flavor, options) {
+  if (resolveToolPolicy(flavor, options.toolPolicy) === "isolate") {
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason:
+          `PrivacyAI runs ${flavor} in prompt-only isolation because this host cannot guarantee ` +
+          "sanitization for every failed, cancelled, deferred, or implicitly loaded tool result."
+      }
+    };
+  }
+
   const originalInput = event.tool_input;
   if (!originalInput || typeof originalInput !== "object") return null;
 
@@ -64,6 +76,16 @@ function processPreToolUse(event, sessionMap) {
       updatedInput: restoredInput
     }
   };
+}
+
+function resolveToolPolicy(flavor, requestedPolicy) {
+  if (requestedPolicy !== undefined) {
+    if (!new Set(["gateway", "isolate"]).has(requestedPolicy)) {
+      throw new TypeError(`Unsupported PrivacyAI tool policy: ${requestedPolicy}`);
+    }
+    return requestedPolicy;
+  }
+  return flavor === "codex" || flavor === "agy" ? "isolate" : "gateway";
 }
 
 async function processPostToolUse(event, sessionMap, flavor, options) {

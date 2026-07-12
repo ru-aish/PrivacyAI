@@ -6,13 +6,48 @@ import { SessionVault } from "./session-vault.js";
 
 export const REINJECT_MARKER_PREFIX = "PRIVACYAI_REINJECT:";
 
+const SAFE_NATIVE_SLASH_COMMANDS = new Set([
+  "clear",
+  "doctor",
+  "help",
+  "login",
+  "logout",
+  "model",
+  "permissions",
+  "status",
+  "theme"
+]);
+
 export async function processPromptSubmission(event, options = {}) {
   validatePromptEvent(event);
   const runtimeDir = resolveRequiredRuntimeDir(options.runtimeDir);
   const prompt = event.prompt;
   const sessionId = event.session_id;
 
-  if (isNativeSlashCommand(prompt)) return null;
+  const nativeIngress = nativeContextIngress(prompt);
+  if (nativeIngress) {
+    return {
+      output: {
+        decision: "block",
+        reason:
+          `PrivacyAI blocked ${nativeIngress} because the native client expands it after prompt ` +
+          "sanitization and before provider submission."
+      }
+    };
+  }
+
+  const slashCommand = nativeSlashCommandName(prompt);
+  if (slashCommand) {
+    if (SAFE_NATIVE_SLASH_COMMANDS.has(slashCommand) && isNativeSlashCommand(prompt)) return null;
+    return {
+      output: {
+        decision: "block",
+        reason:
+          `PrivacyAI blocked /${slashCommand} because native slash commands can inject files, ` +
+          "history, diffs, or other context after prompt sanitization."
+      }
+    };
+  }
   if (await consumeAllowance(runtimeDir, sessionId, prompt)) return null;
 
   if (typeof options.sanitizer !== "function") {
@@ -129,6 +164,21 @@ export function allowancePath(runtimeDir, sessionId, prompt) {
 
 export function isNativeSlashCommand(prompt) {
   return /^\s*\/[A-Za-z][A-Za-z0-9_-]*\s*$/.test(prompt);
+}
+
+
+function nativeContextIngress(prompt) {
+  const value = String(prompt);
+  if (/^\s*!/.test(value)) return "a native shell escape";
+  if (/(^|[\s([{"'])@(?:~?\/|\.{1,2}\/|[A-Za-z0-9_.-]+(?:\/[^\s)\]}"']+|\.[A-Za-z0-9]{1,12}\b))/.test(value)) {
+    return "a native file/context mention";
+  }
+  return null;
+}
+
+function nativeSlashCommandName(prompt) {
+  const match = String(prompt).match(/^\s*\/([A-Za-z][A-Za-z0-9_-]*)/);
+  return match ? match[1].toLowerCase() : null;
 }
 
 async function writePrivateJson(path, value) {

@@ -93,11 +93,9 @@ export async function launchAgy(userArgs = [], options = {}) {
     });
 
     const output = options.stderr || process.stderr;
-    const protectedCount = Object.keys(result.sessionMap || {}).length;
     output.write(
-      protectedCount > 0
-        ? "PrivacyAI AGY compatibility mode: prompt sanitized; tools are isolated because AGY cannot sanitize tool results.\n"
-        : "PrivacyAI AGY compatibility mode: prompt checked; clean tools are guarded by the native AGY hook.\n"
+      "PrivacyAI AGY prompt-only mode: prompt checked locally; all tools are isolated because " +
+      "AGY cannot sanitize tool results, errors, or resources.\n"
     );
 
     const runChild = options.runChild || spawnInherited;
