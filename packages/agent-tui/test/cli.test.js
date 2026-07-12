@@ -10,6 +10,7 @@ test("published CLI exposes the native wrapper commands", async () => {
   assert.equal(result.code, 0);
   assert.match(result.stdout, /privacyai claude/);
   assert.match(result.stdout, /privacyai codex/);
+  assert.match(result.stdout, /privacyai agy/);
   assert.match(result.stdout, /privacyai onboard/);
 });
 

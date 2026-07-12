@@ -1,7 +1,7 @@
 {
   "name": "@privacy-ai/agent-tui",
   "version": "0.0.1",
-  "description": "Native Claude Code and Codex TUI wrapper for PrivacyAI.",
+  "description": "PrivacyAI wrapper for Claude Code, Codex, and Antigravity CLI.",
   "type": "module",
   "bin": {
     "privacyai": "./bin/privacyai.js"

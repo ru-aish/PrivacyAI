@@ -1,3 +1,4 @@
+import { launchAgy } from "./agy.js";
 import { loadPrivacyConfig } from "./config-store.js";
 import { launchNativeTui } from "./launcher.js";
 import { checkPrivacyModel } from "./model-health.js";
@@ -13,6 +14,9 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
       case "claude":
       case "codex":
         return await (options.launchNativeTui || launchNativeTui)(command, args, options.launchOptions);
+      case "agy":
+      case "antigravity":
+        return await (options.launchAgy || launchAgy)(args, options.agyOptions);
       case "onboard":
         await (options.runOnboarding || runOnboarding)({
           ...options.onboardOptions,
@@ -62,6 +66,7 @@ export function printHelp(output = process.stdout) {
   output.write("  privacyai onboard       Configure the local privacy model\n");
   output.write("  privacyai claude [...]  Open the normal Claude Code TUI with prompt protection\n");
   output.write("  privacyai codex [...]   Open the normal Codex TUI with prompt protection\n");
+  output.write("  privacyai agy --print \"...\"  Send a protected one-shot Antigravity prompt\n");
   output.write("  privacyai doctor        Check local setup\n");
 }
 

@@ -1,4 +1,11 @@
 export {
+  buildAgyHookConfig,
+  installAgyGlobalHook,
+  launchAgy,
+  parseAgyArguments
+} from "./agy.js";
+export { processAgyHookEvent } from "./agy-hook-adapter.js";
+export {
   assertLocalPrivacyEndpoint,
   defaultConfigPath,
   loadPrivacyConfig,

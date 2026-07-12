@@ -1,7 +1,9 @@
-# PrivacyAI native Claude Code and Codex wrapper
+# PrivacyAI native Claude Code, Codex, and Antigravity wrapper
 
-Status: working prototype, tested on Claude Code 2.1.206 and Codex 0.143.0 on
-Linux.
+Status: working prototype. The full reversible tool lifecycle is tested on
+Claude Code 2.1.206 and Codex 0.143.0 on Linux. Antigravity CLI is supported
+through a narrower, fail-closed one-shot compatibility path verified against
+the locally installed AGY build on July 12, 2026.
 
 ## Decision
 
@@ -28,6 +30,7 @@ privacyai onboard
 privacyai doctor
 privacyai claude [native Claude arguments]
 privacyai codex [native Codex arguments]
+privacyai agy --print "fresh one-shot prompt"
 ```
 
 ### `@privacy-ai/agent-bridge`
@@ -42,6 +45,8 @@ The implementation package:
 - temporary Claude hook settings;
 - per-process Codex hook declaration and trust resolution;
 - all-tool pre/post transformations for built-in, app, and MCP tools;
+- pre-launch AGY prompt sanitization and a temporary global `PreToolUse` guard;
+- serialized AGY hook-file locking, stale-lock recovery, and exact cleanup;
 - onboarding.
 
 ## Prompt path
@@ -83,7 +88,40 @@ before the next provider request when a known original remains. Restored
 are local execution records. A recognizable placeholder with no mapping is
 denied rather than executed.
 
-## Native experience preserved
+## Antigravity compatibility path
+
+The installed AGY lifecycle API has materially different capabilities:
+
+- there is no `UserPromptSubmit` hook;
+- `PreToolUse` can allow or deny a call but cannot replace `toolCall.args`;
+- `PostToolUse` accepts only an empty result and cannot replace tool output;
+- the local hook documentation explicitly says pre-tool overwrite is not yet
+  implemented.
+
+PrivacyAI therefore does not claim Claude/Codex-equivalent AGY protection. It
+supports only a fresh one-shot prompt supplied through `-p`, `--print`, or
+`--prompt`. The prompt is sanitized by the configured local model before the
+official AGY process starts. Interactive prompt mode, conversation continuation,
+conversation reuse, and permission bypass are rejected.
+
+For the lifetime of the AGY child, PrivacyAI merges a uniquely named wildcard
+`PreToolUse` guard into `~/.gemini/config/hooks.json`. The file is protected by a
+process lock, existing hooks are preserved, stale PrivacyAI hooks and dead locks
+are cleaned up, and the original bytes and mode are restored when no external
+changes occurred. A random per-launch environment token scopes the hook to the
+wrapped AGY process; unrelated AGY processes explicitly bypass it before the
+private map is read. Protected AGY runs are intentionally serialized because
+this installed build discovers lifecycle hooks from the global root rather than
+from a per-process settings argument.
+
+When the sanitizer creates a reversible private mapping, every AGY tool call is
+denied for that turn. This is required because even a tool call with apparently
+clean arguments could return a mapped private value, and AGY provides no output
+rewrite boundary. When the map is empty, clean tools can proceed through the
+same guard. A recognizable placeholder or known original in tool arguments is
+always denied.
+
+## Native experience preserved for Claude and Codex
 
 The child process owns a real PTY. PrivacyAI forwards terminal bytes, resize
 events, and keyboard input without rendering its own replacement interface.
@@ -99,6 +137,9 @@ Consequently the following remain native:
 - provider authentication and subscription billing.
 
 PrivacyAI adds only the block-and-reinject lifecycle around protected prompts.
+AGY one-shot mode still uses the official CLI, authentication, model selection,
+and provider route, but it does not open an unrestricted interactive TUI because
+that would bypass the pre-launch prompt boundary.
 
 ## Onboarding
 
@@ -121,7 +162,9 @@ is missing. For Claude, it also rejects `--bare`, `--safe-mode`, custom
 `CLAUDE_CODE_SAFE_MODE` environments because those paths can suppress the
 privacy hooks. Temporary session settings explicitly set `disableAllHooks` to
 `false` while preserving normal MCP configuration and native `--mcp-config`
-usage.
+usage. For AGY, the launcher rejects interactive-prompt, continuation,
+conversation-reuse, and `--dangerously-skip-permissions` modes because they
+would bypass or weaken the one-shot privacy boundary.
 
 ## Verified results
 
@@ -154,6 +197,26 @@ pnpm --filter @privacy-ai/agent-bridge test:e2e:lmstudio
 
 It verified prompt sanitization, local reversible-map persistence, pre-tool
 restoration, successful local execution, and post-tool re-sanitization.
+
+### Antigravity hook and one-shot verification
+
+The locally installed AGY build was exercised with disposable lifecycle hooks
+and harmless prompts on July 12, 2026. A project-local `.agents/hooks.json` was
+not discovered by that build, while a temporary global
+`~/.gemini/config/hooks.json` was loaded and fired `PreInvocation`,
+`PostInvocation`, `PreToolUse`, `PostToolUse`, and `Stop` events.
+
+A clean one-shot probe returned `AGY_GLOBAL_HOOK_OK`. A second probe asked AGY
+to execute `pwd`; the wildcard pre-tool hook received the real payload before
+execution, including tool name `run_command` and arguments `CommandLine`, `Cwd`,
+and `WaitMsBeforeAsync`. The clean call completed and returned the AGY scratch
+directory. The post-tool payload contained call metadata but no replaceable tool
+result, confirming the documented output-rewrite limitation.
+
+The automated compatibility tests additionally verify prompt replacement before
+spawn, sensitive-turn tool isolation, clean-turn tool allowance, invalid-mode
+rejection, hook-file merging, exact restoration, stale-hook cleanup, and
+preservation of concurrent external hook changes.
 
 ### Native all-tool MCP verification
 
@@ -253,21 +316,25 @@ conversation turns remain sanitized.
 
 At the time of implementation:
 
-- SDK tests: 73 passed, 0 failed;
-- bridge tests: 29 passed, 3 optional E2Es skipped, 0 failed;
+- SDK tests: 82 passed, 0 failed;
+- bridge tests after adding AGY: 40 passed, 3 optional E2Es skipped, 0 failed;
 - installed Claude MCP E2E: 1 passed, covering both successful and failed tool
   results;
 - public CLI tests: 1 passed, 0 failed;
 - Python PTY helper compiled successfully;
 - Codex installed-binary hook discovery returned all three expected hooks and
-  their current hashes.
+  their current hashes;
+- live AGY probes confirmed global lifecycle-hook discovery and real pre-tool
+  payloads before `run_command` execution.
 
 ## Deliberate limitations
 
 Phase one does not sanitize file contents, project instructions, skills, MCP
 resource contents, or arbitrary local context before those values enter the
-model conversation. It protects user prompts and every tool lifecycle event the
-native CLI exposes through `PreToolUse` and `PostToolUse`.
+model conversation. Claude Code and Codex protect user prompts and every tool
+lifecycle event their native CLIs expose through `PreToolUse` and `PostToolUse`.
+AGY has no equivalent rewrite boundary, so private one-shot turns are deliberately
+tool-isolated rather than given weaker protection.
 
 Assistant prose remains placeholder-based. Restoring every placeholder by
 blindly rewriting terminal output would risk exposing real values inside local
@@ -275,8 +342,8 @@ command logs and tool panels, so that feature needs a message-aware display
 boundary rather than generic PTY text replacement.
 
 The vault uses restrictive filesystem permissions but is not encrypted yet.
-Concurrent hook processes can still require a stronger locking strategy for
-production use.
+AGY sessions are serialized with a global hook-file lock; Claude/Codex hook and
+vault concurrency still merit further production hardening.
 
 Claude hook-event/debug streams and Codex local event records can retain
 restored tool arguments so the native UI and local audit trail show what

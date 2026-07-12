@@ -109,27 +109,36 @@ console.log(safePrompt);
 * **Extension Source:** [apps/browser-extension/README.md](apps/browser-extension/README.md)
 * **Architecture Docs:** [docs/architecture.md](docs/architecture.md)
 * **Code Examples:** [examples/README.md](examples/README.md)
-## Native Claude Code and Codex protection
+## Native Claude Code, Codex, and Antigravity protection
 
 PrivacyAI can wrap the user's existing agent CLI without proxying inference or
-replacing its terminal interface:
+replacing its provider login:
 
 ```bash
 npm install --global @privacy-ai/agent-tui
 privacyai onboard
 privacyai claude
 privacyai codex
+privacyai agy --print "your prompt"
 ```
 
 Onboarding scans both Ollama and a running LM Studio local server and lets the
-user choose any usable downloaded language model. The original prompt is then
-sanitized locally before the official CLI sends it. Placeholder values are then
-restored recursively immediately before any hooked built-in, app, plugin, or MCP
-tool executes, and known real values in successful tool results are sanitized
-before returning to the task model. Claude hook-disabling modes are rejected,
-and a failed Claude tool result containing a known original is stopped before a
-next provider request. Native local session history may retain real values by
-design; the remote provider receives the sanitized conversation. Current
-support is Linux and macOS; file contents, project instructions, skills, and
-other context injected before the prompt hook remain outside this boundary.
-See `docs/native-agent-tui-wrapper.md` for the design and verified results.
+user choose any usable downloaded language model. Claude Code and Codex keep
+their native TUI: prompts are sanitized locally, placeholders are restored
+immediately before hooked built-in, app, plugin, or MCP tools execute, and known
+real values in successful tool results are sanitized before returning to the
+task model. Claude hook-disabling modes are rejected, and a failed Claude tool
+result containing a known original is stopped before another provider request.
+
+Antigravity currently exposes a narrower hook API, so PrivacyAI supports only
+fresh one-shot AGY prompts. The prompt is sanitized before AGY starts and a
+temporary wildcard global tool guard is installed. If the prompt creates a
+private mapping, tools are isolated for that turn because AGY cannot rewrite
+inputs or sanitize tool results. Resume, interactive-prompt, conversation-reuse,
+and permission-bypass modes fail closed.
+
+Native local session history may retain real values by design; the remote
+provider receives the sanitized conversation. Current support is Linux and
+macOS; file contents, project instructions, skills, and other context injected
+before the privacy boundary remain outside this protection. See
+`docs/native-agent-tui-wrapper.md` for the design and verified results.

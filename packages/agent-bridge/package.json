@@ -1,7 +1,7 @@
 {
   "name": "@privacy-ai/agent-bridge",
   "version": "0.0.1",
-  "description": "Local prompt and all-tool privacy engine for native agent CLIs.",
+  "description": "Local prompt and tool privacy engine for native agent CLIs.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -10,7 +10,8 @@
   },
   "bin": {
     "privacyai-agent-hook": "./bin/privacyai-agent-hook.js",
-    "privacyai-prompt-hook": "./bin/privacyai-prompt-hook.js"
+    "privacyai-prompt-hook": "./bin/privacyai-prompt-hook.js",
+    "privacyai-agy-hook": "./bin/privacyai-agy-hook.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
