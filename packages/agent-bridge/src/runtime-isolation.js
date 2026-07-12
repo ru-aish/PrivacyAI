@@ -64,7 +64,27 @@ async function prepareClaudeIsolation(runtimeDir, options) {
   await writeFile(emptyMcpPath, "{}\n", { mode: 0o600 });
 
   return {
-    env: { CLAUDE_CONFIG_DIR: targetHome },
+    env: {
+      CLAUDE_CONFIG_DIR: targetHome,
+      CLAUDE_CODE_AUTO_CONNECT_IDE: "false",
+      CLAUDE_CODE_DISABLE_AGENT_VIEW: "1",
+      CLAUDE_CODE_DISABLE_ATTACHMENTS: "1",
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+      CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+      CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
+      CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1",
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+      CLAUDE_CODE_SKIP_PROMPT_HISTORY: "1",
+      CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
+      DISABLE_ERROR_REPORTING: "1",
+      DISABLE_TELEMETRY: "1",
+      ENABLE_CLAUDEAI_MCP_SERVERS: "false",
+      OTEL_LOG_ASSISTANT_RESPONSES: "0",
+      OTEL_LOG_RAW_API_BODIES: "0",
+      OTEL_LOG_TOOL_CONTENT: "0",
+      OTEL_LOG_TOOL_DETAILS: "0",
+      OTEL_LOG_USER_PROMPTS: "0"
+    },
     args: [
       "--setting-sources",
       "user",

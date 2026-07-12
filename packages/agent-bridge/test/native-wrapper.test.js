@@ -92,6 +92,86 @@ test("prompt submission blocks raw text, stores the map, and allows only the rei
   assert.equal(await consumeAllowance(runtimeDir, "native-session-1", first.sanitizedPrompt), false);
 });
 
+test("clean prompts do not create empty session-vault records", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-clean-prompt-"));
+  const runtimeDir = join(root, "runtime");
+  const vault = new SessionVault({ baseDir: join(root, "vault") });
+  await mkdir(runtimeDir, { mode: 0o700 });
+
+  const result = await processPromptSubmission(
+    {
+      hook_event_name: "UserPromptSubmit",
+      session_id: "clean-session",
+      prompt: "Explain this public algorithm"
+    },
+    {
+      runtimeDir,
+      vault,
+      sanitizer: async prompt => ({ sanitizedPrompt: prompt, sessionMap: {} })
+    }
+  );
+
+  assert.equal(result, null);
+  await assert.rejects(stat(vault.pathForSession("clean-session")), /ENOENT/);
+});
+
+test("prompt flow fails closed when a sanitizer mapping leaves its original in provider text", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-prompt-leak-"));
+  const runtimeDir = join(root, "runtime");
+  const vault = new SessionVault({ baseDir: join(root, "vault") });
+  await mkdir(runtimeDir, { mode: 0o700 });
+
+  await assert.rejects(
+    processPromptSubmission(
+      {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "leaking-session",
+        prompt: "Use prompt.secret@example.test"
+      },
+      {
+        runtimeDir,
+        vault,
+        sanitizer: async prompt => ({
+          sanitizedPrompt: prompt,
+          sessionMap: { "[EMAIL_1]": "prompt.secret@example.test" }
+        })
+      }
+    ),
+    error => {
+      assert.equal(error.code, "PRIVACYAI_PROMPT_LEAK");
+      assert.doesNotMatch(error.message, /prompt\.secret@example\.test/);
+      return true;
+    }
+  );
+  await assert.rejects(stat(vault.pathForSession("leaking-session")), /ENOENT/);
+});
+
+test("known values from earlier turns cannot pass through a later no-op sanitizer result", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-known-prompt-leak-"));
+  const runtimeDir = join(root, "runtime");
+  const vault = new SessionVault({ baseDir: join(root, "vault") });
+  await mkdir(runtimeDir, { mode: 0o700 });
+  await vault.save("known-session", {
+    "[EMAIL_1]": "known.secret@example.test"
+  });
+
+  await assert.rejects(
+    processPromptSubmission(
+      {
+        hook_event_name: "UserPromptSubmit",
+        session_id: "known-session",
+        prompt: "Use known.secret@example.test again"
+      },
+      {
+        runtimeDir,
+        vault,
+        sanitizer: async prompt => ({ sanitizedPrompt: prompt, sessionMap: {} })
+      }
+    ),
+    error => error?.code === "PRIVACYAI_PROMPT_LEAK"
+  );
+});
+
 test("session placeholder collisions are rebased across turns", () => {
   const result = rebaseSessionAdditions(
     "Use [API_KEY_1] and Alex Morgan",
@@ -123,8 +203,16 @@ test("argument guards reject flags that can replace privacy hooks", () => {
   assert.throws(() => validateNativeArguments("codex", ["resume", "--last"]), /fresh-session boundary/);
   assert.throws(() => validateNativeArguments("codex", ["--enable", "shell_tool"]), /cannot enable/);
   assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"]), /prompt-only isolation/);
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--model", "resume"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--", "resume"]));
   assert.throws(() => validateNativeArguments("claude", ["--resume", "session"]), /isolated startup context/);
   assert.throws(() => validateNativeArguments("claude", ["--plugin-dir", "plugin"]), /isolated startup context/);
+  assert.throws(() => validateNativeArguments("claude", ["--plugin-url", "https://example.test/plugin.zip"]), /isolated startup context/);
+  assert.throws(() => validateNativeArguments("claude", ["--add-dir", "../private"]), /isolated startup context/);
+  assert.throws(() => validateNativeArguments("claude", ["--system-prompt-file", "private.txt"]), /isolated startup context/);
+  assert.throws(() => validateNativeArguments("claude", ["--allowed-tools", "Read"]), /isolated startup context/);
+  assert.throws(() => validateNativeArguments("claude", ["--remote-control"]), /isolated startup context/);
+  assert.throws(() => validateNativeArguments("claude", ["--bg", "task"]), /isolated startup context/);
   assert.doesNotThrow(() => validateNativeArguments("claude", ["--model", "sonnet"]));
 });
 
@@ -499,6 +587,15 @@ test("runtime isolation copies only credential material into private agent homes
   assert.deepEqual(claude.args.slice(0, 2), ["--setting-sources", "user"]);
   assert.equal(claude.args.includes("--strict-mcp-config"), true);
   assert.equal(claude.args.includes("--disable-slash-commands"), true);
+  assert.equal(claude.env.CLAUDE_CODE_DISABLE_ATTACHMENTS, "1");
+  assert.equal(claude.env.CLAUDE_CODE_DISABLE_CLAUDE_MDS, "1");
+  assert.equal(claude.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, "1");
+  assert.equal(claude.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, "1");
+  assert.equal(claude.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
+  assert.equal(claude.env.ENABLE_CLAUDEAI_MCP_SERVERS, "false");
+  assert.equal(claude.env.OTEL_LOG_RAW_API_BODIES, "0");
+  assert.equal(claude.env.OTEL_LOG_TOOL_DETAILS, "0");
+  assert.equal(claude.env.OTEL_LOG_USER_PROMPTS, "0");
 });
 
 test("Codex startup audit captures serialized model input and verifies the local canary", async () => {

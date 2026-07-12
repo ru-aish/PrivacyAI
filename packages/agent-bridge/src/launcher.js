@@ -134,34 +134,56 @@ export function validateNativeArguments(flavor, args) {
 
   if (flavor === "claude") {
     const isolatedFlags = new Set([
-      "--settings",
-      "--setting-sources",
-      "--mcp-config",
-      "--strict-mcp-config",
-      "--plugin-dir",
+      "--add-dir",
+      "--agent",
       "--agents",
-      "--tools",
+      "--allow-dangerously-skip-permissions",
       "--allowedTools",
-      "--disallowedTools",
-      "--system-prompt",
+      "--allowed-tools",
+      "--append-subagent-system-prompt",
       "--append-system-prompt",
+      "--append-system-prompt-file",
+      "--background",
+      "--bg",
+      "--channels",
+      "--chrome",
+      "--cloud",
       "--continue",
-      "-c",
-      "--resume",
-      "-r",
+      "--dangerously-load-development-channels",
+      "--dangerously-skip-permissions",
+      "--disable-slash-commands",
+      "--disallowedTools",
+      "--disallowed-tools",
+      "--exec",
       "--fork-session",
-      "--print",
-      "-p",
-      "--input-format",
-      "--output-format",
-      "--json-schema",
-      "--replay-user-messages",
-      "--session-id",
       "--from-pr",
       "--ide",
-      "--chrome",
-      "--dangerously-skip-permissions",
-      "--disable-slash-commands"
+      "--include-hook-events",
+      "--include-partial-messages",
+      "--input-format",
+      "--json-schema",
+      "--mcp-config",
+      "--output-format",
+      "--plugin-dir",
+      "--plugin-url",
+      "--print",
+      "--remote",
+      "--remote-control",
+      "--replay-user-messages",
+      "--resume",
+      "--session-id",
+      "--setting-sources",
+      "--settings",
+      "--strict-mcp-config",
+      "--system-prompt",
+      "--system-prompt-file",
+      "--teleport",
+      "--tools",
+      "--worktree",
+      "-c",
+      "-p",
+      "-r",
+      "-w"
     ]);
     for (const rawArg of args) {
       const arg = String(rawArg);
@@ -191,9 +213,24 @@ export function validateNativeArguments(flavor, args) {
     ]);
     const blockedCommands = new Set(["resume", "fork", "exec", "review", "mcp-server", "app-server"]);
 
+    const valueFlags = new Set([
+      "--ask-for-approval",
+      "--cd",
+      "--disable",
+      "--enable",
+      "--local-provider",
+      "--model",
+      "--sandbox",
+      "-C",
+      "-a",
+      "-m",
+      "-s"
+    ]);
+
     for (let index = 0; index < args.length; index += 1) {
       const arg = String(args[index]);
       const next = String(args[index + 1] || "");
+      if (arg === "--") break;
       if (blockedCommands.has(arg)) {
         throw new Error(`PrivacyAI cannot launch Codex ${arg} because prior or implicit context bypasses this fresh-session boundary.`);
       }
@@ -221,6 +258,7 @@ export function validateNativeArguments(flavor, args) {
       if (arg === "-c" || arg === "--config" || arg.startsWith("--config=")) {
         throw new Error("PrivacyAI reserves Codex configuration overrides while isolated startup context is active.");
       }
+      if (valueFlags.has(arg)) index += 1;
     }
   }
 }

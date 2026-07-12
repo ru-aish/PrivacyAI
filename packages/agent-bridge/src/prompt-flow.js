@@ -56,23 +56,37 @@ export async function processPromptSubmission(event, options = {}) {
 
   const vault = options.vault || new SessionVault(options);
   const result = await options.sanitizer(prompt);
+  if (typeof result?.sanitizedPrompt !== "string") {
+    throw new TypeError("Sanitizer did not return sanitizedPrompt.");
+  }
+
+  const rawSessionMap = normalizePromptSessionMap(result.sessionMap);
+  const currentSnapshot = await vault.load(sessionId);
+  assertPromptContainsNoMappedOriginals(result.sanitizedPrompt, {
+    ...currentSnapshot.sessionMap,
+    ...rawSessionMap
+  });
+  if (result.sanitizedPrompt === prompt && Object.keys(rawSessionMap).length === 0) {
+    return null;
+  }
+
   let sanitizedPrompt;
   let sessionMap;
-
   await vault.update(sessionId, current => {
     const rebased = rebaseSessionAdditions(
-      result?.sanitizedPrompt,
-      result?.sessionMap || {},
+      result.sanitizedPrompt,
+      rawSessionMap,
       current.sessionMap
     );
     sanitizedPrompt = rebased.sanitizedPrompt;
     sessionMap = rebased.sessionMap;
+    assertPromptContainsNoMappedOriginals(sanitizedPrompt, {
+      ...current.sessionMap,
+      ...sessionMap
+    });
     return { ...current.sessionMap, ...sessionMap };
   });
 
-  if (typeof sanitizedPrompt !== "string") {
-    throw new TypeError("Sanitizer did not return sanitizedPrompt.");
-  }
   if (sanitizedPrompt === prompt && Object.keys(sessionMap).length === 0) return null;
 
   const id = randomUUID();
@@ -166,6 +180,34 @@ export function isNativeSlashCommand(prompt) {
   return /^\s*\/[A-Za-z][A-Za-z0-9_-]*\s*$/.test(prompt);
 }
 
+function normalizePromptSessionMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([placeholder, original]) =>
+        typeof placeholder === "string" &&
+        typeof original === "string" &&
+        placeholder.length > 0 &&
+        original.length > 0 &&
+        placeholder !== original
+    )
+  );
+}
+
+function assertPromptContainsNoMappedOriginals(prompt, sessionMap) {
+  let leakCount = 0;
+  for (const original of Object.values(sessionMap)) {
+    if (prompt.includes(original)) leakCount += 1;
+  }
+  if (leakCount === 0) return;
+
+  const error = new Error(
+    `PrivacyAI blocked prompt reinjection because ${leakCount} protected value(s) remained.`
+  );
+  error.code = "PRIVACYAI_PROMPT_LEAK";
+  error.leakCount = leakCount;
+  throw error;
+}
 
 function nativeContextIngress(prompt) {
   const value = String(prompt);
