@@ -20,22 +20,25 @@ export async function processPromptSubmission(event, options = {}) {
   }
 
   const vault = options.vault || new SessionVault(options);
-  const current = await vault.load(sessionId);
   const result = await options.sanitizer(prompt);
-  const rebased = rebaseSessionAdditions(
-    result?.sanitizedPrompt,
-    result?.sessionMap || {},
-    current.sessionMap
-  );
-  const sanitizedPrompt = rebased.sanitizedPrompt;
-  const sessionMap = rebased.sessionMap;
+  let sanitizedPrompt;
+  let sessionMap;
+
+  await vault.update(sessionId, current => {
+    const rebased = rebaseSessionAdditions(
+      result?.sanitizedPrompt,
+      result?.sessionMap || {},
+      current.sessionMap
+    );
+    sanitizedPrompt = rebased.sanitizedPrompt;
+    sessionMap = rebased.sessionMap;
+    return { ...current.sessionMap, ...sessionMap };
+  });
 
   if (typeof sanitizedPrompt !== "string") {
     throw new TypeError("Sanitizer did not return sanitizedPrompt.");
   }
   if (sanitizedPrompt === prompt && Object.keys(sessionMap).length === 0) return null;
-
-  await vault.save(sessionId, { ...current.sessionMap, ...sessionMap });
 
   const id = randomUUID();
   await writePrivateJson(join(runtimeDir, "pending", `${id}.json`), {

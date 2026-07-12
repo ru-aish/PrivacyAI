@@ -1,14 +1,29 @@
 #!/usr/bin/env node
+import { loadPrivacyConfig } from "../src/config-store.js";
 import { processHookEvent } from "../src/hook-adapter.js";
-import { loadSessionMap } from "../src/session-vault.js";
+import { createPrivacySanitizer } from "../src/privacy-sanitizer.js";
+import { SessionVault } from "../src/session-vault.js";
 
 try {
   const raw = await readStdin();
   const event = JSON.parse(raw);
-  const sessionMap = await loadSessionMap({ sessionId: event.session_id });
-  const output = processHookEvent(event, {
+  const vault = new SessionVault();
+  const sessionId = event.session_id;
+  const sessionMap = sessionId ? (await vault.load(sessionId)).sessionMap : {};
+  const needsContextSanitizer = event.hook_event_name !== "PreToolUse";
+  let sanitizer;
+
+  if (needsContextSanitizer) {
+    const loaded = await loadPrivacyConfig();
+    if (!loaded.configured) throw new Error("privacy sanitizer is not configured");
+    sanitizer = createPrivacySanitizer(loaded.config);
+  }
+
+  const output = await processHookEvent(event, {
     flavor: process.env.PRIVACYAI_AGENT_FLAVOR || "claude",
-    sessionMap
+    sessionMap,
+    sanitizer,
+    onSessionMapAdditions: additions => vault.merge(sessionId, additions)
   });
 
   if (output) process.stdout.write(JSON.stringify(output));

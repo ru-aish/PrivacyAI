@@ -5,6 +5,7 @@ export {
   parseAgyArguments
 } from "./agy.js";
 export { processAgyHookEvent } from "./agy-hook-adapter.js";
+export { assertNoProtectedOriginals, sanitizeModelVisibleValue } from "./context-gateway.js";
 export {
   assertLocalPrivacyEndpoint,
   defaultConfigPath,

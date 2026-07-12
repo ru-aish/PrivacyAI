@@ -20,6 +20,8 @@ const sessionMap = {
   "[API_KEY_1]": "sk-local-secret"
 };
 
+const passThroughSanitizer = async text => ({ sanitizedPrompt: text, sessionMap: {} });
+
 test("recursively restores tool arguments without changing object keys", () => {
   const input = {
     command: "echo [PERSON_1]",
@@ -44,8 +46,8 @@ test("recursively sanitizes known originals in tool output", () => {
   });
 });
 
-test("PreToolUse returns a Claude/Codex-compatible updatedInput envelope", () => {
-  const result = processHookEvent(
+test("PreToolUse returns a Claude/Codex-compatible updatedInput envelope", async () => {
+  const result = await processHookEvent(
     {
       hook_event_name: "PreToolUse",
       tool_input: { command: "printf [PERSON_1]" }
@@ -59,13 +61,13 @@ test("PreToolUse returns a Claude/Codex-compatible updatedInput envelope", () =>
   });
 });
 
-test("PreToolUse restores Gmail and arbitrary MCP tool arguments", () => {
+test("PreToolUse restores Gmail and arbitrary MCP tool arguments", async () => {
   const allToolMap = {
     "contact1@example.com": "intended.recipient@example.test",
     "[API_KEY_1]": "real-local-secret"
   };
 
-  const gmail = processHookEvent(
+  const gmail = await processHookEvent(
     {
       hook_event_name: "PreToolUse",
       tool_name: "codex_apps.gmail.send_email",
@@ -83,7 +85,7 @@ test("PreToolUse restores Gmail and arbitrary MCP tool arguments", () => {
     body: "hi"
   });
 
-  const mcp = processHookEvent(
+  const mcp = await processHookEvent(
     {
       hook_event_name: "PreToolUse",
       tool_name: "mcp__example__create_record",
@@ -104,7 +106,7 @@ test("PreToolUse restores Gmail and arbitrary MCP tool arguments", () => {
     ]
   });
 
-  const codexAppWrapper = processHookEvent(
+  const codexAppWrapper = await processHookEvent(
     {
       hook_event_name: "PreToolUse",
       tool_name: "exec",
@@ -127,8 +129,8 @@ test("PreToolUse restores Gmail and arbitrary MCP tool arguments", () => {
   );
 });
 
-test("PostToolUse sanitizes arbitrary MCP tool output", () => {
-  const result = processHookEvent(
+test("PostToolUse sanitizes arbitrary MCP tool output", async () => {
+  const result = await processHookEvent(
     {
       hook_event_name: "PostToolUse",
       tool_name: "mcp__example__lookup_record",
@@ -142,7 +144,8 @@ test("PostToolUse sanitizes arbitrary MCP tool output", () => {
       sessionMap: {
         "contact1@example.com": "intended.recipient@example.test",
         "[API_KEY_1]": "real-local-secret"
-      }
+      },
+      sanitizer: passThroughSanitizer
     }
   );
 
@@ -152,8 +155,8 @@ test("PostToolUse sanitizes arbitrary MCP tool output", () => {
   });
 });
 
-test("PreToolUse fails closed when placeholders cannot be resolved", () => {
-  const result = processHookEvent(
+test("PreToolUse fails closed when placeholders cannot be resolved", async () => {
+  const result = await processHookEvent(
     {
       hook_event_name: "PreToolUse",
       tool_input: { command: "printf [EMAIL_7]" }
@@ -165,13 +168,13 @@ test("PreToolUse fails closed when placeholders cannot be resolved", () => {
   assert.match(result.hookSpecificOutput.permissionDecisionReason, /could not be resolved/);
 });
 
-test("Claude PostToolUse preserves structured output shape", () => {
-  const result = processHookEvent(
+test("Claude PostToolUse preserves structured output shape", async () => {
+  const result = await processHookEvent(
     {
       hook_event_name: "PostToolUse",
       tool_response: { stdout: "Ada Lovelace", code: 0 }
     },
-    { sessionMap, flavor: "claude" }
+    { sessionMap, flavor: "claude", sanitizer: passThroughSanitizer }
   );
 
   assert.deepEqual(result, {
@@ -182,8 +185,8 @@ test("Claude PostToolUse preserves structured output shape", () => {
   });
 });
 
-test("Claude PostToolBatch fails closed when a failed result still contains a known original", () => {
-  const result = processHookEvent(
+test("Claude PostToolBatch fails closed when a failed result still contains a known original", async () => {
+  const result = await processHookEvent(
     {
       hook_event_name: "PostToolBatch",
       tool_calls: [
@@ -197,16 +200,17 @@ test("Claude PostToolBatch fails closed when a failed result still contains a kn
     },
     {
       flavor: "claude",
-      sessionMap: { "contact1@example.com": "intended.recipient@example.test" }
+      sessionMap: { "contact1@example.com": "intended.recipient@example.test" },
+      sanitizer: passThroughSanitizer
     }
   );
 
   assert.equal(result.continue, false);
-  assert.match(result.stopReason, /failed or batched tool result/);
+  assert.match(result.stopReason, /failed, cancelled, or batched tool result/);
 });
 
-test("Claude PostToolBatch ignores restored tool inputs after outputs were sanitized", () => {
-  const result = processHookEvent(
+test("Claude PostToolBatch ignores restored tool inputs after outputs were sanitized", async () => {
+  const result = await processHookEvent(
     {
       hook_event_name: "PostToolBatch",
       tool_calls: [
@@ -220,25 +224,122 @@ test("Claude PostToolBatch ignores restored tool inputs after outputs were sanit
     },
     {
       flavor: "claude",
-      sessionMap: { "contact1@example.com": "intended.recipient@example.test" }
+      sessionMap: { "contact1@example.com": "intended.recipient@example.test" },
+      sanitizer: passThroughSanitizer
     }
   );
 
   assert.equal(result, null);
 });
 
-test("Codex PostToolUse uses sanitized feedback replacement", () => {
-  const result = processHookEvent(
+test("Codex PostToolUse uses sanitized feedback replacement", async () => {
+  const result = await processHookEvent(
     {
       hook_event_name: "PostToolUse",
       tool_response: { stdout: "Ada Lovelace", code: 0 }
     },
-    { sessionMap, flavor: "codex" }
+    { sessionMap, flavor: "codex", sanitizer: passThroughSanitizer }
   );
 
   assert.equal(result.continue, false);
   assert.equal(result.reason, '{"stdout":"[PERSON_1]","code":0}');
   assert.doesNotMatch(result.reason, /Ada Lovelace/);
+});
+
+
+test("PostToolUse discovers new private values in JSON keys and persists one stable mapping", async () => {
+  const additions = [];
+  const result = await processHookEvent(
+    {
+      hook_event_name: "PostToolUse",
+      tool_name: "Read",
+      tool_response: {
+        "fresh.secret@example.test": "owner=fresh.secret@example.test",
+        nested: ["fresh.secret@example.test"]
+      }
+    },
+    {
+      flavor: "claude",
+      sessionMap: {},
+      sanitizer: async text => ({
+        sanitizedPrompt: text.split("fresh.secret@example.test").join("[EMAIL_1]"),
+        sessionMap: { "[EMAIL_1]": "fresh.secret@example.test" }
+      }),
+      onSessionMapAdditions: async value => additions.push(value)
+    }
+  );
+
+  assert.deepEqual(result.hookSpecificOutput.updatedToolOutput, {
+    "[EMAIL_1]": "owner=[EMAIL_1]",
+    nested: ["[EMAIL_1]"]
+  });
+  assert.deepEqual(additions, [{ "[EMAIL_1]": "fresh.secret@example.test" }]);
+});
+
+test("failed tool events discover new private values and stop before another model request", async () => {
+  const additions = [];
+  const result = await processHookEvent(
+    {
+      hook_event_name: "PostToolUseFailure",
+      session_id: "failure-session",
+      tool_name: "Bash",
+      tool_input: { command: "false" },
+      stderr: "Authorization failed for sk-new-output-secret",
+      error: "exit 1"
+    },
+    {
+      flavor: "codex",
+      sessionMap: {},
+      sanitizer: async text => ({
+        sanitizedPrompt: text.replace("sk-new-output-secret", "[API_KEY_1]"),
+        sessionMap: { "[API_KEY_1]": "sk-new-output-secret" }
+      }),
+      onSessionMapAdditions: async value => additions.push(value)
+    }
+  );
+
+  assert.equal(result.continue, false);
+  assert.match(result.stopReason, /failed, cancelled, or batched tool result/);
+  assert.deepEqual(additions, [{ "[API_KEY_1]": "sk-new-output-secret" }]);
+});
+
+test("context gateway fails closed when sanitization corrupts structured output", async () => {
+  await assert.rejects(
+    processHookEvent(
+      {
+        hook_event_name: "PostToolUse",
+        tool_response: { secret: "new-private-value" }
+      },
+      {
+        flavor: "claude",
+        sessionMap: {},
+        sanitizer: async () => ({
+          sanitizedPrompt: "not-json",
+          sessionMap: { "[PRIVATE_VALUE_1]": "new-private-value" }
+        }),
+        onSessionMapAdditions: async () => {}
+      }
+    ),
+    error => error?.code === "PRIVACYAI_INVALID_SANITIZED_CONTEXT"
+  );
+});
+
+test("context gateway rejects oversized atomic tool results instead of partially scanning them", async () => {
+  await assert.rejects(
+    processHookEvent(
+      {
+        hook_event_name: "PostToolUse",
+        tool_response: "x".repeat(64)
+      },
+      {
+        flavor: "claude",
+        sessionMap: {},
+        maxContextChars: 32,
+        sanitizer: passThroughSanitizer
+      }
+    ),
+    error => error?.code === "PRIVACYAI_CONTEXT_TOO_LARGE"
+  );
 });
 
 test("agent hook executable restores Gmail inputs and sanitizes arbitrary tool outputs", async () => {
@@ -305,6 +406,25 @@ test("SessionVault hashes session ids and writes private files", async () => {
 
   const loaded = JSON.parse(await readFile(saved.path, "utf8"));
   assert.deepEqual(loaded.sessionMap, sessionMap);
+});
+
+
+test("SessionVault serializes concurrent map extensions without losing updates", async () => {
+  const baseDir = await mkdtemp(join(tmpdir(), "privacyai-agent-vault-race-"));
+  const vault = new SessionVault({ baseDir });
+  const sessionId = "parallel-session";
+
+  await Promise.all([
+    vault.merge(sessionId, { "[EMAIL_1]": "first@example.test" }),
+    vault.merge(sessionId, { "[API_KEY_1]": "sk-parallel-secret" }),
+    vault.merge(sessionId, { "[PERSON_1]": "Parallel Person" })
+  ]);
+
+  assert.deepEqual((await vault.load(sessionId)).sessionMap, {
+    "[EMAIL_1]": "first@example.test",
+    "[API_KEY_1]": "sk-parallel-secret",
+    "[PERSON_1]": "Parallel Person"
+  });
 });
 
 function runHook(event, env) {

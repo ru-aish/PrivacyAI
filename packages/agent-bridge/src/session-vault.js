@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -61,12 +61,30 @@ export class SessionVault {
     return { ...record, path };
   }
 
-  async merge(sessionId, additions) {
-    const current = await this.load(sessionId);
-    return this.save(sessionId, {
-      ...current.sessionMap,
-      ...normalizeSessionMap(additions)
-    });
+  async merge(sessionId, additions, options = {}) {
+    return this.update(
+      sessionId,
+      current => ({
+        ...current.sessionMap,
+        ...normalizeSessionMap(additions)
+      }),
+      options
+    );
+  }
+
+  async update(sessionId, updater, options = {}) {
+    if (typeof updater !== "function") {
+      throw new TypeError("SessionVault.update requires an updater function.");
+    }
+
+    const release = await acquireSessionLock(`${this.pathForSession(sessionId)}.lock`, options);
+    try {
+      const current = await this.load(sessionId);
+      const nextMap = await updater(current);
+      return await this.save(sessionId, nextMap);
+    } finally {
+      await release();
+    }
   }
 }
 
@@ -95,4 +113,61 @@ function normalizeSessionMap(value) {
         dummy !== original
     )
   );
+}
+
+async function acquireSessionLock(lockPath, options = {}) {
+  const timeoutMs = Number(options.lockTimeoutMs || 10000);
+  const retryMs = Number(options.lockRetryMs || 25);
+  const staleMs = Number(options.staleLockMs || 30000);
+  const started = Date.now();
+  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+
+  while (true) {
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: Date.now() })}\n`);
+      await handle.close();
+      return async () => rm(lockPath, { force: true });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if (await removeStaleSessionLock(lockPath, staleMs)) continue;
+      if (Date.now() - started >= timeoutMs) {
+        const lockError = new Error("Timed out waiting for the PrivacyAI session vault lock.");
+        lockError.code = "PRIVACYAI_VAULT_LOCK_TIMEOUT";
+        throw lockError;
+      }
+      await new Promise(resolve => setTimeout(resolve, retryMs));
+    }
+  }
+}
+
+async function removeStaleSessionLock(lockPath, staleMs) {
+  let record;
+  try {
+    record = JSON.parse(await readFile(lockPath, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return true;
+    const age = Date.now() - Number((await stat(lockPath)).mtimeMs || 0);
+    if (age <= staleMs) return false;
+    await rm(lockPath, { force: true });
+    return true;
+  }
+
+  const age = Date.now() - Number(record?.createdAt || 0);
+  const pid = Number(record?.pid);
+  if (age > staleMs || !isProcessAlive(pid)) {
+    await rm(lockPath, { force: true });
+    return true;
+  }
+  return false;
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
 }
