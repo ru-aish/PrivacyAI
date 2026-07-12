@@ -203,6 +203,8 @@ test("argument guards reject flags that can replace privacy hooks", () => {
   assert.throws(() => validateNativeArguments("codex", ["resume", "--last"]), /fresh-session boundary/);
   assert.throws(() => validateNativeArguments("codex", ["--enable", "shell_tool"]), /cannot enable/);
   assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"]), /prompt-only isolation/);
+  assert.throws(() => validateNativeArguments("codex", ["-ip"]), /combined or attached Codex short options/);
+  assert.throws(() => validateNativeArguments("codex", ["-mresume"]), /combined or attached Codex short options/);
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--model", "resume"]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--", "resume"]));
   assert.throws(() => validateNativeArguments("claude", ["--resume", "session"]), /isolated startup context/);
@@ -213,7 +215,10 @@ test("argument guards reject flags that can replace privacy hooks", () => {
   assert.throws(() => validateNativeArguments("claude", ["--allowed-tools", "Read"]), /isolated startup context/);
   assert.throws(() => validateNativeArguments("claude", ["--remote-control"]), /isolated startup context/);
   assert.throws(() => validateNativeArguments("claude", ["--bg", "task"]), /isolated startup context/);
+  assert.throws(() => validateNativeArguments("claude", ["-pr"]), /combined or attached Claude short options/);
+  assert.throws(() => validateNativeArguments("claude", ["-msonnet"]), /combined or attached Claude short options/);
   assert.doesNotThrow(() => validateNativeArguments("claude", ["--model", "sonnet"]));
+  assert.doesNotThrow(() => validateNativeArguments("claude", ["--", "-pr"]));
 });
 
 test("Claude environment guards reject hook-disabling modes", () => {

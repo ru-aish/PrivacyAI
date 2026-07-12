@@ -113,6 +113,7 @@ export function captureCodexPromptInput(options) {
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
+    let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
 
@@ -140,7 +141,8 @@ export function captureCodexPromptInput(options) {
     });
     child.stdout.on("data", chunk => {
       stdout += chunk.toString();
-      if (Buffer.byteLength(stdout) > maxBytes) {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxBytes) {
         finish(startupAuditError(
           "PRIVACYAI_CODEX_CAPTURE_TOO_LARGE",
           "PrivacyAI blocked an unexpectedly large Codex startup context."

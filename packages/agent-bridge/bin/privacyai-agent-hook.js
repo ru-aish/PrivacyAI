@@ -9,7 +9,10 @@ try {
   const event = JSON.parse(raw);
   const vault = new SessionVault();
   const sessionId = event.session_id;
-  const sessionMap = sessionId ? (await vault.load(sessionId)).sessionMap : {};
+  if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+    throw new Error("agent hook event is missing a valid session_id");
+  }
+  const sessionMap = (await vault.load(sessionId)).sessionMap;
   const needsContextSanitizer = event.hook_event_name !== "PreToolUse";
   let sanitizer;
 

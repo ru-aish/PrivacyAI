@@ -187,8 +187,15 @@ export function validateNativeArguments(flavor, args) {
     ]);
     for (const rawArg of args) {
       const arg = String(rawArg);
+      if (arg === "--") break;
       if (arg === "--bare" || arg === "--safe-mode") {
         throw new Error(`PrivacyAI cannot launch Claude with ${arg} because it disables privacy hooks.`);
+      }
+      if (isCompactShortOption(arg)) {
+        throw new Error(
+          `PrivacyAI rejects combined or attached Claude short options (${arg}) while isolated startup context is active. ` +
+          "Pass each short option and its value as separate arguments."
+        );
       }
       const flag = arg.split("=", 1)[0];
       if (isolatedFlags.has(flag)) {
@@ -231,6 +238,12 @@ export function validateNativeArguments(flavor, args) {
       const arg = String(args[index]);
       const next = String(args[index + 1] || "");
       if (arg === "--") break;
+      if (isCompactShortOption(arg)) {
+        throw new Error(
+          `PrivacyAI rejects combined or attached Codex short options (${arg}) while prompt-only isolation is active. ` +
+          "Pass each short option and its value as separate arguments."
+        );
+      }
       if (blockedCommands.has(arg)) {
         throw new Error(`PrivacyAI cannot launch Codex ${arg} because prior or implicit context bypasses this fresh-session boundary.`);
       }
@@ -261,6 +274,10 @@ export function validateNativeArguments(flavor, args) {
       if (valueFlags.has(arg)) index += 1;
     }
   }
+}
+
+function isCompactShortOption(value) {
+  return /^-[^-].+/.test(value);
 }
 
 export function validateNativeEnvironment(flavor, env = process.env) {

@@ -10,7 +10,8 @@ import {
   SessionVault,
   processHookEvent,
   restoreValue,
-  sanitizeKnownValue
+  sanitizeKnownValue,
+  sanitizeModelVisibleValue
 } from "../src/index.js";
 
 const AGENT_HOOK = fileURLToPath(new URL("../bin/privacyai-agent-hook.js", import.meta.url));
@@ -44,6 +45,23 @@ test("recursively sanitizes known originals in tool output", () => {
     stdout: "[PERSON_1] used [API_KEY_1]",
     metadata: ["owner=[PERSON_1]"]
   });
+});
+
+test("context gateway skips meaningless top-level null and boolean results", async () => {
+  let sanitizerCalls = 0;
+  const sanitizer = async text => {
+    sanitizerCalls += 1;
+    return { sanitizedPrompt: text, sessionMap: {} };
+  };
+
+  for (const value of [null, true, false]) {
+    assert.deepEqual(await sanitizeModelVisibleValue(value, { sanitizer }), {
+      value,
+      sessionMapAdditions: {},
+      changed: false
+    });
+  }
+  assert.equal(sanitizerCalls, 0);
 });
 
 test("PreToolUse returns a Claude/Codex-compatible updatedInput envelope", async () => {
@@ -372,6 +390,22 @@ test("agent hook executable denies Codex tools in strict prompt-only mode", asyn
   const output = JSON.parse(result.stdout);
   assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
   assert.match(output.hookSpecificOutput.permissionDecisionReason, /prompt-only isolation/);
+});
+
+test("agent hook executable fails closed before processing events without a session id", async () => {
+  const result = await runHook(
+    {
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "pwd" }
+    },
+    { ...process.env, PRIVACYAI_AGENT_FLAVOR: "claude" }
+  );
+
+  assert.equal(result.code, 2);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /PrivacyAI agent hook blocked processing/);
+  assert.doesNotMatch(result.stderr, /session_id/);
 });
 
 test("agent hook executable restores Claude tool inputs and sanitizes arbitrary outputs", async () => {

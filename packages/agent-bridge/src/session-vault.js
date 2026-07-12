@@ -124,9 +124,7 @@ async function acquireSessionLock(lockPath, options = {}) {
 
   while (true) {
     try {
-      const handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: Date.now() })}\n`);
-      await handle.close();
+      await createSessionLockFile(lockPath);
       return async () => rm(lockPath, { force: true });
     } catch (error) {
       if (error?.code !== "EEXIST") throw error;
@@ -138,6 +136,18 @@ async function acquireSessionLock(lockPath, options = {}) {
       }
       await new Promise(resolve => setTimeout(resolve, retryMs));
     }
+  }
+}
+
+async function createSessionLockFile(lockPath) {
+  const handle = await open(lockPath, "wx", 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify({ pid: process.pid, createdAt: Date.now() })}\n`);
+    await handle.close();
+  } catch (error) {
+    await handle.close().catch(() => {});
+    await rm(lockPath, { force: true }).catch(() => {});
+    throw error;
   }
 }
 

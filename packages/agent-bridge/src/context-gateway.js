@@ -10,14 +10,13 @@ import { sanitizeKnownText } from "./transform.js";
  * discovered value one stable placeholder throughout the result.
  */
 export async function sanitizeModelVisibleValue(value, options = {}) {
-  if (typeof options.sanitizer !== "function") {
-    throw new TypeError("Context privacy gateway requires a sanitizer function.");
-  }
-
   const sessionMap = normalizeSessionMap(options.sessionMap);
   const encoded = encodeValue(value);
   if (!encoded) {
     return { value, sessionMapAdditions: {}, changed: false };
+  }
+  if (typeof options.sanitizer !== "function") {
+    throw new TypeError("Context privacy gateway requires a sanitizer function.");
   }
 
   // Already-known originals never need to be shown to the classifier again.
@@ -116,7 +115,7 @@ function encodeValue(value) {
     return { text: value, decode: text => text };
   }
 
-  if (value === undefined) return null;
+  if (value === undefined || value === null || typeof value === "boolean") return null;
   const text = JSON.stringify(value);
   if (typeof text !== "string") return null;
 
