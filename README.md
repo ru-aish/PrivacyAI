@@ -109,10 +109,11 @@ console.log(safePrompt);
 * **Extension Source:** [apps/browser-extension/README.md](apps/browser-extension/README.md)
 * **Architecture Docs:** [docs/architecture.md](docs/architecture.md)
 * **Code Examples:** [examples/README.md](examples/README.md)
+
 ## Native Claude Code, Codex, and Antigravity protection
 
-PrivacyAI can wrap the user's existing agent CLI without proxying inference or
-replacing its provider login:
+PrivacyAI can wrap the user's existing agent CLI without replacing its provider
+login:
 
 ```bash
 npm install --global @privacy-ai/agent-tui
@@ -122,23 +123,28 @@ privacyai codex
 privacyai agy --print "your prompt"
 ```
 
-Onboarding scans both Ollama and a running LM Studio local server and lets the
-user choose any usable downloaded language model. Claude Code and Codex keep
-their native TUI: prompts are sanitized locally, placeholders are restored
-immediately before hooked built-in, app, plugin, or MCP tools execute, and known
-real values in successful tool results are sanitized before returning to the
-task model. Claude hook-disabling modes are rejected, and a failed Claude tool
-result containing a known original is stopped before another provider request.
+Prompts are classified by a loopback-local model and reinjected with reversible
+placeholders. Claude Code additionally uses the structured context gateway for
+supported tool-result events: whole JSON results, including object keys, are
+classified, newly discovered private values extend the session map, and unsafe
+failed/batched results stop the turn.
 
-Antigravity currently exposes a narrower hook API, so PrivacyAI supports only
-fresh one-shot AGY prompts. The prompt is sanitized before AGY starts and a
-temporary wildcard global tool guard is installed. If the prompt creates a
-private mapping, tools are isolated for that turn because AGY cannot rewrite
-inputs or sanitize tool results. Resume, interactive-prompt, conversation-reuse,
-and permission-bypass modes fail closed.
+Codex and AGY run in **prompt-only isolation**. Codex currently lacks a reliable
+replacement boundary for every failed, deferred, polling, and implicit-resource
+result, while AGY cannot replace tool arguments or outputs. PrivacyAI therefore
+disables/denies their tools instead of presenting partial tool coverage as a
+complete privacy guarantee. Clean prompts do not weaken this rule.
 
-Native local session history may retain real values by design; the remote
-provider receives the sanitized conversation. Current support is Linux and
-macOS; file contents, project instructions, skills, and other context injected
-before the privacy boundary remain outside this protection. See
-`docs/native-agent-tui-wrapper.md` for the design and verified results.
+Each native launch uses a temporary credential-only runtime home. Codex startup
+context is captured through its own model-input serializer, locally classified,
+and checked with a canary before launch. Claude disables attachments, CLAUDE.md,
+auto-memory, background agents, prompt history, connected MCP sources, and
+sensitive telemetry while project instructions, skills, commands, agents,
+plugins, settings, and MCP configuration are isolated or preflighted. Context-loading slash commands, `@file` expansion, native shell
+escapes, resume/fork paths, and context-injecting overrides fail closed.
+
+The wrapper remains a native-hook architecture rather than a transport proxy, so
+it cannot yet prove every byte of every final encrypted provider request or
+cover attachments and future host-added context types. See
+`docs/native-agent-tui-wrapper.md` for the enforced modes, tests, and remaining
+boundary.

@@ -1,4 +1,4 @@
-> **Implementation update — July 11, 2026:** The earlier transport-proxy option in this research note was not adopted. The working prototype now keeps official provider routing untouched and uses native `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` hooks plus a transparent PTY. See `docs/native-agent-tui-wrapper.md`.
+> **Implementation update — July 12, 2026:** The native-hook prototype has been P0-hardened. Claude uses a structured result gateway that discovers new private values; Codex and AGY now default to prompt-only tool isolation where their native APIs cannot guarantee every failure/control-channel result. Credential-only runtime homes, startup-context preflights, native `@file`/slash/shell guards, transactional session maps, and a Codex model-input canary audit are implemented. The exact final network request is still not universally interceptable without a proxy or maintained host patch. See `docs/native-agent-tui-wrapper.md`.
 
 # Agent CLI privacy layer: verified design for Claude Code and Codex
 

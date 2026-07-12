@@ -1,55 +1,136 @@
 # @privacy-ai/agent-bridge
 
-PrivacyAI's tested local privacy engine for native agent CLIs.
+PrivacyAI's local privacy boundary for native agent CLIs.
 
-The bridge does **not** proxy Claude or OpenAI inference. It generates temporary
-native hooks and launches the user's existing Claude Code or Codex executable
-inside a transparent local PTY. Provider authentication, subscription usage,
-slash commands, permission dialogs, colors, keyboard handling, and the rest of
-the TUI remain owned by the original CLI.
+The bridge keeps the installed provider login and native terminal UI. It uses a
+loopback-local privacy model, native lifecycle hooks, temporary credential-only
+runtime homes, and a transparent PTY. It does not silently claim coverage for a
+host boundary that cannot be intercepted.
 
 The public `privacyai` command is published by `@privacy-ai/agent-tui`; this
 package contains the implementation and hook executables.
 
-## Flow
+## Security invariant
+
+No model-visible prompt, implicit startup context, or supported tool result may
+cross the boundary before local classification. A real value is restored only
+at the local execution boundary, then removed again before the result can be
+submitted to a task model.
+
+Native clients do not expose every boundary equally, so the enforced mode is
+host-specific:
+
+| Host | Enforced mode | Tool behavior |
+| --- | --- | --- |
+| Claude Code | Prompt gateway + audited startup context + supported tool-result gateway | Successful results are classified, newly discovered values extend the session map, and unsafe failed/batched results stop the turn. |
+| Codex | Fresh-session prompt-only isolation | Tool-capable features are disabled and every `PreToolUse` event is denied because failed, deferred, and control-channel results are not reliably replaceable. |
+| AGY / Antigravity | Fresh one-shot prompt-only isolation | Every scoped tool call is denied, including clean-prompt sessions, because AGY cannot rewrite arguments or outputs. |
+
+## Prompt path
 
 ```text
-raw prompt typed in native TUI
-        │
-        ▼
-UserPromptSubmit hook (local)
-        │
-        ├─ PrivacyAI SDK + local model sanitize prompt
-        ├─ save reversible map in private per-session vault
-        └─ block the original prompt before inference
-        │
-        ▼
-transparent PTY reinjects sanitized prompt into the same composer
-        │
-        ▼
-official Claude Code / Codex provider request
+raw prompt in native composer
+        ↓
+UserPromptSubmit hook
+        ↓
+loopback-local classifier creates safe text + reversible map
+        ↓
+original submit is blocked
+        ↓
+PTY reinjects the safe prompt once
+        ↓
+native provider path receives placeholders
 ```
 
-For every model-generated tool call exposed by the native hook system,
-including built-in tools, app tools such as Gmail, plugin-provided tools, and
-MCP tools:
+Only a small allowlist of non-contextual slash commands remains native (`/help`,
+`/model`, `/status`, and similar UI commands). Context-loading slash commands,
+`@file` expansion, and native shell escapes are blocked before the local
+sanitizer because the client expands them after the prompt hook.
+
+## Tool-result context gateway
+
+For a host that exposes a replaceable result boundary, PrivacyAI serializes the
+entire structured result once, including JSON object keys, and classifies it as
+one atomic document:
 
 ```text
-model emits tool arguments with placeholders
-        │
-        ▼
-PreToolUse recursively restores mapped values immediately before execution
-        │
-        ▼
-the selected tool runs with the real values
-        │
-        ▼
-PostToolUse recursively replaces known real values before the result returns to the model
-        │
-        └─ Claude PostToolBatch stops the turn if a failed/batched result still contains a known original
+model-visible placeholder arguments
+        ↓
+PreToolUse restores mapped originals locally
+        ↓
+local tool executes
+        ↓
+whole success/error result is classified
+        ↓
+new values are assigned stable placeholders
+        ↓
+transactional session-map merge
+        ↓
+only safe result continues to model context
 ```
 
-## User commands
+The gateway fails closed when:
+
+- structured sanitization no longer parses as the original JSON shape;
+- the result exceeds the configured atomic classification limit;
+- a protected original remains in the serialized payload;
+- newly discovered mappings cannot be persisted;
+- a failure/batch event contains private data but the host has no safe
+  shape-preserving replacement field.
+
+Existing placeholders are shielded while discovering new values, preventing a
+fake email or other placeholder from being classified again and rotated.
+
+## Startup-context isolation
+
+### Codex
+
+Each launch receives a temporary `CODEX_HOME` containing only supported
+credential files. Global instructions, memories, skills, plugins, MCP config,
+and caches are not copied. Tool-capable feature flags are disabled. Before the
+TUI starts, PrivacyAI runs Codex's own `debug prompt-input` serializer against
+the isolated environment, verifies a local canary is not restored, and locally
+classifies the captured model-visible startup input. A high-risk detection
+blocks launch without printing the detected value.
+
+This captures Codex's model-visible startup serialization, not the encrypted
+network transport or every future HTTP request. A true final-request gate still
+requires a maintained provider proxy, upstream hook, or Codex patch.
+
+### Claude Code
+
+Each launch receives a temporary `CLAUDE_CONFIG_DIR` containing only supported
+credential files. User settings are isolated, project MCP config is replaced by
+an explicit empty strict config, and native switches disable attachments,
+CLAUDE.md loading, auto-memory, bundled skills, background agents, prompt-history
+persistence, connected Claude.ai MCP servers, and sensitive telemetry fields.
+Known project instruction/skill/command/agent/plugin files are still classified
+before startup as defense in depth. A high-risk detection or an unclassifiably
+large startup context blocks launch.
+
+## Session state
+
+Session maps are stored under
+`~/.local/share/privacyai/agent-sessions/` in hashed `0600` files. Updates use a
+per-session lock with timeout, dead-process/stale-lock recovery, atomic rename,
+and a single read-modify-write transaction, preventing parallel tool calls from
+silently losing newly discovered mappings.
+
+The vault is permission-protected but not encrypted at rest yet.
+
+## Argument and lifecycle guards
+
+Protected launches reject paths that can reintroduce uninspected context:
+
+- Codex resume/fork/exec/review/app-server modes, images, extra directories,
+  profiles, arbitrary config overrides, search, and re-enabled tool features;
+- Claude resume/fork/print modes, custom settings, MCP/plugin/agent/tool/system
+  prompt sources, browser/IDE context, and hook-disabling modes;
+- AGY interactive, resume/reuse, and permission-bypass modes.
+
+Windows is rejected until a ConPTY implementation exists.
+
+## Commands
 
 ```bash
 npm install --global @privacy-ai/agent-tui
@@ -57,110 +138,32 @@ privacyai onboard
 privacyai doctor
 privacyai claude
 privacyai codex
+privacyai agy --print "fresh one-shot prompt"
 ```
 
-`privacyai onboard` scans both Ollama and a running LM Studio local server,
-filters out embedding-only models, and presents every usable downloaded LLM/VLM
-in one numbered menu. The recommended model remains Ministral 3 3B. If a usable
-Ministral copy is already available in either provider, pressing Enter chooses
-that copy; otherwise the Ollama `ministral-3:3b` model is offered for download.
-Selecting an LM Studio entry saves the explicit `lm-studio` provider and its
-local OpenAI-compatible base URL.
-
-If the configuration or local model is missing, protected launch fails closed
-and instructs the user to run `privacyai onboard`.
-
-To run the real local-model privacy lifecycle tests:
-
-```bash
-# Ollama
-ollama serve
-pnpm --filter @privacy-ai/agent-bridge test:e2e:ministral
-
-# LM Studio (start the Local Server first)
-pnpm --filter @privacy-ai/agent-bridge test:e2e:lmstudio
-
-# Installed Claude Code + local mock provider + harmless fake MCP
-pnpm --filter @privacy-ai/agent-bridge test:e2e:claude
-```
-
-Both local-model tests send a synthetic email through the actual sanitizer,
-verify that the prompt is replaced before the model-facing boundary, restore
-the original only immediately before tool execution, and sanitize the tool
-result again. The regular suite also drives the real hook executable with Gmail-
-and MCP-shaped events to verify all-tool argument restoration.
-
-## Security properties
-
-- The original user prompt is blocked before the task provider request.
-- The sanitizer endpoint must be loopback-local by default.
-- Session maps are stored under
-  `~/.local/share/privacyai/agent-sessions/` in hashed `0600` files.
-- Temporary wrapper files and directories use private permissions.
-- Sanitized reinjection has a one-time allowance, preventing an infinite hook
-  loop.
-- Placeholder collisions are rebased across turns in the same session.
-- Unresolved recognizable placeholders fail closed before any hooked tool executes.
-- Claude `--settings`, `--bare`, and `--safe-mode` overrides are rejected while
-  protection is active. Hook-disabling `CLAUDE_CODE_SIMPLE` and
-  `CLAUDE_CODE_SAFE_MODE` environments are rejected too, and the temporary
-  session settings explicitly set `disableAllHooks` to `false`.
-- Claude successful tool results are rewritten through `PostToolUse`; failed or
-  batched results containing known originals stop before the next model request
-  through `PostToolBatch`.
-- Codex hook hashes are discovered through the installed app-server and trusted
-  only for the current process. User configuration is not modified.
-
-## Current boundary
-
-Protected now:
-
-- ordinary user prompts;
-- slash commands that include arguments;
-- recursively nested arguments for every tool event exposed by Claude Code or
-  Codex hooks, including built-in tools, app tools such as Gmail, and MCP tools;
-- known sensitive values in every hooked tool result;
-- per-session reversible mappings.
-
-Not protected yet:
-
-- new sensitive values introduced only by file contents or repository context
-  before they exist in the session map;
-- `AGENTS.md`, `CLAUDE.md`, skills, or system/project instructions;
-- direct shell commands entered by the user outside the model tool lifecycle;
-- brand-new sensitive values appearing only in tool output;
-- automatic restoration of placeholders in assistant prose.
-
-Exact slash commands without arguments, such as `/help` and `/model`, bypass
-sanitization so native CLI commands remain immediate. A slash command with an
-argument is sanitized like any other prompt.
-
-## Platform and CLI limitations
-
-- The transparent PTY backend currently supports Linux and macOS.
-- Windows is rejected until a ConPTY backend is implemented.
-- Claude can preserve structured successful tool output through
-  `updatedToolOutput`. Claude does not expose equivalent replacement for every
-  failed-tool error, so PrivacyAI stops that batch before another model request
-  when a known original remains.
-- Codex 0.143.0 can replace model-visible post-tool feedback only as text; when
-  sensitive output requires replacement, the current safe fallback can stop
-  that turn.
-- The original prompt and restored tool arguments may remain in the user's local
-  CLI history/transcript and terminal display. This is deliberate: local state is
-  usable in real form, while provider-facing turns stay sanitized.
-- Session vault files are permission-protected but not yet encrypted at rest.
+Onboarding supports loopback Ollama and LM Studio providers and refuses remote
+sanitizer endpoints by default.
 
 ## Tests
 
 ```bash
-node --test packages/agent-bridge/test/*.test.js
-node --test packages/agent-tui/test/*.test.js
+pnpm --filter @privacy-ai/agent-bridge test
+pnpm -r test
 ```
 
-The integration suite also exercises both installed native TUIs against local
-mock task providers and verifies that provider request bodies contain the
-placeholder but not the original private value. The opt-in Claude MCP test runs
-both a successful result and a controlled failure: the fake MCP receives the
-restored original, successful output is sanitized before the next request, and a
-failed output containing the original is stopped before any next request.
+The regular suite covers prompt reinjection, placeholder collisions, newly
+discovered values in strings and object keys, failure paths, invalid structured
+output, oversized results, parallel vault writers, strict Codex/AGY isolation,
+credential-only homes, startup-file scanning, native context expansion,
+prior-turn prompt leaks, and provider-input canary failures. Optional E2Es exercise local Ollama/LM Studio and
+an installed Claude Code mock-provider/MCP lifecycle when their prerequisites
+are present.
+
+## Remaining boundary
+
+The native wrapper still cannot prove or rewrite every byte of every final
+provider request. Attachments, screenshots, audio/video extraction, arbitrary
+host-added future context types, encrypted/encoded derivations, and local
+transcript/log retention require additional boundaries. The implementation
+fails closed for the high-risk native paths it can identify rather than calling
+them protected.
