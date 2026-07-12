@@ -17,7 +17,7 @@ function mockProvider(responses) {
   };
 }
 
-test("benchmark-logs: no-PII prompt slight rephrase passes validation", async () => {
+test("benchmark-logs: strict SDK ignores a no-PII rephrase and preserves the original", async () => {
   const provider = mockProvider([
     {
       safe_prompt: "hi how are you?",
@@ -28,11 +28,11 @@ test("benchmark-logs: no-PII prompt slight rephrase passes validation", async ()
   const sanitizer = new AiSanitizer({ provider, loadEnv: false, model: "mock-model" });
   const result = await sanitizer.sanitize("hi man how are you?");
 
-  assert.equal(result.sanitizedText, "hi how are you?");
+  assert.equal(result.sanitizedText, "hi man how are you?");
   assert.equal(result.privacySource, "ai-sanitizer");
 });
 
-test("benchmark-logs: no-PII prompt complete rewrite fails validation and falls back", async () => {
+test("benchmark-logs: browser mode rejects a complete rewrite and falls back", async () => {
   const provider = mockProvider([
     {
       safe_prompt: "I am doing well, how can I help you today?",
@@ -44,10 +44,15 @@ test("benchmark-logs: no-PII prompt complete rewrite fails validation and falls 
     }
   ]);
 
-  const sanitizer = new AiSanitizer({ provider, loadEnv: false, model: "mock-model" });
+  const sanitizer = new AiSanitizer({
+    provider,
+    loadEnv: false,
+    model: "mock-model",
+    sanitizationMode: "browser"
+  });
   const result = await sanitizer.sanitize("hi man how are you?");
 
-  // Edit distance threshold for non-PII is max(12, 19 * 0.15) = 12.
+  // Browser mode permits local privacy rewrites, but not an answer or wholesale replacement.
   // "hi man how are you?" -> "I am doing well, how can I help you today?" has distance > 12.
   // So it fails validation and repair, and falls back to regex-fallback which preserves the original.
   assert.equal(result.sanitizedText, "hi man how are you?");
@@ -141,7 +146,7 @@ test("benchmark-logs: task-answer design guide response is rejected and falls ba
   assert.equal(result.privacySource, "regex-fallback");
 });
 
-test("benchmark-logs: AMO listing generation is rejected and falls back", async () => {
+test("benchmark-logs: browser mode rejects AMO listing generation and falls back", async () => {
   const provider = mockProvider([
     {
       safe_prompt: "PrivacyAI Shield is a secure extension that protects your private information. Learn more at our AMO listing page where you can install the addon...",
@@ -153,7 +158,12 @@ test("benchmark-logs: AMO listing generation is rejected and falls back", async 
     }
   ]);
 
-  const sanitizer = new AiSanitizer({ provider, loadEnv: false, model: "mock-model" });
+  const sanitizer = new AiSanitizer({
+    provider,
+    loadEnv: false,
+    model: "mock-model",
+    sanitizationMode: "browser"
+  });
   const prompt = "write the firefox listing text for the new version";
   const result = await sanitizer.sanitize(prompt);
 

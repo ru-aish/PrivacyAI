@@ -10,7 +10,8 @@ const DEFAULT_CONFIG = {
   provider: "openai-compatible",
   timeoutMs: 60000,
   numCtx: 4096,
-  localDetectorEnabled: false
+  localDetectorEnabled: false,
+  sanitizationMode: "browser"
 };
 
 export class BrowserPrivateAI {

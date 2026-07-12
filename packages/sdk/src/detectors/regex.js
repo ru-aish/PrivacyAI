@@ -22,6 +22,16 @@ const PATTERNS = [
   },
   {
     type: "PHONE",
+    confidence: 0.94,
+    regex: /(?<![\dA-Za-z])\+\d{1,3}(?:[\s.-]?\d){8,14}(?!\d)/g
+  },
+  {
+    type: "PHONE",
+    confidence: 0.88,
+    regex: /\b[6-9]\d{4}[\s.-]?\d{5}\b/g
+  },
+  {
+    type: "PHONE",
     confidence: 0.85,
     regex: /(?:\+\d{1,3}[-.\s()]*)?(?:\(?\d{2,5}\)?[-.\s()]*){1,3}\d{4}\b/g
   },

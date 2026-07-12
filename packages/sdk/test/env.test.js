@@ -30,3 +30,17 @@ test("configFromEnv prefers PRIVATE_AI aliases", () => {
   assert.equal(config.model, "test-model");
 });
 
+
+test("configFromEnv defaults to strict sanitization and accepts an explicit mode", () => {
+  const original = process.env.PRIVATE_AI_SANITIZATION_MODE;
+  try {
+    delete process.env.PRIVATE_AI_SANITIZATION_MODE;
+    assert.equal(configFromEnv({ loadEnv: false }).sanitizationMode, "strict");
+
+    process.env.PRIVATE_AI_SANITIZATION_MODE = "browser";
+    assert.equal(configFromEnv({ loadEnv: false }).sanitizationMode, "browser");
+  } finally {
+    if (original === undefined) delete process.env.PRIVATE_AI_SANITIZATION_MODE;
+    else process.env.PRIVATE_AI_SANITIZATION_MODE = original;
+  }
+});

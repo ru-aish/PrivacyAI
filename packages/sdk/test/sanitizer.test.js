@@ -78,7 +78,7 @@ test("client ask uses local AI first, then sends safe prompt without system cont
 
   assert.equal(calls.length, 2);
   assert.equal(calls[1].messages.length, 1);
-  assert.equal(calls[1].messages[0].content, "Please email contact1@example.com.");
+  assert.equal(calls[1].messages[0].content, "Please email Alex Morgan at contact1@example.com.");
   assert.equal(result.finalText, "I will email alice@example.com with a concise update.");
 });
 
@@ -100,7 +100,7 @@ test("ai sanitizer redacts AWS and stripe-style secrets when local AI returns JS
 
   assert.doesNotMatch(result.sanitizedText, /AKIA4QW7J2KEXAMPLE/);
   assert.doesNotMatch(result.sanitizedText, /sk_live_abc123def456/);
-  assert.equal(result.sessionMap.sk_dummy_1_redacted, "sk_live_abc123def456");
+  assert.equal(result.sessionMap.gsk_dummy_1_redacted, "sk_live_abc123def456");
 });
 
 test("enforcement replaces vague stand-ins like API key with concrete dummy values", async () => {
@@ -192,7 +192,7 @@ test("enforcement performs case-insensitive replacements to prevent PII leaks of
 
   assert.doesNotMatch(result.sanitizedText, /john.smith@example.com/i);
   assert.match(result.sanitizedText, /contact1@example.com/);
-  assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact1@example.com.");
+  assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact2@example.com.");
 });
 
 test("ai sanitizer passes conversation context turns to the provider", async () => {
@@ -268,7 +268,7 @@ test("protected URL spans are not corrupted by same value elsewhere", async () =
   const result = await sanitizer.sanitize(text);
   assert.match(result.sanitizedText, /redis:\/\/:[^@]+@10\.0\.1\.4:6379/);
   assert.match(result.sanitizedText, /Preserve host 10\.0\.1\.4\./);
-  assert.ok(result.sessionMap["API_KEY_1"]);
+  assert.ok(Object.values(result.sessionMap).includes("redispass"));
 });
 test("enforcement does not leak URL query token when AI JSON misses it", async () => {
   const text = "https://api.example.com/callback?token=abc123secret456&tab=oauth";

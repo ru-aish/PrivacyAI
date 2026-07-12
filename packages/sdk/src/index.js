@@ -4,8 +4,14 @@ export { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 export { OllamaProvider } from "./providers/ollama.js";
 export { restore, redact } from "./redactor.js";
 export { configFromEnv, loadEnvFile } from "./config.js";
-export { PRIVACY_SANITIZER_PROMPT, CONTEXT_COMPACTOR_PROMPT, DEFAULT_SYSTEM_PROMPT } from "./prompts.js";
-export { AiSanitizer, parseSanitizerJson } from "./ai-sanitizer.js";
+export {
+  PRIVACY_SANITIZER_PROMPT,
+  STRICT_PRIVACY_SANITIZER_PROMPT,
+  BROWSER_PRIVACY_SANITIZER_PROMPT,
+  CONTEXT_COMPACTOR_PROMPT,
+  DEFAULT_SYSTEM_PROMPT
+} from "./prompts.js";
+export { AiSanitizer, SANITIZATION_MODES, parseSanitizerJson } from "./ai-sanitizer.js";
 export { ContextCompactor, parseCompactorJson } from "./context-compactor.js";
 export { generateDummy } from "./dummy-data.js";
 export { localSanitize } from "./local-sanitizer.js";

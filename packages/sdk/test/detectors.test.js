@@ -110,3 +110,12 @@ test("preserves common technical terms and public names", () => {
   const results = detect("Using React, TypeScript, and GitHub");
   assert.ok(results.every(d => d.type !== "PERSON"));
 });
+
+test("detects Indian and international phone formats", () => {
+  const indian = detect("Call me at +91 98765 43210 or 98765 43210.");
+  assert.ok(indian.some(d => d.type === "PHONE" && d.value === "+91 98765 43210"));
+  assert.ok(indian.some(d => d.type === "PHONE" && d.value === "98765 43210"));
+
+  const uk = detect("Backup number: +44 20 7946 0958");
+  assert.ok(uk.some(d => d.type === "PHONE" && d.value === "+44 20 7946 0958"));
+});

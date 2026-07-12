@@ -1,10 +1,26 @@
-import { createDetectorPipeline } from "./detectors/index.js";
+import { createDetectorPipeline, mergeDetections } from "./detectors/index.js";
 import { redact } from "./redactor.js";
-import { RedactionPlan, createRedactionPlan } from "./redaction-plan.js";
+import { RedactionPlan } from "./redaction-plan.js";
 import { shouldRedact } from "./policy/redaction-policy.js";
 import { generateDummy } from "./dummy-data.js";
-import { PRIVACY_SANITIZER_PROMPT } from "./prompts.js";
+import {
+  BROWSER_PRIVACY_SANITIZER_PROMPT,
+  STRICT_PRIVACY_SANITIZER_PROMPT
+} from "./prompts.js";
 import { PrivacyGuardianError } from "./errors.js";
+
+export const SANITIZATION_MODES = Object.freeze({
+  STRICT: "strict",
+  BROWSER: "browser"
+});
+
+const STRICT_ALWAYS_SENSITIVE_TYPES = new Set([
+  "EMAIL", "SSN", "CREDIT_CARD", "PHONE", "API_KEY", "AWS_ACCESS_KEY",
+  "URL_CREDENTIAL", "URL_QUERY_SECRET", "CONNECTION_STRING_CREDENTIAL",
+  "MEDICAL_ID", "MRN", "PRIVATE_IDENTIFIER"
+]);
+
+const STRICT_IDENTITY_TYPES = new Set(["PERSON", "ORGANIZATION", "LOCATION"]);
 
 export class AiSanitizer {
   constructor(options = {}) {
@@ -14,7 +30,10 @@ export class AiSanitizer {
 
     this.provider = options.provider;
     this.model = options.privacyModel || options.model;
-    this.systemPrompt = options.privacySystemPrompt || PRIVACY_SANITIZER_PROMPT;
+    this.sanitizationMode = normalizeSanitizationMode(
+      options.sanitizationMode || options.privacyMode || SANITIZATION_MODES.STRICT
+    );
+    this.systemPrompt = options.privacySystemPrompt || promptForMode(this.sanitizationMode);
     this.privacyMaxTokens = options.privacyMaxTokens;
     this.fallbackDetector = createDetectorPipeline({ ...options, localDetectorEnabled: false });
   }
@@ -24,9 +43,7 @@ export class AiSanitizer {
       throw new TypeError("AiSanitizer.sanitize expects a string prompt.");
     }
 
-    const messages = [
-      { role: "system", content: this.systemPrompt }
-    ];
+    const messages = [{ role: "system", content: this.systemPrompt }];
 
     let contextText = "";
     if (options.compactedContextSummary) {
@@ -48,23 +65,24 @@ export class AiSanitizer {
 
     let response = await this.provider.chat({
       model: this.model,
-      messages: messages,
+      messages,
       temperature: 0,
       maxTokens: optionsMaxTokens(this)
     });
 
     let parsed = parseSanitizerJson(response.text);
-    let isValid = false;
-
-    if (parsed) {
-      isValid = await validateSanitizerOutput(text, parsed, contextText, this.fallbackDetector);
-    }
+    let isValid = parsed
+      ? await validateSanitizerOutput(
+          text,
+          parsed,
+          contextText,
+          this.fallbackDetector,
+          this.sanitizationMode
+        )
+      : false;
 
     if (!isValid) {
-      const repairMessages = [
-        { role: "system", content: "You are a JSON corrector. You must fix the previous invalid output. Return ONLY the corrected JSON object matching the schema, with no explanation and no markdown. Ensure safe_prompt does NOT contain context references, does NOT answer the request, and stays as close to the original input as possible." },
-        { role: "user", content: `Original Input: ${text}\nPrevious Output (Failed validation): ${response.text}\n\nCorrection instruction: Correct the output JSON. Return ONLY the valid JSON.` }
-      ];
+      const repairMessages = buildRepairMessages(text, response.text, this.sanitizationMode);
       try {
         const repairResponse = await this.provider.chat({
           model: this.model,
@@ -74,7 +92,13 @@ export class AiSanitizer {
         });
         const repairedParsed = parseSanitizerJson(repairResponse.text);
         if (repairedParsed) {
-          const repairValid = await validateSanitizerOutput(text, repairedParsed, contextText, this.fallbackDetector);
+          const repairValid = await validateSanitizerOutput(
+            text,
+            repairedParsed,
+            contextText,
+            this.fallbackDetector,
+            this.sanitizationMode
+          );
           if (repairValid) {
             parsed = repairedParsed;
             response = repairResponse;
@@ -87,12 +111,16 @@ export class AiSanitizer {
     }
 
     if (isValid && parsed) {
-      const enforced = await enforceSafeResult(text, parsed, this.fallbackDetector);
+      const enforced = this.sanitizationMode === SANITIZATION_MODES.STRICT
+        ? await enforceStrictSafeResult(text, parsed, this.fallbackDetector)
+        : await enforceBrowserSafeResult(text, parsed, this.fallbackDetector);
       return normalizeSanitizerResult(text, enforced, response, "ai-sanitizer");
     }
 
     const detections = await this.fallbackDetector.detect(text);
-    const fallback = redact(text, detections);
+    const fallback = this.sanitizationMode === SANITIZATION_MODES.STRICT
+      ? buildStrictRedactionPlan(text, detections).toResult("strict-regex-fallback")
+      : redact(text, detections);
     return {
       ...fallback,
       privacyModelText: response.text,
@@ -101,8 +129,39 @@ export class AiSanitizer {
   }
 }
 
+function promptForMode(mode) {
+  return mode === SANITIZATION_MODES.BROWSER
+    ? BROWSER_PRIVACY_SANITIZER_PROMPT
+    : STRICT_PRIVACY_SANITIZER_PROMPT;
+}
+
+function normalizeSanitizationMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === SANITIZATION_MODES.STRICT || normalized === SANITIZATION_MODES.BROWSER) {
+    return normalized;
+  }
+  throw new TypeError(`Unsupported sanitization mode: ${value}`);
+}
+
 function optionsMaxTokens(sanitizer) {
   return sanitizer.privacyMaxTokens || 2048;
+}
+
+function buildRepairMessages(originalText, previousOutput, mode) {
+  const modeInstruction = mode === SANITIZATION_MODES.STRICT
+    ? "Copy the original input exactly and replace only the smallest exact private substrings. Do not rewrite any other character. Every session_map value must be an exact substring of Original Input."
+    : "Preserve the original request, line breaks, quoted content, technical details, and all constraints. Make only minimal local privacy edits. Every session_map key must appear in safe_prompt and every value must be an exact substring of Original Input.";
+
+  return [
+    {
+      role: "system",
+      content: `You are a JSON corrector. Return ONLY one valid JSON object with safe_prompt and session_map. No explanation or markdown. ${modeInstruction}`
+    },
+    {
+      role: "user",
+      content: `Original Input:\n${originalText}\n\nPrevious Output (failed validation):\n${previousOutput}\n\nCorrect the JSON only.`
+    }
+  ];
 }
 
 export function parseSanitizerJson(text) {
@@ -154,17 +213,117 @@ function normalizeSessionMapCasing(originalText, sessionMap) {
 
   for (const [dummy, original] of Object.entries(sessionMap)) {
     const index = lowerOriginal.indexOf(original.toLowerCase());
-    if (index !== -1) {
-      normalized[dummy] = originalText.slice(index, index + original.length);
-    } else {
-      normalized[dummy] = original;
-    }
+    normalized[dummy] = index === -1
+      ? original
+      : originalText.slice(index, index + original.length);
   }
 
   return normalized;
 }
 
-async function enforceSafeResult(originalText, parsed, detector) {
+async function enforceStrictSafeResult(originalText, parsed, detector) {
+  const detectorDetections = await detector.detect(originalText);
+  const oriented = fixSessionMapOrientation(
+    originalText,
+    parsed.safe_prompt,
+    normalizeSessionMapCasing(originalText, parsed.session_map)
+  );
+  const modelMap = removeInvalidSessionMapEntries(originalText, oriented);
+  const modelDetections = sessionMapToDetections(originalText, modelMap, detectorDetections);
+  const combined = mergeDetections([...detectorDetections, ...modelDetections]);
+  const plan = buildStrictRedactionPlan(originalText, combined);
+
+  return {
+    safe_prompt: plan.apply(),
+    session_map: { ...plan.sessionMap }
+  };
+}
+
+function buildStrictRedactionPlan(originalText, detections) {
+  const plan = new RedactionPlan(originalText);
+  const typeCounts = {};
+  const reusableDummies = new Map();
+
+  for (const detection of detections) {
+    if (!shouldRedactStrict(detection, originalText)) continue;
+    if (plan.replacements.some(current => rangesOverlap(current, detection))) continue;
+
+    const type = normalizeReplacementType(detection.type);
+    const valueKey = `${type}\0${detection.value}`;
+    let dummy = reusableDummies.get(valueKey);
+    if (!dummy) {
+      typeCounts[type] = (typeCounts[type] || 0) + 1;
+      dummy = plan.createUniqueDummy(type, typeCounts[type]);
+      reusableDummies.set(valueKey, dummy);
+    }
+
+    plan.addReplacement(
+      detection.start,
+      detection.end,
+      originalText.slice(detection.start, detection.end),
+      dummy,
+      type,
+      detection.source || "strict"
+    );
+  }
+
+  return plan;
+}
+
+function shouldRedactStrict(detection, text) {
+  if (STRICT_ALWAYS_SENSITIVE_TYPES.has(detection.type)) return true;
+  if (STRICT_IDENTITY_TYPES.has(detection.type)) return detection.confidence >= 0.65;
+  return shouldRedact(detection, { text });
+}
+
+function sessionMapToDetections(originalText, sessionMap, detectorDetections) {
+  const detections = [];
+  const lowerOriginal = originalText.toLowerCase();
+
+  for (const [dummy, original] of Object.entries(sessionMap)) {
+    const lowerValue = original.toLowerCase();
+    const type = inferModelDetectionType(dummy, original, detectorDetections);
+    let searchIndex = 0;
+
+    while (searchIndex < originalText.length) {
+      const start = lowerOriginal.indexOf(lowerValue, searchIndex);
+      if (start === -1) break;
+      const end = start + original.length;
+      detections.push({
+        type,
+        value: originalText.slice(start, end),
+        start,
+        end,
+        confidence: 1,
+        source: "local-ai-map"
+      });
+      searchIndex = end;
+    }
+  }
+
+  return detections;
+}
+
+function inferModelDetectionType(dummy, original, detectorDetections) {
+  const detected = detectorDetections.find(d =>
+    d.value.toLowerCase() === original.toLowerCase()
+  );
+  if (detected) return detected.type;
+
+  const hint = `${dummy} ${original}`;
+  if (/email|@/i.test(hint)) return "EMAIL";
+  if (/phone|mobile|telephone/i.test(hint)) return "PHONE";
+  if (/person|name/i.test(dummy)) return "PERSON";
+  if (/company|organization|organisation|employer/i.test(dummy)) return "ORGANIZATION";
+  if (/location|address|city|country/i.test(dummy)) return "LOCATION";
+  if (/mrn|medical|patient/i.test(dummy)) return "MEDICAL_ID";
+  if (/invoice|account|customer|employee|private[_ -]?id|identifier/i.test(dummy)) {
+    return "PRIVATE_IDENTIFIER";
+  }
+  return inferSecretType(original);
+}
+
+async function enforceBrowserSafeResult(originalText, parsed, detector) {
   parsed.session_map = normalizeSessionMapCasing(originalText, parsed.session_map);
 
   let sessionMap = fixSessionMapOrientation(originalText, parsed.safe_prompt, parsed.session_map);
@@ -181,7 +340,8 @@ async function enforceSafeResult(originalText, parsed, detector) {
     }
 
     vagueCount += 1;
-    const replacement = createUniqueDummy("API_KEY", vagueCount, originalText, { ...fixedSessionMap, ...sessionMap });
+    const type = inferSecretType(original);
+    const replacement = createUniqueDummy(type, vagueCount, originalText, { ...fixedSessionMap, ...sessionMap });
     fixedSessionMap[replacement] = original;
     keyReplacements.push({ oldKey: dummy, newKey: replacement });
   }
@@ -189,34 +349,23 @@ async function enforceSafeResult(originalText, parsed, detector) {
 
   let safePromptBase = parsed.safe_prompt;
   for (const { oldKey, newKey } of keyReplacements) {
-    const escaped = escapeRegExp(oldKey);
-    const regex = new RegExp(escaped, "gi");
-    safePromptBase = safePromptBase.replace(regex, newKey);
+    safePromptBase = safePromptBase.replace(new RegExp(escapeRegExp(oldKey), "gi"), newKey);
   }
 
   const typeCounts = countSessionMapTypes(sessionMap);
   const detections = await detector.detect(originalText);
   for (const detection of detections) {
     if (findDummyForOriginal(sessionMap, detection.value)) continue;
-    if (!shouldRedact(detection, { text: originalText })) continue;
+    if (!shouldRedactStrict(detection, originalText)) continue;
 
-    typeCounts[detection.type] = (typeCounts[detection.type] || 0) + 1;
-    const dummy = createUniqueDummy(detection.type, typeCounts[detection.type], originalText, sessionMap);
+    const type = normalizeReplacementType(detection.type);
+    typeCounts[type] = (typeCounts[type] || 0) + 1;
+    const dummy = createUniqueDummy(type, typeCounts[type], originalText, sessionMap);
     sessionMap[dummy] = detection.value;
   }
 
-  const llmMapKeys = Object.keys(parsed.session_map);
-  const isMangledLlmMap = llmMapKeys.length > 0 && !llmMapKeys.some(key => {
-    const val = parsed.session_map[key];
-    return val && originalText.toLowerCase().includes(val.toLowerCase()) && key !== val;
-  });
-
-  const safePrompt = isMangledLlmMap
-    ? buildSafePromptFromPlan(originalText, sessionMap)
-    : buildSafePromptFromPlan(safePromptBase, sessionMap);
-
   return {
-    safe_prompt: safePrompt,
+    safe_prompt: buildSafePromptFromPlan(safePromptBase, sessionMap),
     session_map: sessionMap
   };
 }
@@ -225,8 +374,7 @@ function buildSafePromptFromPlan(baseText, sessionMap) {
   const plan = new RedactionPlan(baseText);
 
   for (const [dummy, original] of Object.entries(sessionMap)) {
-    if (dummy === original) continue;
-    if (!original) continue;
+    if (dummy === original || !original) continue;
 
     const lowerBase = baseText.toLowerCase();
     const lowerOriginal = original.toLowerCase();
@@ -235,25 +383,23 @@ function buildSafePromptFromPlan(baseText, sessionMap) {
     while (searchIndex < baseText.length) {
       const foundIndex = lowerBase.indexOf(lowerOriginal, searchIndex);
       if (foundIndex === -1) break;
-
       const end = foundIndex + original.length;
 
-      const existing = plan.findReplacement(foundIndex, end);
-      if (!existing) {
-        plan.addReplacement(foundIndex, end, original, dummy, "SESSION_MAP_OVERRIDE", "session-map");
+      if (!plan.replacements.some(current => rangesOverlap(current, { start: foundIndex, end }))) {
+        plan.addReplacement(
+          foundIndex,
+          end,
+          baseText.slice(foundIndex, end),
+          dummy,
+          "SESSION_MAP_OVERRIDE",
+          "session-map"
+        );
       }
-
       searchIndex = end;
     }
   }
 
-  plan.ensureProtectedSpans(plan.protectedSpans);
-
   return plan.apply();
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function fixSessionMapOrientation(originalText, safePrompt, sessionMap) {
@@ -269,36 +415,17 @@ function fixSessionMapOrientation(originalText, safePrompt, sessionMap) {
 
     if (valueInOriginal && keyInSafe) {
       fixed[key] = value;
-      continue;
-    }
-
-    if (keyInOriginal && valueInSafe) {
+    } else if (keyInOriginal && valueInSafe) {
       fixed[value] = key;
-      continue;
-    }
-
-    if (keyInOriginal && valueInOriginal) {
-      if (looksLikeSecret(value) && !looksLikeSecret(key)) {
-        fixed[key] = value;
-      } else if (looksLikeSecret(key) && !looksLikeSecret(value)) {
-        fixed[value] = key;
-      } else {
-        fixed[key] = value;
-      }
-      continue;
-    }
-
-    if (valueInOriginal) {
+    } else if (keyInOriginal && valueInOriginal) {
+      if (looksLikeSecret(value) && !looksLikeSecret(key)) fixed[key] = value;
+      else if (looksLikeSecret(key) && !looksLikeSecret(value)) fixed[value] = key;
+      else fixed[key] = value;
+    } else if (valueInOriginal) {
       fixed[key] = value;
-      continue;
-    }
-
-    if (keyInOriginal) {
+    } else if (keyInOriginal) {
       fixed[value] = key;
-      continue;
     }
-
-    fixed[key] = value;
   }
 
   return fixed;
@@ -311,43 +438,13 @@ function removeInvalidSessionMapEntries(originalText, sessionMap) {
   for (const [dummy, original] of Object.entries(sessionMap)) {
     if (dummy === original) continue;
     if (!lowerOriginal.includes(original.toLowerCase())) continue;
+    if (/\r|\n/.test(original)) continue;
+    if (original.length > 512) continue;
+    if (original.length > 80 && original.length > originalText.length * 0.35) continue;
     cleaned[dummy] = original;
   }
 
   return cleaned;
-}
-
-function fixVagueStandInKeys(sessionMap, originalText) {
-  const fixed = {};
-  let vagueCount = 0;
-
-  for (const [dummy, original] of Object.entries(sessionMap)) {
-    if (!isVagueStandIn(dummy)) {
-      fixed[dummy] = original;
-      continue;
-    }
-
-    vagueCount += 1;
-    const replacement = createUniqueDummy("API_KEY", vagueCount, originalText, { ...fixed, ...sessionMap });
-    fixed[replacement] = original;
-  }
-
-  return fixed;
-}
-
-function rebuildSafePrompt(originalText, sessionMap) {
-  let safePrompt = originalText;
-  const entries = Object.entries(sessionMap)
-    .filter(([dummy, original]) => dummy && original && dummy !== original)
-    .sort((a, b) => b[1].length - a[1].length);
-
-  for (const [dummy, original] of entries) {
-    const escaped = escapeRegExp(original);
-    const regex = new RegExp(escaped, "gi");
-    safePrompt = safePrompt.replace(regex, dummy);
-  }
-
-  return safePrompt;
 }
 
 function countSessionMapTypes(sessionMap) {
@@ -361,11 +458,17 @@ function countSessionMapTypes(sessionMap) {
 
 function inferSecretType(value) {
   if (/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(value)) return "EMAIL";
+  if (/^\+?\d[\d\s().-]{7,}\d$/.test(value.trim())) return "PHONE";
+  if (/\bMRN[-\s]?\d{5,}\b/i.test(value)) return "MRN";
   if (/\bgsk_[A-Za-z0-9]{8,}\b/.test(value)) return "API_KEY";
   if (/\b(?:sk|pk)_(?:live|test)_[A-Za-z0-9_]{8,}\b/.test(value)) return "API_KEY";
   if (/\b(?:AKIA|ASIA)[A-Z0-9]{12,20}\b/.test(value)) return "AWS_ACCESS_KEY";
   if (/\b[a-f0-9]{32,64}\b/i.test(value)) return "API_KEY";
-  return "API_KEY";
+  return "PRIVATE_IDENTIFIER";
+}
+
+function normalizeReplacementType(type) {
+  return type || "PRIVATE_IDENTIFIER";
 }
 
 function looksLikeSecret(value) {
@@ -377,26 +480,21 @@ function looksLikeSecret(value) {
 }
 
 function findDummyForOriginal(sessionMap, original) {
-  return Object.entries(sessionMap).find(([, value]) => value === original)?.[0];
+  const target = original.toLowerCase();
+  return Object.entries(sessionMap).find(([, value]) => value.toLowerCase() === target)?.[0];
 }
 
 function createUniqueDummy(type, index, sourceText, sessionMap) {
   let dummy = generateDummy(type, index);
   let slot = index;
-
   const lowerSource = sourceText.toLowerCase();
-  const lowerDummy = dummy.toLowerCase();
 
-  while (lowerSource.includes(lowerDummy) || Object.hasOwn(sessionMap, dummy)) {
+  while (lowerSource.includes(dummy.toLowerCase()) || Object.hasOwn(sessionMap, dummy)) {
     slot += 1;
     dummy = generateDummy(type, slot);
   }
 
   return dummy;
-}
-
-function replaceAll(text, search, replacement) {
-  return text.split(search).join(replacement);
 }
 
 function isVagueStandIn(value) {
@@ -405,7 +503,7 @@ function isVagueStandIn(value) {
 
 function normalizeSanitizerResult(originalText, parsed, privacyResponse, source) {
   const detections = Object.entries(parsed.session_map).map(([replacement, value]) => {
-    const start = originalText.indexOf(value);
+    const start = originalText.toLowerCase().indexOf(value.toLowerCase());
     return {
       type: "SENSITIVE",
       value,
@@ -440,116 +538,144 @@ function extractJson(text) {
   }
 }
 
-async function validateSanitizerOutput(originalText, parsedJson, contextText = "", detector = null) {
+async function validateSanitizerOutput(
+  originalText,
+  parsedJson,
+  contextText = "",
+  detector = null,
+  mode = SANITIZATION_MODES.STRICT
+) {
   if (!parsedJson || typeof parsedJson.safe_prompt !== "string" || !parsedJson.session_map) {
     return false;
   }
-  const { safe_prompt, session_map } = parsedJson;
 
-  const upperSafe = safe_prompt.toUpperCase();
-  if (upperSafe.includes("CONTEXT") || upperSafe.includes("REFERENCE HISTORY")) {
+  if (!passesContextIsolation(originalText, parsedJson.safe_prompt, contextText)) {
     return false;
   }
 
-  if (contextText) {
-    const cleanText = contextText
-      .replace(/\[CONTEXT\]/gi, "")
-      .replace(/-\s*(user|assistant):/gi, "")
-      .trim();
-    const segments = cleanText.split(/[.,!?;\n]/);
-    for (const seg of segments) {
-      const trimmed = seg.trim();
-      if (trimmed.length >= 10 && !originalText.toLowerCase().includes(trimmed.toLowerCase())) {
-        if (safe_prompt.toLowerCase().includes(trimmed.toLowerCase())) {
-          return false;
-        }
-      }
-    }
-  }
+  const oriented = fixSessionMapOrientation(
+    originalText,
+    parsedJson.safe_prompt,
+    normalizeSessionMapCasing(originalText, parsedJson.session_map)
+  );
 
-  const codeBlockCountOriginal = (originalText.match(/```/g) || []).length;
-  const codeBlockCountSafe = (safe_prompt.match(/```/g) || []).length;
-  if (codeBlockCountSafe > codeBlockCountOriginal) {
+  if (!sessionMapReferencesOriginal(originalText, oriented)) {
     return false;
   }
 
-  if (safe_prompt.length > originalText.length + 150 && safe_prompt.length > originalText.length * 1.5) {
+  if (mode === SANITIZATION_MODES.STRICT) {
+    return true;
+  }
+
+  return validateBrowserRewrite(originalText, parsedJson.safe_prompt, oriented);
+}
+
+function passesContextIsolation(originalText, safePrompt, contextText) {
+  const upperSafe = safePrompt.toUpperCase();
+  if (upperSafe.includes("[CONTEXT]") || upperSafe.includes("REFERENCE HISTORY")) {
     return false;
   }
 
-  let cleanOriginal = stripUrls(originalText);
-  let cleanSafe = stripUrls(safe_prompt);
-  for (const [dummy, original] of Object.entries(session_map || {})) {
-    if (original && typeof original === "string") {
-      cleanOriginal = cleanOriginal.replace(new RegExp(escapeRegExp(original), "gi"), "");
-    }
-    if (dummy && typeof dummy === "string") {
-      cleanSafe = cleanSafe.replace(new RegExp(escapeRegExp(dummy), "gi"), "");
-    }
-  }
+  if (!contextText) return true;
 
-  let hasSensitive = false;
-  if (detector) {
-    const detections = await detector.detect(originalText);
-    const sensitiveDetections = detections.filter(d => shouldRedact(d, { text: originalText }));
-    hasSensitive = sensitiveDetections.length > 0;
-  }
-
-  const threshold = hasSensitive
-    ? Math.max(40, cleanOriginal.trim().length * 0.45)
-    : Math.max(12, cleanOriginal.trim().length * 0.15);
-
-  const dist = getEditDistance(cleanOriginal.trim(), cleanSafe.trim());
-  if (dist > threshold) {
-    return false;
+  const cleanText = contextText
+    .replace(/\[CONTEXT\]/gi, "")
+    .replace(/-\s*(user|assistant):/gi, "")
+    .trim();
+  const segments = cleanText.split(/[.,!?;\n]/);
+  for (const segment of segments) {
+    const trimmed = segment.trim();
+    if (trimmed.length < 10) continue;
+    if (originalText.toLowerCase().includes(trimmed.toLowerCase())) continue;
+    if (safePrompt.toLowerCase().includes(trimmed.toLowerCase())) return false;
   }
 
   return true;
 }
 
-function getEditDistance(a, b) {
-  if (a.length > b.length) {
-    const tmp = a;
-    a = b;
-    b = tmp;
+function sessionMapReferencesOriginal(originalText, sessionMap) {
+  const lowerOriginal = originalText.toLowerCase();
+  for (const original of Object.values(sessionMap)) {
+    if (!lowerOriginal.includes(original.toLowerCase())) return false;
+    if (/\r|\n/.test(original)) return false;
   }
-  const lenA = a.length;
-  const lenB = b.length;
-  if (lenA === 0) return lenB;
-  if (lenB === 0) return lenA;
-
-  let prevRow = new Array(lenA + 1);
-  let currRow = new Array(lenA + 1);
-
-  for (let j = 0; j <= lenA; j++) {
-    prevRow[j] = j;
-  }
-
-  for (let i = 1; i <= lenB; i++) {
-    currRow[0] = i;
-    for (let j = 1; j <= lenA; j++) {
-      if (b.charAt(i - 1) === a.charAt(j - 1)) {
-        currRow[j] = prevRow[j - 1];
-      } else {
-        currRow[j] = Math.min(
-          prevRow[j - 1] + 1,
-          Math.min(
-            currRow[j - 1] + 1,
-            prevRow[j] + 1
-          )
-        );
-      }
-    }
-    const temp = prevRow;
-    prevRow = currRow;
-    currRow = temp;
-  }
-
-  return prevRow[lenA];
+  return true;
 }
 
-function stripUrls(str) {
-  return str.replace(/\b(?:https?:\/\/|ftp:\/\/|www\.)[^\s<>"']+/gi, "");
+function validateBrowserRewrite(originalText, safePrompt, sessionMap) {
+  const lowerSafe = safePrompt.toLowerCase();
+  for (const dummy of Object.keys(sessionMap)) {
+    if (!lowerSafe.includes(dummy.toLowerCase())) return false;
+  }
+
+  if (lineBreakSignature(originalText) !== lineBreakSignature(safePrompt)) return false;
+  if ((originalText.match(/```/g) || []).length !== (safePrompt.match(/```/g) || []).length) return false;
+
+  const minimumLength = Math.max(0, originalText.length * 0.72 - 80);
+  const maximumLength = originalText.length * 1.25 + 120;
+  if (safePrompt.length < minimumLength || safePrompt.length > maximumLength) return false;
+
+  let maskedOriginal = originalText;
+  let maskedSafe = safePrompt;
+  for (const [dummy, original] of Object.entries(sessionMap)) {
+    maskedOriginal = maskedOriginal.replace(new RegExp(escapeRegExp(original), "gi"), " [PRIVATE] ");
+    maskedSafe = maskedSafe.replace(new RegExp(escapeRegExp(dummy), "gi"), " [PRIVATE] ");
+  }
+
+  return tokenOrderCoverage(maskedOriginal, maskedSafe) >= 0.68;
 }
 
+function tokenOrderCoverage(originalText, safeText) {
+  const originalTokens = tokenizeForSimilarity(originalText);
+  const safeTokens = tokenizeForSimilarity(safeText);
+  if (originalTokens.length === 0) return safeTokens.length === 0 ? 1 : 0;
 
+  const positions = new Map();
+  for (let index = 0; index < safeTokens.length; index += 1) {
+    const token = safeTokens[index];
+    if (!positions.has(token)) positions.set(token, []);
+    positions.get(token).push(index);
+  }
+
+  let safeIndex = 0;
+  let matches = 0;
+  for (const token of originalTokens) {
+    const candidates = positions.get(token);
+    if (!candidates) continue;
+    const candidateIndex = lowerBound(candidates, safeIndex);
+    if (candidateIndex >= candidates.length) continue;
+    matches += 1;
+    safeIndex = candidates[candidateIndex] + 1;
+  }
+
+  return matches / originalTokens.length;
+}
+
+function lowerBound(values, target) {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (values[middle] < target) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
+function tokenizeForSimilarity(text) {
+  return String(text)
+    .toLowerCase()
+    .match(/[\p{L}\p{N}_@.+:/-]+|\[private\]/gu) || [];
+}
+
+function lineBreakSignature(text) {
+  return (String(text).match(/\r\n|\r|\n/g) || []).join("|");
+}
+
+function rangesOverlap(a, b) {
+  return a.start < b.end && b.start < a.end;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

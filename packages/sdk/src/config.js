@@ -9,7 +9,8 @@ const ENV_KEY_MAP = {
   timeoutMs: ["PRIVATE_AI_TIMEOUT_MS", "OPENAI_TIMEOUT_MS"],
   numCtx: ["PRIVATE_AI_NUM_CTX"],
   localDetectorEnabled: ["PRIVATE_AI_LOCAL_DETECTOR_ENABLED"],
-  localDetectorModel: ["PRIVATE_AI_LOCAL_DETECTOR_MODEL"]
+  localDetectorModel: ["PRIVATE_AI_LOCAL_DETECTOR_MODEL"],
+  sanitizationMode: ["PRIVATE_AI_SANITIZATION_MODE"]
 };
 
 export function loadEnvFile(envFile = process.env.PRIVATE_AI_ENV_FILE || ".env", cwd = process.cwd()) {
@@ -60,7 +61,8 @@ export function configFromEnv(options = {}) {
     timeoutMs: Number(firstValue(merged, ENV_KEY_MAP.timeoutMs) || 60000),
     numCtx: Number(firstValue(merged, ENV_KEY_MAP.numCtx) || 4096),
     localDetectorEnabled: parseBoolean(firstValue(merged, ENV_KEY_MAP.localDetectorEnabled)),
-    localDetectorModel: firstValue(merged, ENV_KEY_MAP.localDetectorModel)
+    localDetectorModel: firstValue(merged, ENV_KEY_MAP.localDetectorModel),
+    sanitizationMode: firstValue(merged, ENV_KEY_MAP.sanitizationMode) || "strict"
   };
 }
 
