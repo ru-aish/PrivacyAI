@@ -108,6 +108,7 @@ console.log(safePrompt);
 * **Web Demo:** [apps/web-demo/README.md](apps/web-demo/README.md)
 * **Extension Source:** [apps/browser-extension/README.md](apps/browser-extension/README.md)
 * **Architecture Docs:** [docs/architecture.md](docs/architecture.md)
+* **P0 Visual Review:** [interactive problem → solution walkthrough](docs/p0-context-privacy-review.html) · [mobile preview](docs/p0-context-privacy-review-preview.png)
 * **Code Examples:** [examples/README.md](examples/README.md)
 
 ## Native Claude Code, Codex, and Antigravity protection
