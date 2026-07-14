@@ -113,8 +113,8 @@ console.log(safePrompt);
 
 ## Native Claude Code, Codex, and Antigravity protection
 
-PrivacyAI can wrap the user's existing agent CLI without replacing its provider
-login:
+PrivacyAI can wrap the user's installed official CLI without replacing its
+provider login:
 
 ```bash
 npm install --global @privacy-ai/agent-tui
@@ -124,28 +124,18 @@ privacyai codex
 privacyai agy --print "your prompt"
 ```
 
-Prompts are classified by a loopback-local model and reinjected with reversible
-placeholders. Claude Code additionally uses the structured context gateway for
-supported tool-result events: whole JSON results, including object keys, are
-classified, newly discovered private values extend the session map, and unsafe
-failed/batched results stop the turn.
+Codex now defaults to a bidirectional loopback Responses gateway. It keeps the
+normal `CODEX_HOME`, account, model, history, skills, plugins, user MCP servers,
+filesystem, shell, patch, Git, resume, fork, exec, and review workflows.
+Model-visible request content is sanitized locally; streamed assistant text and
+completed tool arguments are restored before stock Codex consumes them. The
+gateway adds no second OpenAI model turn. Provider-hosted search/apps/browser,
+images, realtime/WebSockets, remote clients, and alternate provider routes remain
+disabled until they have an equivalent protected boundary. The prior prompt-only
+Codex mode remains available with `privacyai codex --privacy-strict`.
 
-Codex and AGY run in **prompt-only isolation**. Codex currently lacks a reliable
-replacement boundary for every failed, deferred, polling, and implicit-resource
-result, while AGY cannot replace tool arguments or outputs. PrivacyAI therefore
-disables/denies their tools instead of presenting partial tool coverage as a
-complete privacy guarantee. Clean prompts do not weaken this rule.
-
-Each native launch uses a temporary credential-only runtime home. Codex startup
-context is captured through its own model-input serializer, locally classified,
-and checked with a canary before launch. Claude disables attachments, CLAUDE.md,
-auto-memory, background agents, prompt history, connected MCP sources, and
-sensitive telemetry while project instructions, skills, commands, agents,
-plugins, settings, and MCP configuration are isolated or preflighted. Context-loading slash commands, `@file` expansion, native shell
-escapes, resume/fork paths, and context-injecting overrides fail closed.
-
-The wrapper remains a native-hook architecture rather than a transport proxy, so
-it cannot yet prove every byte of every final encrypted provider request or
-cover attachments and future host-added context types. See
-`docs/native-agent-tui-wrapper.md` for the enforced modes, tests, and remaining
-boundary.
+Claude Code continues to use startup isolation plus supported native prompt/tool
+hooks. AGY remains fresh one-shot and tool-denied because its installed hook API
+cannot safely replace arguments and results. All hosts fail closed when a
+provider-facing boundary cannot be verified. See
+`docs/native-agent-tui-wrapper.md` for architecture, tests, and limitations.
