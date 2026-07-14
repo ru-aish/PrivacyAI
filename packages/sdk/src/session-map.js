@@ -107,10 +107,22 @@ export function sanitizeKnownValue(value, sessionMap = {}) {
 }
 
 export function findUnresolvedPlaceholders(value, pattern = DEFAULT_PLACEHOLDER_PATTERN) {
+  const source =
+    pattern instanceof RegExp
+      ? pattern.source
+      : typeof pattern === "string"
+        ? pattern
+        : pattern?.source;
+  if (typeof source !== "string" || source.length === 0) {
+    throw new TypeError(
+      "Placeholder pattern must be a RegExp, source string, or RegExp-like object."
+    );
+  }
+  const baseFlags = pattern && typeof pattern.flags === "string" ? pattern.flags : "";
+  const flags = baseFlags.includes("g") ? baseFlags : `${baseFlags}g`;
   const matches = new Set();
   transformValue(value, text => {
-    const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
-    const localPattern = new RegExp(pattern.source, flags);
+    const localPattern = new RegExp(source, flags);
     for (const match of text.matchAll(localPattern)) matches.add(match[0]);
     return text;
   });

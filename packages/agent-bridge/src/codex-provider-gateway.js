@@ -132,10 +132,13 @@ async function handleRequest(request, response, context) {
   const identity = codexSessionContext(body, undefined, request.headers);
   const transformed = await context.serial.run(identity.sessionKey, async () => {
     const current = await context.vault.load(identity.sessionKey);
-    let sessionMap = { ...current.sessionMap };
+    const currentSessionMap = current?.sessionMap || {};
+    let sessionMap = { ...currentSessionMap };
     for (const parentSessionKey of identity.parentSessionKeys) {
       const parent = await context.vault.load(parentSessionKey);
-      sessionMap = mergeInheritedSessionMap(sessionMap, parent.sessionMap);
+      if (parent?.sessionMap) {
+        sessionMap = mergeInheritedSessionMap(sessionMap, parent.sessionMap);
+      }
     }
 
     const cache = sessionCache(context, identity.sessionKey);
@@ -147,7 +150,7 @@ async function handleRequest(request, response, context) {
       headers: request.headers
     });
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
-    if (!sessionMapsEqual(current.sessionMap, completeMap)) {
+    if (!sessionMapsEqual(currentSessionMap, completeMap)) {
       await context.vault.save(identity.sessionKey, completeMap);
     }
     if (typeof context.onSanitizedRequest === "function") {
@@ -476,6 +479,7 @@ function makeUpstreamRequest(url, method, headers, body, options = {}) {
       }
       settled = true;
       request.off("error", onError);
+      upstreamResponse.on("error", () => {});
       const finish = () => cleanup();
       upstreamResponse.once("end", finish);
       upstreamResponse.once("close", finish);

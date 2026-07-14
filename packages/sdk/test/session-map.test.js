@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   StreamingPlaceholderRestorer,
   assertNoProtectedOriginals,
+  findUnresolvedPlaceholders,
   normalizeSessionMap,
   rebaseSessionAdditions,
   restoreValue,
@@ -85,6 +86,25 @@ test("known sanitization is case-insensitive while restoration is exact", () => 
     { owner: "[EMAIL_1]" }
   );
   assert.equal(restoreValue("[email_1]", map), "[email_1]");
+});
+
+test("unresolved placeholder scanning accepts safe custom pattern shapes", () => {
+  assert.deepEqual(
+    findUnresolvedPlaceholders("Use [EMAIL_1] and [EMAIL_2]", "\\[EMAIL_\\d+\\]"),
+    ["[EMAIL_1]", "[EMAIL_2]"]
+  );
+  assert.deepEqual(
+    findUnresolvedPlaceholders("Use [API_KEY_7]", { source: "\\[API_KEY_\\d+\\]" }),
+    ["[API_KEY_7]"]
+  );
+  assert.deepEqual(
+    findUnresolvedPlaceholders("Use [EMAIL_1]", /\[EMAIL_\d+\]/i),
+    ["[EMAIL_1]"]
+  );
+  assert.throws(
+    () => findUnresolvedPlaceholders("Use [EMAIL_1]", {}),
+    /Placeholder pattern must be/
+  );
 });
 
 test("sanitizeStructuredValue shields existing placeholders and rebases new collisions", async () => {

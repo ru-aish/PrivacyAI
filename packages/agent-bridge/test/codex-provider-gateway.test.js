@@ -1167,12 +1167,11 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
   t.after(() => upstream.close());
 
   const maps = new Map([
-    ["codex-provider:parent", { sessionMap: { "[EMAIL_1]": PRIVATE_EMAIL } }],
-    ["codex-provider:child", { sessionMap: {} }]
+    ["codex-provider:parent", { sessionMap: { "[EMAIL_1]": PRIVATE_EMAIL } }]
   ]);
   const vault = {
     async load(key) {
-      return maps.get(key) || { sessionMap: {} };
+      return maps.get(key);
     },
     async save(key, sessionMap) {
       maps.set(key, { sessionMap });
@@ -1198,7 +1197,11 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
   childBody.client_metadata = {
     thread_id: "child",
     parent_thread_id: "parent",
-    "x-codex-turn-metadata": JSON.stringify({ thread_id: "child", parent_thread_id: "parent" })
+    "x-codex-turn-metadata": JSON.stringify({
+      thread_id: "child",
+      parent_thread_id: "parent",
+      forked_from_thread_id: "missing-parent"
+    })
   };
   const inherited = await fetch(`${gateway.baseURL}/responses`, {
     method: "POST",
