@@ -199,19 +199,39 @@ test("remote sanitizer endpoints are rejected unless explicitly allowed", () => 
   );
 });
 
-test("argument guards reject flags that can replace privacy hooks", () => {
+test("argument guards preserve normal Codex workflows while blocking provider bypasses", () => {
   assert.throws(() => validateNativeArguments("claude", ["--settings", "other.json"]), /privacy hooks/);
   assert.throws(() => validateNativeArguments("claude", ["--bare"]), /disables privacy hooks/);
   assert.throws(() => validateNativeArguments("claude", ["--safe-mode"]), /disables privacy hooks/);
-  assert.throws(() => validateNativeArguments("codex", ["--disable", "hooks"]), /hooks disabled/);
-  assert.throws(() => validateNativeArguments("codex", ["-c", "hooks.UserPromptSubmit=[]"]), /reserves/);
-  assert.throws(() => validateNativeArguments("codex", ["resume", "--last"]), /fresh-session boundary/);
-  assert.throws(() => validateNativeArguments("codex", ["--enable", "shell_tool"]), /cannot enable/);
-  assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"]), /prompt-only isolation/);
-  assert.throws(() => validateNativeArguments("codex", ["-ip"]), /combined or attached Codex short options/);
-  assert.throws(() => validateNativeArguments("codex", ["-mresume"]), /combined or attached Codex short options/);
+
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["resume", "--last"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["fork", "--last"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["exec", "hello"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["review"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--add-dir", "../shared"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--enable", "shell_tool"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["-c", "model_reasoning_effort=\"high\""]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--model", "resume"]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--", "resume"]));
+
+  assert.throws(() => validateNativeArguments("codex", ["--remote", "unix:///tmp/server"]), /not protected by the local provider gateway/);
+  assert.throws(() => validateNativeArguments("codex", ["--search"]), /not protected/);
+  assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"]), /not protected/);
+  assert.throws(() => validateNativeArguments("codex", ["--profile", "unsafe"]), /not protected/);
+  assert.throws(() => validateNativeArguments("codex", ["-c", "model_provider=\"other\""]), /model-provider/);
+  assert.throws(() => validateNativeArguments("codex", ["--config", "openai_base_url=\"https://example.test\""]), /model-provider/);
+  assert.throws(() => validateNativeArguments("codex", ["--enable", "responses_websockets"]), /bypasses local restoration/);
+  assert.throws(() => validateNativeArguments("codex", ["-c", "features.apps=true"]), /provider-hosted/);
+  assert.throws(() => validateNativeArguments("codex", ["-ip"]), /combined or attached Codex short options/);
+  assert.throws(() => validateNativeArguments("codex", ["-mresume"]), /combined or attached Codex short options/);
+
+  const strict = { codexMode: "strict" };
+  assert.throws(() => validateNativeArguments("codex", ["--disable", "hooks"], strict), /hooks disabled/);
+  assert.throws(() => validateNativeArguments("codex", ["-c", "hooks.UserPromptSubmit=[]"], strict), /reserves/);
+  assert.throws(() => validateNativeArguments("codex", ["resume", "--last"], strict), /fresh-session boundary/);
+  assert.throws(() => validateNativeArguments("codex", ["--enable", "shell_tool"], strict), /cannot enable/);
+  assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"], strict), /prompt-only isolation/);
+
   assert.throws(() => validateNativeArguments("claude", ["--resume", "session"]), /isolated startup context/);
   assert.throws(() => validateNativeArguments("claude", ["--plugin-dir", "plugin"]), /isolated startup context/);
   assert.throws(() => validateNativeArguments("claude", ["--plugin-url", "https://example.test/plugin.zip"]), /isolated startup context/);

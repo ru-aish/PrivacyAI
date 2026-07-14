@@ -7,6 +7,23 @@ export {
 export { processAgyHookEvent } from "./agy-hook-adapter.js";
 export { assertNoProtectedOriginals, sanitizeModelVisibleValue } from "./context-gateway.js";
 export {
+  CODEX_GATEWAY_DISABLED_FEATURES,
+  buildCodexProviderArgs,
+  isProtectedCodexConfigOverride,
+  parseCodexPrivacyMode
+} from "./codex-provider-config.js";
+export { startCodexProviderGateway } from "./codex-provider-gateway.js";
+export {
+  codexSessionContext,
+  codexSessionKey,
+  restoreCodexCompactResponse,
+  restoreCodexJsonResponse,
+  restoreResponseItem,
+  sanitizeCodexMetadataHeaders,
+  sanitizeCodexRequestBody
+} from "./codex-request-transform.js";
+export { CodexSseRestorer, restoreEvent as restoreCodexSseEvent } from "./codex-sse-transform.js";
+export {
   assertLocalPrivacyEndpoint,
   defaultConfigPath,
   loadPrivacyConfig,

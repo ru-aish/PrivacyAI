@@ -28,7 +28,7 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
         return await runDoctor({ ...options, stdout });
       case "--version":
       case "-v":
-        stdout.write("privacyai 0.0.1\n");
+        stdout.write("privacyai 0.0.2\n");
         return 0;
       case "help":
       case "--help":
@@ -65,7 +65,8 @@ export function printHelp(output = process.stdout) {
   output.write("Usage:\n");
   output.write("  privacyai onboard       Configure the local privacy model\n");
   output.write("  privacyai claude [...]  Open the normal Claude Code TUI with prompt protection\n");
-  output.write("  privacyai codex [...]   Open the normal Codex TUI with prompt protection\n");
+  output.write("  privacyai codex [...]   Open stock Codex through the local provider gateway\n");
+  output.write("  privacyai codex --privacy-strict [...]  Use prompt-only fallback isolation\n");
   output.write("  privacyai agy --print \"...\"  Send a protected one-shot Antigravity prompt\n");
   output.write("  privacyai doctor        Check local setup\n");
 }
