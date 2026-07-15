@@ -7,6 +7,10 @@ import { fileURLToPath } from "node:url";
 import { loadPrivacyConfig } from "./config-store.js";
 import { buildCodexProviderArgs, parseCodexPrivacyMode } from "./codex-provider-config.js";
 import { startCodexProviderGateway } from "./codex-provider-gateway.js";
+import {
+  openContextVerificationStore,
+  verificationFingerprint
+} from "./context-verification-store.js";
 import { resolveExecutable } from "./executable.js";
 import { checkPrivacyModel } from "./model-health.js";
 import {
@@ -19,7 +23,10 @@ import {
   discoverCodexHookTrust,
   writeClaudeSettings
 } from "./native-hooks.js";
-import { createPrivacySanitizer } from "./privacy-sanitizer.js";
+import {
+  createPrivacySanitizer,
+  derivePrivacyContextMaxChars
+} from "./privacy-sanitizer.js";
 import { prepareAgentRuntimeIsolation } from "./runtime-isolation.js";
 import { auditClaudeStartupContext, auditCodexStartupContext } from "./startup-audit.js";
 
@@ -66,9 +73,12 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
     PRIVACYAI_AGENT_FLAVOR: flavor
   };
   let gateway;
+  let startupVerificationStore;
+  let ownsStartupVerificationStore = false;
 
   try {
     const sanitizer = options.sanitizer || createPrivacySanitizer(loaded.config, options);
+    const providerContextMaxChars = derivePrivacyContextMaxChars(loaded.config, options);
     let cwd = options.cwd || process.cwd();
 
     if (flavor === "codex" && codexInvocation.mode === "gateway") {
@@ -76,9 +86,16 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       gateway = await (options.startCodexProviderGateway || startCodexProviderGateway)({
         sanitizer,
         baseDir: options.vaultDir,
-        maxContextChars: options.providerContextMaxChars,
+        maxContextChars: providerContextMaxChars,
         maxRequestBytes: options.providerMaxRequestBytes,
         maxResponseBytes: options.providerMaxResponseBytes,
+        verificationDbPath: options.verificationDbPath,
+        maxVerifiedItems: options.maxVerifiedItems,
+        maxThreadItems: options.maxThreadItems,
+        verificationMaxAgeMs: options.verificationMaxAgeMs,
+        policyFingerprint: options.policyFingerprint,
+        onGatewayError: options.onGatewayError,
+        onSanitizedRequest: options.onSanitizedRequest,
         chatgptUpstream: options.chatgptUpstream,
         apiUpstream: options.apiUpstream,
         allowInsecureTestUpstream: options.allowInsecureTestUpstream
@@ -106,14 +123,30 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
     validateNativeEnvironment(flavor, env);
     let childArgs;
 
+    startupVerificationStore = await openContextVerificationStore(options);
+    ownsStartupVerificationStore = !options.verificationStore;
+    const startupPolicyFingerprint = String(
+      options.policyFingerprint ||
+      sanitizer.identity?.fingerprint ||
+      verificationFingerprint({
+        boundary: "startup-context",
+        version: 1,
+        sanitizer: sanitizer.identity || {
+          customImplementationHash: verificationFingerprint(String(sanitizer))
+        }
+      })
+    );
+
     if (flavor === "claude") {
       const settingsPath = join(runtimeDir, "claude-settings.json");
       await (options.writeClaudeSettings || writeClaudeSettings)(settingsPath, options);
       await (options.auditClaudeStartupContext || auditClaudeStartupContext)({
         cwd,
         sanitizer,
-        maxContextChars: options.startupContextMaxChars,
-        maxFiles: options.startupContextMaxFiles
+        maxContextChars: options.startupContextMaxChars ?? providerContextMaxChars,
+        maxFiles: options.startupContextMaxFiles,
+        verificationStore: startupVerificationStore,
+        policyFingerprint: startupPolicyFingerprint
       });
       childArgs = ["--settings", settingsPath, ...isolation.args, ...forwardedArgs];
     } else {
@@ -136,7 +169,9 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         capture: options.captureCodexPromptInput,
         timeoutMs: options.startupAuditTimeoutMs,
         maxBytes: options.startupAuditMaxBytes,
-        maxContextChars: options.startupContextMaxChars
+        maxContextChars: options.startupContextMaxChars ?? providerContextMaxChars,
+        verificationStore: startupVerificationStore,
+        policyFingerprint: startupPolicyFingerprint
       });
       childArgs = [...privacyArgs, ...forwardedArgs];
     }
@@ -148,6 +183,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
     );
   } finally {
     await gateway?.close();
+    if (ownsStartupVerificationStore) startupVerificationStore?.close();
     await rm(runtimeDir, { recursive: true, force: true });
   }
 }

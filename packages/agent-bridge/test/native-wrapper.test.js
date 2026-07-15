@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_PRIVACY_MODEL,
+  MemoryContextVerificationStore,
   SessionVault,
   assertLocalPrivacyEndpoint,
   assertNoProtectedOriginals,
@@ -683,6 +684,42 @@ test("Codex startup audit captures serialized model input and verifies the local
   assert.equal(audit.itemCount, 2);
   assert.equal(audit.canaryPlaceholder, "[PRIVACYAI_PROVIDER_CANARY_TEST]");
   assert.equal(audit.serializedBytes > 0, true);
+});
+
+test("Codex startup audit reuses a verified static manifest across canary rotations", async () => {
+  const verificationStore = new MemoryContextVerificationStore();
+  let sanitizerCalls = 0;
+  const capture = async ({ prompt }) => [
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "unchanged safe startup" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: prompt }] }
+  ];
+  const sanitizer = async text => {
+    sanitizerCalls += 1;
+    return { sanitizedPrompt: text, sessionMap: {} };
+  };
+
+  await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    canaryPlaceholder: "[PRIVACYAI_PROVIDER_CANARY_FIRST]",
+    capture,
+    sanitizer,
+    verificationStore,
+    policyFingerprint: "startup-policy-v1"
+  });
+  await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    canaryPlaceholder: "[PRIVACYAI_PROVIDER_CANARY_SECOND]",
+    capture,
+    sanitizer: async () => {
+      throw new Error("unchanged startup context should use its trust manifest");
+    },
+    verificationStore,
+    policyFingerprint: "startup-policy-v1"
+  });
+
+  assert.equal(sanitizerCalls, 1);
 });
 
 test("Codex startup audit fails if the serialized provider input contains its raw canary", async () => {

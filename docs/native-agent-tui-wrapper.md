@@ -144,8 +144,19 @@ mappings may be inherited only when:
 
 Any ambiguity blocks the request before upstream transmission.
 
-A bounded in-memory SHA-256 cache avoids reclassifying unchanged history. Cache
-entries are committed only after session-map persistence succeeds.
+A bounded in-memory cache fronts a persistent SQLite verification ledger. Each
+entry is addressed by the content hash, artifact type, and a policy fingerprint
+covering the sanitizer model and prompt. The ledger survives gateway restarts,
+so resumed threads do not reclassify unchanged history, instructions, tool
+definitions, schemas, or tool outputs. Session-map growth alone does not invalidate
+clean entries; content or policy changes do. Parent/fork threads can reuse the
+same content-addressed records while retaining collision checks on private maps.
+
+Strict classification is detection-oriented: the local model returns exact
+bounded private spans, and the SDK reconstructs the complete structured value.
+Large model-visible strings are divided into overlapping, deterministic chunks,
+then merged through exact-substring mappings. This bounds local-model context
+without truncating the text sent to Codex's real model.
 
 ### Disabled provider-hosted paths
 

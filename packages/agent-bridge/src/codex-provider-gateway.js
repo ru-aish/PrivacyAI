@@ -11,6 +11,10 @@ import {
   sanitizeCodexRequestBody
 } from "./codex-request-transform.js";
 import { CodexSseRestorer } from "./codex-sse-transform.js";
+import {
+  openContextVerificationStore,
+  verificationFingerprint
+} from "./context-verification-store.js";
 import { SessionVault } from "./session-vault.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -39,6 +43,21 @@ export async function startCodexProviderGateway(options = {}) {
 
   const nonce = options.nonce || randomBytes(24).toString("hex");
   const vault = options.vault || new SessionVault(options);
+  const verificationStore = await openContextVerificationStore(options);
+  const ownsVerificationStore = !options.verificationStore;
+  const stablePolicyFingerprint =
+    options.policyFingerprint || options.sanitizer.identity?.fingerprint;
+  const policyFingerprint = String(
+    stablePolicyFingerprint ||
+    verificationFingerprint({
+      boundary: "codex-provider",
+      version: 3,
+      // Function.toString() cannot capture closed-over model or policy state.
+      // Without an explicit stable identity, keep cache reuse inside this
+      // gateway lifetime and intentionally miss persisted entries on restart.
+      ephemeralSanitizerNonce: randomBytes(32).toString("hex")
+    })
+  );
   const serial = new KeyedSerialQueue();
   const sessionCaches = new Map();
   const sockets = new Set();
@@ -47,6 +66,8 @@ export async function startCodexProviderGateway(options = {}) {
       ...options,
       nonce,
       vault,
+      verificationStore,
+      policyFingerprint,
       serial,
       sessionCaches
     };
@@ -63,10 +84,16 @@ export async function startCodexProviderGateway(options = {}) {
     socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n");
   });
 
-  await listen(server, options.port || 0, LOOPBACK_HOST);
+  try {
+    await listen(server, options.port || 0, LOOPBACK_HOST);
+  } catch (error) {
+    if (ownsVerificationStore) verificationStore.close();
+    throw error;
+  }
   const address = server.address();
   if (!address || typeof address === "string") {
     await closeServer(server, sockets);
+    if (ownsVerificationStore) verificationStore.close();
     throw new Error("PrivacyAI could not determine the Codex gateway address.");
   }
 
@@ -81,6 +108,7 @@ export async function startCodexProviderGateway(options = {}) {
       closed = true;
       sessionCaches.clear();
       await closeServer(server, sockets);
+      if (ownsVerificationStore) verificationStore.close();
     }
   };
 }
@@ -131,13 +159,21 @@ async function handleRequest(request, response, context) {
 
   const identity = codexSessionContext(body, undefined, request.headers);
   const transformed = await context.serial.run(identity.sessionKey, async () => {
-    const current = await context.vault.load(identity.sessionKey);
-    const currentSessionMap = current?.sessionMap || {};
+    const currentVault = await context.vault.load(identity.sessionKey);
+    const currentThread = context.verificationStore.loadThread(identity.sessionKey);
+    const currentSessionMap = mergeInheritedSessionMap(
+      currentVault?.sessionMap || {},
+      currentThread.sessionMap || {}
+    );
     let sessionMap = { ...currentSessionMap };
     for (const parentSessionKey of identity.parentSessionKeys) {
-      const parent = await context.vault.load(parentSessionKey);
-      if (parent?.sessionMap) {
-        sessionMap = mergeInheritedSessionMap(sessionMap, parent.sessionMap);
+      const parentVault = await context.vault.load(parentSessionKey);
+      const parentThread = context.verificationStore.loadThread(parentSessionKey);
+      if (parentVault?.sessionMap) {
+        sessionMap = mergeInheritedSessionMap(sessionMap, parentVault.sessionMap);
+      }
+      if (parentThread?.sessionMap) {
+        sessionMap = mergeInheritedSessionMap(sessionMap, parentThread.sessionMap);
       }
     }
 
@@ -146,20 +182,39 @@ async function handleRequest(request, response, context) {
       sanitizer: context.sanitizer,
       sessionMap,
       cache,
+      policyFingerprint: context.policyFingerprint,
       maxContextChars: context.maxContextChars,
       headers: request.headers
     });
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
-    if (!sessionMapsEqual(currentSessionMap, completeMap)) {
+    if (!sessionMapsEqual(currentVault?.sessionMap || {}, completeMap)) {
       await context.vault.save(identity.sessionKey, completeMap);
     }
+    context.verificationStore.saveThread(identity.sessionKey, {
+      parentSessionKeys: identity.parentSessionKeys,
+      sessionMap: completeMap,
+      policyFingerprint: context.policyFingerprint
+    });
     if (typeof context.onSanitizedRequest === "function") {
       await context.onSanitizedRequest(result.body, {
         sessionKey: identity.sessionKey,
         route: suffix
       });
     }
-    commitCacheWrites(cache, result.cacheWrites, Number(context.maxCacheEntriesPerSession || 2048));
+    commitCacheWrites(
+      cache,
+      result.cacheWrites,
+      Number(context.maxCacheEntriesPerSession || 2048),
+      context.verificationStore
+    );
+    for (const item of result.itemRecords || []) {
+      context.verificationStore.recordThreadItem({
+        ...item,
+        sessionKey: identity.sessionKey
+      });
+    }
+    context.verificationRequestCount = (context.verificationRequestCount || 0) + 1;
+    if (context.verificationRequestCount % 100 === 0) context.verificationStore.prune();
     return { body: result.body, sessionMap: completeMap };
   });
 
@@ -686,23 +741,50 @@ function closeServer(server, sockets) {
 }
 
 function sessionCache(context, sessionKey) {
-  let cache = context.sessionCaches.get(sessionKey);
-  if (cache) return cache;
-  const maxSessions = Number(context.maxCachedSessions || 64);
-  while (context.sessionCaches.size >= maxSessions) {
-    const oldest = context.sessionCaches.keys().next().value;
-    if (oldest == null) break;
-    context.sessionCaches.delete(oldest);
+  let memory = context.sessionCaches.get(sessionKey);
+  if (!memory) {
+    const maxSessions = Number(context.maxCachedSessions || 64);
+    while (context.sessionCaches.size >= maxSessions) {
+      const oldest = context.sessionCaches.keys().next().value;
+      if (oldest == null) break;
+      context.sessionCaches.delete(oldest);
+    }
+    memory = new Map();
+    context.sessionCaches.set(sessionKey, memory);
   }
-  cache = new Map();
-  context.sessionCaches.set(sessionKey, cache);
-  return cache;
+
+  return {
+    get(key, policyFingerprint) {
+      if (memory.has(key)) {
+        const value = memory.get(key);
+        memory.delete(key);
+        memory.set(key, value);
+        return value;
+      }
+      const persisted = context.verificationStore.getVerification(key, policyFingerprint);
+      if (persisted) memory.set(key, persisted);
+      return persisted;
+    },
+    set(key, value) {
+      if (memory.has(key)) memory.delete(key);
+      memory.set(key, value);
+    },
+    delete(key) {
+      return memory.delete(key);
+    },
+    keys() {
+      return memory.keys();
+    },
+    get size() {
+      return memory.size;
+    }
+  };
 }
 
-function commitCacheWrites(cache, writes = [], maxEntries = 2048) {
+function commitCacheWrites(cache, writes = [], maxEntries = 2048, verificationStore) {
   for (const [key, value] of writes) {
-    if (cache.has(key)) cache.delete(key);
     cache.set(key, value);
+    verificationStore?.putVerification(value);
   }
   while (cache.size > maxEntries) {
     const oldest = cache.keys().next().value;

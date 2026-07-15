@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 
 import {
   assertNoProtectedOriginals,
+  rebaseSessionAdditions,
   restoreValue,
+  sanitizeKnownValue,
   sanitizeStructuredValue
 } from "@privacy-ai/sdk";
 
@@ -102,24 +104,37 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     collectJsonSchemaKeys(transformed.text.format.schema, slots, schemaPath);
   }
 
-  let sessionMapAdditions = {};
+  const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
   const resolved = new Array(slots.length);
   const uncached = [];
   const cacheWrites = [];
-  const cacheScope = sessionMapCacheScope(options.sessionMap);
+  const itemRecords = [];
+  const completeMap = { ...(options.sessionMap || {}) };
+  const sessionMapAdditions = {};
+
   for (let index = 0; index < slots.length; index += 1) {
-    const cacheKey = modelVisibleCacheKey(slots[index].value, cacheScope);
-    if (options.cache?.has(cacheKey)) {
-      resolved[index] = deepClone(options.cache.get(cacheKey));
+    const entry = slots[index];
+    const artifactType = artifactTypeForSlot(entry);
+    const contentHash = modelVisibleContentHash(entry.value);
+    const cacheKey = modelVisibleCacheKey(entry.value, artifactType, policyFingerprint);
+    const cached = options.cache?.get(cacheKey, policyFingerprint);
+    itemRecords.push({
+      slotKey: slotIdentity(entry),
+      cacheKey,
+      contentHash,
+      artifactType
+    });
+    if (cached?.sessionMapAdditions && typeof cached.sessionMapAdditions === "object") {
+      mergeDetectedMappings(completeMap, sessionMapAdditions, cached.sessionMapAdditions);
     } else {
-      uncached.push({ index, cacheKey, value: slots[index].value });
+      uncached.push({ index, cacheKey, contentHash, artifactType, value: entry.value });
     }
   }
 
   if (uncached.length > 0) {
     const result = await sanitizeStructuredValue(uncached.map(entry => entry.value), {
       sanitizer: options.sanitizer,
-      sessionMap: options.sessionMap,
+      sessionMap: completeMap,
       maxContextChars: options.maxContextChars
     });
     if (!Array.isArray(result.value) || result.value.length !== uncached.length) {
@@ -128,13 +143,24 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
         "PrivacyAI blocked the Codex request because sanitization changed its model-visible shape."
       );
     }
-    result.value.forEach((value, offset) => {
-      const entry = uncached[offset];
-      resolved[entry.index] = value;
-      cacheWrites.push([entry.cacheKey, deepClone(value)]);
+
+    const discoveredMap = { ...completeMap, ...result.sessionMapAdditions };
+    uncached.forEach(entry => {
+      const verificationMap = relevantSessionMap(entry.value, discoveredMap);
+      mergeDetectedMappings(completeMap, sessionMapAdditions, verificationMap);
+      cacheWrites.push([entry.cacheKey, {
+        cacheKey: entry.cacheKey,
+        contentHash: entry.contentHash,
+        artifactType: entry.artifactType,
+        policyFingerprint,
+        sessionMapAdditions: verificationMap
+      }]);
     });
-    sessionMapAdditions = result.sessionMapAdditions;
   }
+
+  slots.forEach((entry, index) => {
+    resolved[index] = sanitizeKnownValue(entry.value, completeMap);
+  });
 
   const keyRenames = [];
   resolved.forEach((value, index) => {
@@ -149,13 +175,14 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     .sort((left, right) => right.parentPath.length - left.parentPath.length)
     .forEach(entry => renameKeyAtPath(transformed, entry.parentPath, entry.oldKey, entry.value));
 
-  const completeMap = { ...(options.sessionMap || {}), ...sessionMapAdditions };
   assertNoProtectedOriginals(JSON.stringify(transformed), completeMap);
 
   return {
     body: transformed,
     sessionMapAdditions,
     cacheWrites,
+    itemRecords,
+    policyFingerprint,
     sessionKey: codexSessionKey(body, options.fallbackSessionId, options.headers)
   };
 }
@@ -623,7 +650,7 @@ function collectResponseItem(item, slots, path) {
       return;
     case "additional_tools":
       validateResponseItemShape(item, new Set(["type", "id", "role", "tools"]), "additional_tools");
-      if (item.role !== "assistant") {
+      if (!new Set(["assistant", "developer", "user"]).has(item.role)) {
         throw gatewayError("PRIVACYAI_CODEX_UNSUPPORTED_INPUT", "PrivacyAI blocked unsupported additional-tools role.");
       }
       collectToolDefinitions(item.tools, slots, [...path, "tools"]);
@@ -1379,19 +1406,78 @@ function renameKeyAtPath(root, parentPath, oldKey, newKey) {
   });
 }
 
-function modelVisibleCacheKey(value, sessionMapScope) {
+function modelVisibleCacheKey(value, artifactType, policyFingerprint) {
   return createHash("sha256")
-    .update(String(sessionMapScope))
+    .update(String(policyFingerprint))
+    .update("\0")
+    .update(String(artifactType))
     .update("\0")
     .update(JSON.stringify(value))
     .digest("hex");
 }
 
-function sessionMapCacheScope(sessionMap) {
-  const entries = Object.entries(sessionMap || {}).sort(([left], [right]) =>
-    left.localeCompare(right)
+function modelVisibleContentHash(value) {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function artifactTypeForSlot(entry) {
+  const path = entry.path || entry.parentPath || [];
+  if (path[0] === "instructions") return "instructions";
+  if (path.includes("output") || path.includes("content_items")) return "tool_output";
+  if (path.includes("tools")) return "tool_definition";
+  if (path.includes("schema") || path.includes("parameters")) return "json_schema";
+  if (path.includes("summary") || path.includes("reasoning")) return "reasoning";
+  if (path.includes("command") || path.includes("env")) return "tool_call";
+  return entry.keyRename ? "structured_key" : "message_text";
+}
+
+function slotIdentity(entry) {
+  const path = entry.path || [...(entry.parentPath || []), entry.oldKey || "key"];
+  return path.map(value => String(value).replaceAll("/", "~1")).join("/");
+}
+
+function mergeDetectedMappings(completeMap, aggregateAdditions, additions) {
+  const normalized = Object.fromEntries(Object.entries(additions || {}).filter(
+    ([placeholder, original]) =>
+      typeof placeholder === "string" && placeholder.length > 0 &&
+      typeof original === "string" && original.length > 0 &&
+      placeholder !== original
+  ));
+  if (Object.keys(normalized).length === 0) return;
+  const rebased = rebaseSessionAdditions(
+    JSON.stringify(Object.keys(normalized)),
+    normalized,
+    completeMap
   );
-  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+  Object.assign(completeMap, rebased.sessionMap);
+  Object.assign(aggregateAdditions, rebased.sessionMap);
+}
+
+function relevantSessionMap(value, sessionMap) {
+  const strings = [];
+  collectStrings(value, strings);
+  const normalizedStrings = strings.map(text => text.toLocaleLowerCase("en-US"));
+  return Object.fromEntries(Object.entries(sessionMap || {}).filter(([, original]) => {
+    if (typeof original !== "string" || original.length === 0) return false;
+    const target = original.toLocaleLowerCase("en-US");
+    return normalizedStrings.some(text => text.includes(target));
+  }));
+}
+
+function collectStrings(value, output) {
+  if (typeof value === "string") {
+    output.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach(entry => collectStrings(entry, output));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    output.push(key);
+    collectStrings(entry, output);
+  }
 }
 
 function hashCacheKey(value) {

@@ -112,15 +112,38 @@ and session routing remain in this package.
 
 ## Session state and performance
 
-Session maps are stored under `~/.local/share/privacyai/agent-sessions/` in
+Session maps remain stored under `~/.local/share/privacyai/agent-sessions/` in
 hashed `0600` files. Updates use ownership-token locks, PID-start identity on
 Linux, bounded contention retries, and atomic rename.
 
-Repeated model-visible items are cached by SHA-256 within each gateway process.
-Only uncached items are sent to the local classifier. Cache writes are committed
-only after session-map persistence succeeds. Child and forked Codex threads may
-inherit parent mappings only when placeholder and original identities agree
-exactly; ambiguous inheritance stops before the upstream request.
+The gateway also keeps a content-addressed verification ledger at
+`~/.local/share/privacyai/context-gateway.sqlite3` by default. The database is
+local-only, created with `0600` permissions, and contains thread metadata, the
+private session mappings required to rebuild verified results, and hashes for
+model-visible items. Override its location with `PRIVACYAI_CONTEXT_DB` or the
+`verificationDbPath` launcher option.
+
+Each verification key includes the exact content, artifact type, privacy-policy
+version, local model identity, and sanitizer-prompt fingerprint. Unchanged
+instructions, history items, tool definitions, schemas, and tool outputs are
+therefore reused after gateway restarts and Codex resume/fork operations. Adding
+a new session mapping does not invalidate unrelated verified content; changing
+the content, model, prompt, or policy does. Child and forked threads may inherit
+parent mappings only when placeholder and original identities agree exactly.
+
+The strict local-model contract returns bounded exact private spans instead of
+reproducing the full prompt. PrivacyAI reconstructs the original structure
+locally and applies stable placeholders. Oversized model-visible strings are
+split at deterministic text boundaries with overlap large enough to detect a
+private span crossing a chunk boundary. Only text already present in the
+outbound Codex request is classified; PrivacyAI does not read hidden command
+artifacts or full terminal logs that Codex omitted.
+
+The ledger uses bounded age/item pruning. On Node releases without `node:sqlite`,
+the same verification interface falls back to an in-memory cache, preserving
+correctness but not restart reuse. Database corruption, unsupported schemas,
+ambiguous mappings, and unsafe classifier output fail closed before upstream
+transmission.
 
 ## Commands
 

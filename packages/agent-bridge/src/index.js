@@ -14,6 +14,12 @@ export {
 } from "./codex-provider-config.js";
 export { startCodexProviderGateway } from "./codex-provider-gateway.js";
 export {
+  MemoryContextVerificationStore,
+  SqliteContextVerificationStore,
+  openContextVerificationStore,
+  verificationFingerprint
+} from "./context-verification-store.js";
+export {
   codexSessionContext,
   codexSessionKey,
   restoreCodexCompactResponse,
@@ -62,7 +68,12 @@ export {
   resolveModelSelection,
   runOnboarding
 } from "./onboard.js";
-export { createPrivacySanitizer, normalizeSanitizerResult } from "./privacy-sanitizer.js";
+export {
+  createPrivacySanitizer,
+  derivePrivacyContextMaxChars,
+  derivePrivacyMaxTokens,
+  normalizeSanitizerResult
+} from "./privacy-sanitizer.js";
 export { isProcessAlive, isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
 export {
   consumeAllowance,

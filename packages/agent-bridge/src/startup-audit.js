@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
@@ -59,7 +59,12 @@ export async function auditCodexStartupContext(options = {}) {
   const inspection = await inspectSerializedStartupContext(payload, {
     sanitizer: options.sanitizer,
     sessionMap: { [canaryPlaceholder]: canaryOriginal },
-    maxContextChars: options.maxContextChars
+    maxContextChars: options.maxContextChars,
+    verificationStore: options.verificationStore,
+    policyFingerprint: options.policyFingerprint,
+    cacheCanonicalReplacements: {
+      [canaryPlaceholder]: "[PRIVACYAI_STARTUP_CANARY]"
+    }
   });
   throwIfHighRiskStartupValues(inspection.sessionMapAdditions, "Codex");
 
@@ -86,7 +91,9 @@ export async function auditClaudeStartupContext(options = {}) {
   const inspection = await inspectSerializedStartupContext(payload, {
     sanitizer: options.sanitizer,
     sessionMap: {},
-    maxContextChars: options.maxContextChars || DEFAULT_STATIC_LIMIT
+    maxContextChars: options.maxContextChars || DEFAULT_STATIC_LIMIT,
+    verificationStore: options.verificationStore,
+    policyFingerprint: options.policyFingerprint
   });
   throwIfHighRiskStartupValues(inspection.sessionMapAdditions, "Claude");
 
@@ -181,11 +188,45 @@ export function captureCodexPromptInput(options) {
 }
 
 async function inspectSerializedStartupContext(value, options) {
-  return sanitizeModelVisibleValue(value, {
+  const policyFingerprint = String(options.policyFingerprint || "startup-context-v1");
+  const serialized = JSON.stringify(value);
+  const canonical = canonicalizeCacheText(serialized, options.cacheCanonicalReplacements);
+  const contentHash = createHash("sha256").update(canonical).digest("hex");
+  const cacheKey = createHash("sha256")
+    .update(policyFingerprint)
+    .update("\0startup_context\0")
+    .update(contentHash)
+    .digest("hex");
+  const cached = options.verificationStore?.getVerification(cacheKey, policyFingerprint);
+  if (cached) {
+    return {
+      value,
+      sessionMapAdditions: cached.sessionMapAdditions || {},
+      changed: Object.keys(cached.sessionMapAdditions || {}).length > 0
+    };
+  }
+
+  const result = await sanitizeModelVisibleValue(value, {
     sanitizer: options.sanitizer,
     sessionMap: options.sessionMap,
     maxContextChars: options.maxContextChars || DEFAULT_STATIC_LIMIT
   });
+  options.verificationStore?.putVerification({
+    cacheKey,
+    contentHash,
+    artifactType: "startup_context",
+    policyFingerprint,
+    sessionMapAdditions: result.sessionMapAdditions
+  });
+  return result;
+}
+
+function canonicalizeCacheText(text, replacements = {}) {
+  let canonical = text;
+  for (const [value, replacement] of Object.entries(replacements || {})) {
+    canonical = canonical.split(value).join(replacement);
+  }
+  return canonical;
 }
 
 function throwIfHighRiskStartupValues(additions, flavor) {

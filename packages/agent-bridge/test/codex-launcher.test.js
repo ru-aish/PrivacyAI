@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  derivePrivacyContextMaxChars,
+  derivePrivacyMaxTokens,
   launchNativeTui,
   savePrivacyConfig
 } from "../src/index.js";
@@ -20,6 +22,7 @@ test("Codex gateway launcher preserves normal CODEX_HOME and closes the gateway"
   }, { path: configPath });
 
   let closed = 0;
+  let gatewayOptions;
   let spawned;
   const result = await launchNativeTui("codex", ["exec", "hello"], {
     configPath,
@@ -27,12 +30,15 @@ test("Codex gateway launcher preserves normal CODEX_HOME and closes the gateway"
     env: { CODEX_HOME: codexHome },
     healthOptions: { skip: true },
     sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
-    startCodexProviderGateway: async () => ({
+    startCodexProviderGateway: async options => {
+      gatewayOptions = options;
+      return {
       baseURL: "http://127.0.0.1:17777/test-nonce",
       async close() {
         closed += 1;
       }
-    }),
+    };
+    },
     spawnInherited: async (command, args, options) => {
       spawned = { command, args, options };
       return 0;
@@ -46,6 +52,7 @@ test("Codex gateway launcher preserves normal CODEX_HOME and closes the gateway"
   assert.equal(spawned.args.includes("exec"), true);
   assert.equal(spawned.args.indexOf("exec") > spawned.args.indexOf('model_provider="privacyai"'), true);
   assert.equal(spawned.args.includes("--privacy-gateway"), false);
+  assert.equal(gatewayOptions.maxContextChars, 5120);
   await assert.rejects(access(spawned.options.env.PRIVACYAI_WRAPPER_DIR), /ENOENT/);
 });
 
@@ -93,6 +100,7 @@ test("explicit strict mode retains the isolated hook path and never starts a gat
   }, { path: configPath });
 
   let gatewayStarted = false;
+  let verificationStoreClosed = 0;
   let spawned;
   const result = await launchNativeTui("codex", ["--privacy-strict"], {
     configPath,
@@ -100,6 +108,9 @@ test("explicit strict mode retains the isolated hook path and never starts a gat
     python: "/fake/python3",
     healthOptions: { skip: true },
     sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+    verificationStore: {
+      close() { verificationStoreClosed += 1; }
+    },
     startCodexProviderGateway: async () => {
       gatewayStarted = true;
       throw new Error("strict mode must not start gateway");
@@ -116,8 +127,21 @@ test("explicit strict mode retains the isolated hook path and never starts a gat
 
   assert.equal(result, 0);
   assert.equal(gatewayStarted, false);
+  assert.equal(verificationStoreClosed, 0);
   assert.equal(spawned.command, "/fake/python3");
   assert.equal(spawned.args.includes("--privacy-strict"), false);
   assert.equal(spawned.args.includes("/fake/stock-codex"), true);
   assert.equal(spawned.options.env.CODEX_HOME, "/isolated");
+});
+
+
+test("local-model budgets derive bounded chunk and output sizes from numCtx", () => {
+  assert.equal(derivePrivacyMaxTokens({ numCtx: 4096 }), 1024);
+  assert.equal(derivePrivacyContextMaxChars({ numCtx: 4096 }), 5120);
+  assert.equal(derivePrivacyMaxTokens({ numCtx: 2048 }), 512);
+  assert.equal(derivePrivacyContextMaxChars({ numCtx: 2048 }), 2048);
+  assert.equal(
+    derivePrivacyContextMaxChars({ numCtx: 4096 }, { providerContextMaxChars: 7777 }),
+    7777
+  );
 });

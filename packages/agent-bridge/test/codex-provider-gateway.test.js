@@ -201,7 +201,10 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
     sanitizeCodexRequestBody(sampleRequest(), {
       sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: { "[EMAIL_1]": PRIVATE_EMAIL } })
     }),
-    error => error?.code === "PRIVACYAI_PROVIDER_PAYLOAD_LEAK"
+    error => new Set([
+      "PRIVACYAI_INVALID_SANITIZED_CONTEXT",
+      "PRIVACYAI_PROVIDER_PAYLOAD_LEAK"
+    ]).has(error?.code)
   );
 });
 
@@ -291,6 +294,34 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
   assert.equal(action.working_directory, "/tmp/[EMAIL_1]");
   assert.deepEqual(action.env, { "[EMAIL_1]": "[API_KEY_1]" });
   assert.equal(action.user, "[EMAIL_1]");
+});
+
+test("additional-tools accepts Codex roles while sanitizing definitions", async () => {
+  for (const role of ["assistant", "developer", "user"]) {
+    const body = sampleRequest();
+    body.input = [{
+      type: "additional_tools",
+      id: "additional-tools-1",
+      role,
+      tools: [{
+        type: "function",
+        name: "local_lookup",
+        description: `Look up ${PRIVATE_EMAIL}`,
+        strict: false,
+        parameters: { type: "object", properties: { key: { type: "string" } } }
+      }]
+    }];
+    const result = await sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer });
+    assert.equal(result.body.input[0].tools[0].description.includes(PRIVATE_EMAIL), false);
+    assert.match(result.body.input[0].tools[0].description, /\[EMAIL_1\]/);
+  }
+
+  const invalid = sampleRequest();
+  invalid.input = [{ type: "additional_tools", role: "system", tools: [] }];
+  await assert.rejects(
+    sanitizeCodexRequestBody(invalid, { sanitizer: deterministicSanitizer }),
+    error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_INPUT"
+  );
 });
 
 test("tool JSON Schema private keys are sanitized consistently and restored in function arguments", async () => {
@@ -1083,7 +1114,7 @@ test("gateway chooses ChatGPT or API upstream and strips forwarding headers", as
   }
 });
 
-test("request item cache is scoped to the active Codex session map", async () => {
+test("request item cache survives session-map growth", async () => {
   const cache = new Map();
   let calls = 0;
   const classify = async text => {
@@ -1104,7 +1135,7 @@ test("request item cache is scoped to the active Codex session map", async () =>
     sanitizer: classify
   });
   for (const [key, value] of second.cacheWrites) cache.set(key, value);
-  assert.equal(calls, 2, "map growth must invalidate the previous cache scope");
+  assert.equal(calls, 1, "map growth must not rescan unchanged model-visible items");
   assert.deepEqual(second.body, first.body);
 
   const third = await sanitizeCodexRequestBody(sampleRequest(), {
@@ -1231,6 +1262,87 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
   assert.equal(upstreamRequests, 1);
 });
 
+test("gateway reuses persisted thread verification after restart and invalidates changed policy/content", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-gateway-persistent-cache-"));
+  const verificationDbPath = join(root, "context.sqlite3");
+  let upstreamRequests = 0;
+  const upstream = await startServer(async (request, response) => {
+    await readRequestJson(request);
+    upstreamRequests += 1;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.output_text.delta", item_id: "persisted", delta: "ok" }) +
+      sse({ type: "response.completed", response: { id: "persisted", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+
+  const body = sampleRequest();
+  let sanitizerCalls = 0;
+  const sanitizer = async text => {
+    sanitizerCalls += 1;
+    return deterministicSanitizer(text);
+  };
+  const common = {
+    baseDir: root,
+    verificationDbPath,
+    apiUpstream: "http://127.0.0.1:" + upstream.port + "/v1",
+    allowInsecureTestUpstream: true,
+    policyFingerprint: "persistent-policy-v1"
+  };
+
+  const first = await startCodexProviderGateway({ ...common, sanitizer });
+  let second;
+  let third;
+  t.after(async () => {
+    await Promise.allSettled([first.close(), second?.close(), third?.close()]);
+  });
+  let response = await fetch(first.baseURL + "/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(sanitizerCalls, 1);
+  await first.close();
+
+  const cachedOnly = async () => {
+    throw new Error("unchanged resumed thread must use persisted verification");
+  };
+  second = await startCodexProviderGateway({ ...common, sanitizer: cachedOnly });
+  response = await fetch(second.baseURL + "/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  assert.equal(response.status, 200, await response.text());
+
+  const changed = structuredClone(body);
+  changed.instructions += " changed";
+  response = await fetch(second.baseURL + "/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(changed)
+  });
+  assert.equal(response.status, 502);
+  await second.close();
+
+  third = await startCodexProviderGateway({
+    ...common,
+    policyFingerprint: "persistent-policy-v2",
+    sanitizer: cachedOnly
+  });
+  response = await fetch(third.baseURL + "/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  assert.equal(response.status, 502);
+  await third.close();
+  assert.equal(upstreamRequests, 2);
+});
+
 test("Codex provider args force loopback Responses transport and disable unsupported provider-hosted tools", () => {
   const args = buildCodexProviderArgs("http://127.0.0.1:12345/nonce");
   assert.equal(args.includes('model_provider="privacyai"'), true);
@@ -1348,3 +1460,64 @@ async function readRequestJson(request) {
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+
+test("custom sanitizers without stable identity never reuse persisted verification across restart", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-gateway-ephemeral-policy-"));
+  const verificationDbPath = join(root, "context.sqlite3");
+  const upstream = await startServer(async (request, response) => {
+    await readRequestJson(request);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.output_text.delta", item_id: "ephemeral", delta: "ok" }) +
+      sse({ type: "response.completed", response: { id: "ephemeral", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+
+  let firstCalls = 0;
+  let secondCalls = 0;
+  function createClosure(mode) {
+    return async text => {
+      if (mode === "first") {
+        firstCalls += 1;
+        return deterministicSanitizer(text);
+      }
+      secondCalls += 1;
+      throw new Error("replacement policy must classify again");
+    };
+  }
+  const common = {
+    baseDir: root,
+    verificationDbPath,
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  };
+
+  const first = await startCodexProviderGateway({
+    ...common,
+    sanitizer: createClosure("first")
+  });
+  let response = await fetch(`${first.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(firstCalls, 1);
+  await first.close();
+
+  const second = await startCodexProviderGateway({
+    ...common,
+    sanitizer: createClosure("second")
+  });
+  t.after(() => second.close());
+  response = await fetch(`${second.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  assert.equal(response.status, 502);
+  assert.equal(secondCalls, 1);
+});
