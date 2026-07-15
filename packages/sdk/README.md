@@ -32,6 +32,56 @@ const result = await client.ask("Summarize this safely: john@example.com", {
 });
 ```
 
+## Compact exact text edits
+
+For code, prose, configuration, or any other text, `TextEditGenerator` asks the
+local model for small exact patches instead of a complete rewritten document.
+PrivacyAI verifies every source fragment and applies the patches locally.
+
+```js
+import {
+  OpenAICompatibleProvider,
+  TextEditGenerator
+} from "@privacy-ai/sdk";
+
+const provider = new OpenAICompatibleProvider({
+  baseURL: "http://127.0.0.1:1234/v1",
+  model: "mistralai/ministral-3-3b"
+});
+const editor = new TextEditGenerator({ provider });
+
+const result = await editor.edit(
+  "function total() {\n  return value;\n}",
+  "Add ten percent tax without rounding."
+);
+
+console.log(result.text);
+// function total() {
+//   return value * 1.1;
+// }
+```
+
+The model returns a compact contract such as:
+
+```json
+{
+  "edits": [
+    {
+      "search": "return value;",
+      "replace": "return value * 1.1;",
+      "occurrence": 1,
+      "all": false
+    }
+  ]
+}
+```
+
+`occurrence` selects a one-based exact match; `all: true` applies the same
+replacement to every exact match. Ambiguous, missing, overlapping, malformed,
+and whole-document patches are rejected rather than guessed. Browser privacy
+mode uses the same verified patch engine for its optional small local rewrites,
+while strict privacy mode continues to return only exact sensitive spans.
+
 ## Environment Variables
 
 ```env

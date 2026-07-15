@@ -142,6 +142,28 @@ test("sanitizeStructuredValue rejects malformed structured output and invalid li
   );
 });
 
+test("sanitizeStructuredValue chunks oversized text with overlap and catches boundary-spanning secrets", async () => {
+  const secret = "boundary.secret@example.test";
+  const input = "x".repeat(1260) + secret + "y".repeat(1800);
+  let calls = 0;
+  const result = await sanitizeStructuredValue(input, {
+    maxContextChars: 1400,
+    sanitizer: async text => {
+      calls += 1;
+      const found = text.includes(secret);
+      return {
+        sanitizedPrompt: found ? text.split(secret).join("[EMAIL_1]") : text,
+        sessionMap: found ? { "[EMAIL_1]": secret } : {}
+      };
+    }
+  });
+
+  assert.equal(calls > 1, true);
+  assert.equal(result.value.includes(secret), false);
+  assert.equal(result.value.includes("[EMAIL_1]"), true);
+  assert.equal(restoreValue(result.value, result.sessionMapAdditions), input);
+});
+
 test("provider-bound assertion never discloses protected values", () => {
   assert.throws(
     () => assertNoProtectedOriginals("alice.private@example.test", map),
@@ -164,4 +186,60 @@ test("normalizeSessionMap removes malformed and identity mappings", () => {
     }),
     { good: "private" }
   );
+});
+
+
+test("ordinary long numeric IDs are not mistaken for generated placeholders", () => {
+  assert.deepEqual(
+    findUnresolvedPlaceholders("ids: 123456 and 1700000000"),
+    []
+  );
+  assert.deepEqual(
+    findUnresolvedPlaceholders("generated ZIP-10001"),
+    ["ZIP-10001"]
+  );
+});
+
+test("sanitizeStructuredValue classifies private values used as object keys", async () => {
+  const secretKey = "AKIA1234567890123456";
+  let sawKey = false;
+  const result = await sanitizeStructuredValue({ [secretKey]: "public" }, {
+    sanitizer: async text => {
+      sawKey ||= text.includes(secretKey);
+      return {
+        sanitizedPrompt: text.split(secretKey).join("[AWS_ACCESS_KEY_1]"),
+        sessionMap: text.includes(secretKey)
+          ? { "[AWS_ACCESS_KEY_1]": secretKey }
+          : {}
+      };
+    }
+  });
+
+  assert.equal(sawKey, true);
+  assert.equal(Object.hasOwn(result.value, secretKey), false);
+  assert.equal(result.value["[AWS_ACCESS_KEY_1]"], "public");
+  assert.deepEqual(result.sessionMapAdditions, {
+    "[AWS_ACCESS_KEY_1]": secretKey
+  });
+});
+
+test("chunk overlap contains every accepted 512-character private span", async () => {
+  const secret = "S".repeat(512);
+  const input = "x".repeat(1420) + secret + "y".repeat(1000);
+  let containingCalls = 0;
+  const result = await sanitizeStructuredValue(input, {
+    maxContextChars: 2048,
+    sanitizer: async text => {
+      const found = text.includes(secret);
+      if (found) containingCalls += 1;
+      return {
+        sanitizedPrompt: found ? text.split(secret).join("[PRIVATE_IDENTIFIER_1]") : text,
+        sessionMap: found ? { "[PRIVATE_IDENTIFIER_1]": secret } : {}
+      };
+    }
+  });
+
+  assert.equal(containingCalls >= 1, true);
+  assert.equal(result.value.includes(secret), false);
+  assert.equal(restoreValue(result.value, result.sessionMapAdditions), input);
 });

@@ -193,3 +193,54 @@ test("strict validation remains linear enough for future large-file inputs", asy
   assert.equal(result.sanitizedText.startsWith(block.repeat(10)), true);
   assert.doesNotMatch(result.sanitizedText, /large\.file@example\.com/);
 });
+
+
+test("browser mode accepts compact exact edits and reconstructs the prompt locally", async () => {
+  const original = "I built the report for alice@example.com. Please review it exactly as written.";
+  const provider = mockProvider({
+    edits: [
+      {
+        search: "I built the report for alice@example.com",
+        replace: "The report was built for contact1@example.com",
+        occurrence: 1,
+        all: false
+      }
+    ],
+    session_map: {
+      "contact1@example.com": "alice@example.com"
+    }
+  });
+  const sanitizer = new AiSanitizer({
+    provider,
+    model: "mock",
+    sanitizationMode: "browser"
+  });
+  const result = await sanitizer.sanitize(original);
+
+  assert.equal(result.privacySource, "ai-edit-sanitizer");
+  assert.equal(
+    result.sanitizedText,
+    "The report was built for contact1@example.com. Please review it exactly as written."
+  );
+  assert.equal(result.privacyModelText.includes(original), false);
+  assert.equal(provider.requests.length, 1);
+});
+
+test("browser mode rejects ambiguous compact edits without resending the full source", async () => {
+  const original = "enabled enabled alice@example.com";
+  const provider = mockProvider({
+    edits: [{ search: "enabled", replace: "disabled" }],
+    session_map: {}
+  });
+  const sanitizer = new AiSanitizer({
+    provider,
+    model: "mock",
+    sanitizationMode: "browser"
+  });
+  const result = await sanitizer.sanitize(original);
+
+  assert.equal(result.privacySource, "regex-fallback");
+  assert.match(result.sanitizedText, /^enabled enabled /);
+  assert.doesNotMatch(result.sanitizedText, /alice@example\.com/);
+  assert.equal(provider.requests.length, 1);
+});

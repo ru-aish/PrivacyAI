@@ -8,12 +8,23 @@ export {
   PRIVACY_SANITIZER_PROMPT,
   STRICT_PRIVACY_SANITIZER_PROMPT,
   BROWSER_PRIVACY_SANITIZER_PROMPT,
+  EXACT_TEXT_EDIT_PROMPT,
   CONTEXT_COMPACTOR_PROMPT,
   DEFAULT_SYSTEM_PROMPT
 } from "./prompts.js";
-export { AiSanitizer, SANITIZATION_MODES, parseSanitizerJson } from "./ai-sanitizer.js";
+export {
+  AiSanitizer,
+  SANITIZATION_MODES,
+  parseSanitizerEdits,
+  parseSanitizerJson,
+  parseSanitizerSpans
+} from "./ai-sanitizer.js";
 export { ContextCompactor, parseCompactorJson } from "./context-compactor.js";
-export { generateDummy, GENERATED_DUMMY_PATTERN_SOURCE } from "./dummy-data.js";
+export {
+  allocateUniqueDummy,
+  generateDummy,
+  GENERATED_DUMMY_PATTERN_SOURCE
+} from "./dummy-data.js";
 export { localSanitize } from "./local-sanitizer.js";
 export { PrivacyGuardianError, ProviderError } from "./errors.js";
 export {
@@ -28,6 +39,11 @@ export {
   transformValue
 } from "./session-map.js";
 export { sanitizeStructuredValue } from "./structured.js";
+export {
+  TextEditGenerator,
+  applyTextEdits,
+  parseAndApplyTextEdits
+} from "./text-edits.js";
 export { StreamingPlaceholderRestorer } from "./streaming-restorer.js";
 
 import { PrivateAI } from "./client.js";
