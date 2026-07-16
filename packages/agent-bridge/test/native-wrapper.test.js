@@ -28,6 +28,7 @@ import {
   prepareAgentRuntimeIsolation,
   processPromptSubmission,
   rebaseSessionAdditions,
+  resolveCodexCaptureTimeoutMs,
   runOnboarding,
   sanitizeCodexRequestBody,
   validateNativeArguments,
@@ -668,6 +669,54 @@ test("Codex startup capture drains UTF-8 output before parsing", async () => {
     timeoutMs: 5000
   });
   assert.deepEqual(result, [{ text: "€" }]);
+});
+
+test("Codex startup capture timeout follows configured MCP startup budgets", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-capture-timeout-"));
+  const codexHome = join(root, "codex-home");
+  await mkdir(join(root, ".git"), { recursive: true });
+  await mkdir(codexHome, { recursive: true });
+  await writeFile(
+    join(codexHome, "config.toml"),
+    [
+      "[mcp_servers.fast]",
+      "command = \"fast\"",
+      "startup_timeout_sec = 15",
+      "",
+      "[mcp_servers.slow]",
+      "command = \"slow\"",
+      "startup_timeout_sec = 120",
+      "",
+      "[mcp_servers.slow.env]",
+      "PRIVATE_VALUE = \"ignored\""
+    ].join("\n")
+  );
+
+  assert.equal(
+    await resolveCodexCaptureTimeoutMs({
+      cwd: root,
+      env: { CODEX_HOME: codexHome }
+    }),
+    150000
+  );
+  assert.equal(
+    await resolveCodexCaptureTimeoutMs({
+      cwd: root,
+      env: {
+        CODEX_HOME: codexHome,
+        PRIVACYAI_STARTUP_AUDIT_TIMEOUT_MS: "4321"
+      }
+    }),
+    4321
+  );
+  assert.equal(
+    await resolveCodexCaptureTimeoutMs({
+      cwd: root,
+      env: { CODEX_HOME: codexHome },
+      timeoutMs: 1234
+    }),
+    1234
+  );
 });
 
 test("Codex startup audit captures serialized model input and verifies the local canary", async () => {

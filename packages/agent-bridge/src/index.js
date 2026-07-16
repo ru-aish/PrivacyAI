@@ -44,7 +44,8 @@ export {
   auditClaudeStartupContext,
   auditCodexStartupContext,
   auditCodexStaticStartupContext,
-  captureCodexPromptInput
+  captureCodexPromptInput,
+  resolveCodexCaptureTimeoutMs
 } from "./startup-audit.js";
 export { processHookEvent } from "./hook-adapter.js";
 export {

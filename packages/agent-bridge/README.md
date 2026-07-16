@@ -39,6 +39,12 @@ The gateway adds no second OpenAI request. Classification uses the configured
 loopback-local PrivacyAI model, so OpenAI usage remains the normal Codex turn
 apart from small token differences caused by placeholders.
 
+The exact startup-prompt capture waits for Codex MCP initialization. Its timeout
+is derived from the largest configured `startup_timeout_sec` plus a safety
+margin, with a bounded fallback and hard maximum. Set
+`PRIVACYAI_STARTUP_AUDIT_TIMEOUT_MS` to a positive millisecond value to override
+that derived limit for unusually slow local MCP environments.
+
 ### Protected request content
 
 The transformer handles:

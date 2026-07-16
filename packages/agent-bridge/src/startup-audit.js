@@ -10,6 +10,11 @@ import { assertNoProtectedOriginals, sanitizeModelVisibleValue } from "./context
 import { buildCodexRequestVerificationSeed } from "./codex-request-transform.js";
 
 const DEFAULT_CAPTURE_LIMIT = 2 * 1024 * 1024;
+const DEFAULT_CAPTURE_TIMEOUT_MS = 90000;
+const CAPTURE_TIMEOUT_MARGIN_MS = 30000;
+const MAX_CAPTURE_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_CODEX_MCP_STARTUP_TIMEOUT_MS = 10000;
+const MAX_CODEX_CONFIG_BYTES = 1024 * 1024;
 const DEFAULT_STATIC_LIMIT = 200000;
 const DEFAULT_STATIC_FILES = 100;
 const DEFAULT_CODEX_STATIC_LIMIT = 2 * 1024 * 1024;
@@ -183,7 +188,8 @@ export async function auditClaudeStartupContext(options = {}) {
   };
 }
 
-export function captureCodexPromptInput(options) {
+export async function captureCodexPromptInput(options) {
+  const timeoutMs = await resolveCodexCaptureTimeoutMs(options);
   return new Promise((resolvePromise, rejectPromise) => {
     const maxBytes = Number(options.maxBytes || DEFAULT_CAPTURE_LIMIT);
     const args = [
@@ -217,9 +223,9 @@ export function captureCodexPromptInput(options) {
     const timer = setTimeout(() => {
       finish(startupAuditError(
         "PRIVACYAI_CODEX_CAPTURE_TIMEOUT",
-        "PrivacyAI timed out while capturing Codex model-visible startup input."
+        `PrivacyAI timed out after ${Math.ceil(timeoutMs / 1000)} seconds while capturing Codex model-visible startup input.`
       ));
-    }, Number(options.timeoutMs || 20000));
+    }, timeoutMs);
 
     child.on("error", () => {
       finish(startupAuditError(
@@ -266,6 +272,92 @@ export function captureCodexPromptInput(options) {
       }
     });
   });
+}
+
+export async function resolveCodexCaptureTimeoutMs(options = {}) {
+  if (options.timeoutMs != null) {
+    return positiveTimeoutMs(options.timeoutMs, "Codex startup audit timeout");
+  }
+
+  const env = options.env || process.env;
+  if (env.PRIVACYAI_STARTUP_AUDIT_TIMEOUT_MS != null) {
+    return positiveTimeoutMs(
+      env.PRIVACYAI_STARTUP_AUDIT_TIMEOUT_MS,
+      "PRIVACYAI_STARTUP_AUDIT_TIMEOUT_MS"
+    );
+  }
+
+  const configuredMcpTimeoutMs = await configuredCodexMcpStartupTimeoutMs(options);
+  return Math.min(
+    MAX_CAPTURE_TIMEOUT_MS,
+    Math.max(DEFAULT_CAPTURE_TIMEOUT_MS, configuredMcpTimeoutMs + CAPTURE_TIMEOUT_MARGIN_MS)
+  );
+}
+
+async function configuredCodexMcpStartupTimeoutMs(options) {
+  const cwd = resolve(options.cwd || process.cwd());
+  const roots = await codexStaticRoots(cwd, options);
+  const paths = new Set([join(roots.codexHome, "config.toml")]);
+  for (const directory of ancestors(cwd, roots.projectRoot)) {
+    paths.add(join(directory, ".codex", "config.toml"));
+  }
+
+  let maximum = 0;
+  for (const path of paths) {
+    const content = await readSmallRegularFile(path, MAX_CODEX_CONFIG_BYTES);
+    if (content == null) continue;
+    for (const timeoutMs of parseCodexMcpStartupTimeouts(content)) {
+      maximum = Math.max(maximum, timeoutMs);
+    }
+  }
+  return maximum;
+}
+
+function parseCodexMcpStartupTimeouts(content) {
+  const timeouts = new Map();
+  let currentServer = null;
+  const serverTable = /^\s*\[\s*mcp_servers\.((?:"(?:\\.|[^"])+")|(?:'[^']+')|(?:[A-Za-z0-9_-]+))\s*\]\s*(?:#.*)?$/;
+  const timeoutEntry = /^\s*startup_timeout_sec\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*(?:#.*)?$/;
+
+  for (const line of String(content).split(/\r?\n/)) {
+    const table = line.match(serverTable);
+    if (table) {
+      currentServer = table[1];
+      if (!timeouts.has(currentServer)) {
+        timeouts.set(currentServer, DEFAULT_CODEX_MCP_STARTUP_TIMEOUT_MS);
+      }
+      continue;
+    }
+    if (/^\s*\[/.test(line)) {
+      currentServer = null;
+      continue;
+    }
+    if (!currentServer) continue;
+    const timeout = line.match(timeoutEntry);
+    if (!timeout) continue;
+    timeouts.set(currentServer, Math.ceil(Number(timeout[1]) * 1000));
+  }
+  return timeouts.values();
+}
+
+async function readSmallRegularFile(path, maxBytes) {
+  let metadata;
+  try {
+    metadata = await lstat(path);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+    throw error;
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > maxBytes) return null;
+  return readFile(path, "utf8");
+}
+
+function positiveTimeoutMs(value, label) {
+  const timeoutMs = Number(value);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError(`${label} must be a positive number of milliseconds.`);
+  }
+  return Math.ceil(timeoutMs);
 }
 
 async function inspectSerializedStartupContext(value, options) {
