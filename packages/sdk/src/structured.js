@@ -1,5 +1,5 @@
 import {
-  assertNoProtectedOriginals,
+  assertNoProtectedOriginalsInValue,
   normalizeSessionMap,
   rebaseSessionAdditions,
   sanitizeKnownText
@@ -90,10 +90,7 @@ export async function sanitizeStructuredValue(value, options = {}) {
 
   const resolved = slots.map(slot => sanitizeKnownText(slot.value, state.completeMap));
   const sanitizedValue = rebuildValue(template, resolved);
-  const serialized = typeof sanitizedValue === "string"
-    ? sanitizedValue
-    : JSON.stringify(sanitizedValue);
-  assertNoProtectedOriginals(serialized, state.completeMap);
+  assertNoProtectedOriginalsInValue(sanitizedValue, state.completeMap);
 
   return {
     value: sanitizedValue,

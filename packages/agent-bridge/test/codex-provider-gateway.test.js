@@ -1213,6 +1213,33 @@ test("Codex sanitization isolates independent model-visible artifacts", async ()
   }
 });
 
+test("Codex leak verification ignores protocol booleans while protecting matching text", async () => {
+  const body = sampleRequest();
+  body.instructions = "safe instructions";
+  body.input = [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "the private text is false" }]
+  }];
+  body.tools = [];
+  body.prompt_cache_key = "safe-cache-key";
+
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: async text => {
+      const found = text.includes("false");
+      return {
+        sanitizedPrompt: found ? text.split("false").join("[PRIVATE_VALUE_1]") : text,
+        sessionMap: found ? { "[PRIVATE_VALUE_1]": "false" } : {}
+      };
+    }
+  });
+
+  assert.equal(result.body.store, false);
+  assert.equal(result.body.parallel_tool_calls, false);
+  assert.equal(result.body.input[0].content[0].text.includes("false"), false);
+  assert.equal(result.body.input[0].content[0].text.includes("[PRIVATE_VALUE_1]"), true);
+});
+
 test("oversized Codex artifacts are sanitized in bounded batches and reconstructed", async () => {
   const secret = "boundary.secret@example.test";
   const body = {

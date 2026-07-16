@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   StreamingPlaceholderRestorer,
   assertNoProtectedOriginals,
+  assertNoProtectedOriginalsInValue,
   findUnresolvedPlaceholders,
   normalizeSessionMap,
   rebaseSessionAdditions,
@@ -172,6 +173,47 @@ test("provider-bound assertion never discloses protected values", () => {
       assert.equal(error.message.includes("alice.private@example.test"), false);
       return true;
     }
+  );
+});
+
+test("provider-bound assertion ignores protected substrings only inside known placeholders", () => {
+  const overlappingMap = {
+    "[PRIVATE_VALUE_5]": "VALUE_5",
+    Riverdale: "dale"
+  };
+
+  assert.doesNotThrow(() =>
+    assertNoProtectedOriginals("safe [PRIVATE_VALUE_5] and Riverdale", overlappingMap)
+  );
+  assert.throws(
+    () => assertNoProtectedOriginals(
+      "safe [PRIVATE_VALUE_5], Riverdale, and leaked value_5",
+      overlappingMap
+    ),
+    error => error?.code === "PRIVACYAI_PROVIDER_PAYLOAD_LEAK" && error?.leakCount === 1
+  );
+  assert.throws(
+    () => assertNoProtectedOriginals("Riverdale plus dale outside", overlappingMap),
+    error => error?.code === "PRIVACYAI_PROVIDER_PAYLOAD_LEAK" && error?.leakCount === 1
+  );
+});
+
+test("value-aware provider assertion ignores JSON literals but checks strings and keys", () => {
+  const booleanMap = { "[PRIVATE_VALUE_1]": "false" };
+
+  assert.doesNotThrow(() =>
+    assertNoProtectedOriginalsInValue(
+      { enabled: false, text: "[PRIVATE_VALUE_1]" },
+      booleanMap
+    )
+  );
+  assert.throws(
+    () => assertNoProtectedOriginalsInValue({ text: "false" }, booleanMap),
+    error => error?.code === "PRIVACYAI_PROVIDER_PAYLOAD_LEAK" && error?.leakCount === 1
+  );
+  assert.throws(
+    () => assertNoProtectedOriginalsInValue({ false: "safe" }, booleanMap),
+    error => error?.code === "PRIVACYAI_PROVIDER_PAYLOAD_LEAK" && error?.leakCount === 1
   );
 });
 

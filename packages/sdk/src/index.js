@@ -29,6 +29,7 @@ export { localSanitize } from "./local-sanitizer.js";
 export { PrivacyGuardianError, ProviderError } from "./errors.js";
 export {
   assertNoProtectedOriginals,
+  assertNoProtectedOriginalsInValue,
   findUnresolvedPlaceholders,
   normalizeSessionMap,
   rebaseSessionAdditions,

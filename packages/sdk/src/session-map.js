@@ -134,20 +134,59 @@ export function assertNoProtectedOriginals(serializedPayload, sessionMap = {}) {
     throw new TypeError("Provider-bound payload must be serialized text.");
   }
 
-  let leakCount = 0;
-  const normalizedPayload = serializedPayload.toLocaleLowerCase("en-US");
-  for (const original of Object.values(normalizeSessionMap(sessionMap))) {
-    if (normalizedPayload.includes(original.toLocaleLowerCase("en-US"))) leakCount += 1;
+  const normalizedMap = normalizeSessionMap(sessionMap);
+  const leaks = protectedOriginalsInText(serializedPayload, normalizedMap);
+  if (leaks.size > 0) throw providerPayloadLeakError(leaks.size);
+}
+
+export function assertNoProtectedOriginalsInValue(value, sessionMap = {}) {
+  const normalizedMap = normalizeSessionMap(sessionMap);
+  const leaks = new Set();
+  visitText(value, text => {
+    for (const original of protectedOriginalsInText(text, normalizedMap)) leaks.add(original);
+  });
+  if (leaks.size > 0) throw providerPayloadLeakError(leaks.size);
+}
+
+function protectedOriginalsInText(text, sessionMap) {
+  let searchableText = String(text).toLocaleLowerCase("en-US");
+  for (const placeholder of Object.keys(sessionMap).sort((left, right) => right.length - left.length)) {
+    searchableText = searchableText.replace(
+      new RegExp(escapeRegExp(placeholder), "gi"),
+      match => " ".repeat(match.length)
+    );
   }
 
-  if (leakCount > 0) {
-    const error = new Error(
-      `PrivacyAI blocked provider-bound context because ${leakCount} protected value(s) remained.`
-    );
-    error.code = "PRIVACYAI_PROVIDER_PAYLOAD_LEAK";
-    error.leakCount = leakCount;
-    throw error;
+  const leaks = new Set();
+  for (const original of Object.values(sessionMap)) {
+    if (searchableText.includes(original.toLocaleLowerCase("en-US"))) leaks.add(original);
   }
+  return leaks;
+}
+
+function visitText(value, visitor) {
+  if (typeof value === "string") {
+    visitor(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) visitText(entry, visitor);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    visitor(key);
+    visitText(entry, visitor);
+  }
+}
+
+function providerPayloadLeakError(leakCount) {
+  const error = new Error(
+    `PrivacyAI blocked provider-bound context because ${leakCount} protected value(s) remained.`
+  );
+  error.code = "PRIVACYAI_PROVIDER_PAYLOAD_LEAK";
+  error.leakCount = leakCount;
+  return error;
 }
 
 function allocatePrivatePlaceholder(placeholder, occupied) {

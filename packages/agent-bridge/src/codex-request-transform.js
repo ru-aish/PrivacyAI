@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
-  assertNoProtectedOriginals,
+  assertNoProtectedOriginalsInValue,
   rebaseSessionAdditions,
   restoreValue,
   sanitizeKnownValue,
@@ -198,7 +198,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     .sort((left, right) => right.parentPath.length - left.parentPath.length)
     .forEach(entry => renameKeyAtPath(transformed, entry.parentPath, entry.oldKey, entry.value));
 
-  assertNoProtectedOriginals(JSON.stringify(transformed), completeMap);
+  assertNoProtectedOriginalsInValue(resolved, completeMap);
 
   return {
     body: transformed,
