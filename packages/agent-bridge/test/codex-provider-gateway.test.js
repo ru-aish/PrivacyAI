@@ -162,7 +162,7 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
   );
 
   const media = sampleRequest();
-  media.input = [{ type: "message", role: "user", content: [{ type: "input_image", image_url: "data:x" }] }];
+  media.input = [{ type: "message", role: "user", content: [{ type: "output_image", image_url: "data:x" }] }];
   await assert.rejects(
     sanitizeCodexRequestBody(media, { sanitizer: deterministicSanitizer }),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA"
@@ -845,6 +845,74 @@ test("localhost gateway sanitizes outbound requests and restores fragmented SSE 
   assert.equal(observed[0].headers["accept-encoding"], "identity");
   assert.equal(JSON.stringify(observed[0].body).includes(PRIVATE_EMAIL), false);
   assert.equal(JSON.stringify(observed[0].body).includes(PRIVATE_KEY), false);
+});
+
+test("localhost gateway forwards only SDK-sanitized image and synchronized prompt mappings", async t => {
+  const observed = [];
+  const sourceImage = "data:image/png;base64,AAAA";
+  const safeImage = "data:image/png;base64,BBBB";
+  const upstream = await startServer(async (request, response) => {
+    observed.push(await readRequestJson(request));
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.completed", response: { id: "image-response", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+
+  let imageCalls = 0;
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    imageSanitizer: {
+      async sanitize(value) {
+        imageCalls += 1;
+        assert.equal(value, sourceImage);
+        return {
+          imageUrl: safeImage,
+          changed: true,
+          sessionMapAdditions: { "[EMAIL_1]": PRIVATE_EMAIL }
+        };
+      }
+    },
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-image-gateway-")),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const body = sampleRequest();
+  body.instructions = "Inspect the supplied form.";
+  body.tools = [];
+  body.prompt_cache_key = "image-gateway-cache";
+  body.client_metadata = { thread_id: "image-gateway-thread" };
+  body.input = [{
+    type: "message",
+    role: "user",
+    content: [
+      { type: "input_image", image_url: sourceImage, detail: "high" },
+      { type: "input_text", text: `Inspect the form owned by ${PRIVATE_EMAIL}.` }
+    ]
+  }];
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer test-token-never-log",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  assert.equal(response.status, 200);
+  await response.text();
+
+  assert.equal(imageCalls, 1);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].input[0].content[0].image_url, safeImage);
+  assert.equal(observed[0].input[0].content[0].detail, "high");
+  assert.equal(observed[0].input[0].content[1].text, "Inspect the form owned by [EMAIL_1].");
+  assert.equal(JSON.stringify(observed[0]).includes(sourceImage), false);
+  assert.equal(JSON.stringify(observed[0]).includes(PRIVATE_EMAIL), false);
 });
 
 test("gateway safely probes the real headerless SSE response shape", async t => {

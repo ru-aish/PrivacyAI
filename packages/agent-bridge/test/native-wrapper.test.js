@@ -220,7 +220,8 @@ test("argument guards preserve normal Codex workflows while blocking provider by
 
   assert.throws(() => validateNativeArguments("codex", ["--remote", "unix:///tmp/server"]), /not protected by the local provider gateway/);
   assert.throws(() => validateNativeArguments("codex", ["--search"]), /not protected/);
-  assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"]), /not protected/);
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--image", "private.png"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["-i", "private.png"]));
   assert.throws(() => validateNativeArguments("codex", ["--profile", "unsafe"]), /not protected/);
   assert.throws(() => validateNativeArguments("codex", ["-c", "model_provider=\"other\""]), /model-provider/);
   assert.throws(() => validateNativeArguments("codex", ["--config", "openai_base_url=\"https://example.test\""]), /model-provider/);
