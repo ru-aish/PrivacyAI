@@ -235,6 +235,15 @@ test("Codex request controls reject private or unsupported protocol values", asy
   }
 });
 
+test("Codex rejects invalid provider identifiers before forwarding", async () => {
+  const body = sampleRequest();
+  body.tools[0].name = "invalid.tool.name";
+  await assert.rejects(
+    sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
+    error => error?.code === "PRIVACYAI_CODEX_INVALID_TOOL_IDENTIFIER"
+  );
+});
+
 test("Codex tool and history shapes reject unknown keys while preserving local custom tools", async () => {
   const unknownToolKey = sampleRequest();
   unknownToolKey.tools[0][PRIVATE_EMAIL] = PRIVATE_KEY;
@@ -322,6 +331,163 @@ test("additional-tools accepts Codex roles while sanitizing definitions", async 
     sanitizeCodexRequestBody(invalid, { sanitizer: deterministicSanitizer }),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_INPUT"
   );
+});
+
+test("protected tool-search names use reversible provider-safe aliases", async () => {
+  const privateToolName = "browser_toggle_visibility";
+  const body = sampleRequest();
+  body.instructions = `Use ${privateToolName} when needed.`;
+  body.tools = [];
+  body.input = [{
+    type: "tool_search_output",
+    call_id: "tool-search-alias",
+    status: "completed",
+    execution: "client",
+    tools: [{
+      type: "namespace",
+      name: "stealth-browser",
+      description: `Browser tools including ${privateToolName}`,
+      tools: [{
+        type: "function",
+        name: privateToolName,
+        description: `Call ${privateToolName}`,
+        strict: false,
+        parameters: { type: "object", properties: {} }
+      }]
+    }]
+  }];
+
+  const sanitizer = async text => {
+    const found = text.includes(privateToolName);
+    return {
+      sanitizedPrompt: found ? text.replaceAll(privateToolName, "[PRIVATE_VALUE_5]") : text,
+      sessionMap: found ? { "[PRIVATE_VALUE_5]": privateToolName } : {}
+    };
+  };
+  const result = await sanitizeCodexRequestBody(body, { sanitizer });
+  const providerName = result.body.input[0].tools[0].tools[0].name;
+
+  assert.equal(providerName, "PRIVATE_VALUE_5");
+  assert.match(providerName, /^[A-Za-z0-9_-]+$/);
+  assert.equal(result.body.instructions.includes("[PRIVATE_VALUE_5]"), true);
+  assert.equal(result.body.input[0].tools[0].tools[0].description.includes("[PRIVATE_VALUE_5]"), true);
+  assert.equal(result.sessionMapAdditions["[PRIVATE_VALUE_5]"], privateToolName);
+  assert.equal(result.sessionMapAdditions[providerName], privateToolName);
+
+  const call = {
+    type: "function_call",
+    call_id: "tool-search-alias-call",
+    name: providerName,
+    arguments: "{}"
+  };
+  restoreResponseItem(call, result.sessionMapAdditions);
+  assert.equal(call.name, privateToolName);
+});
+
+test("provider identifier aliases survive repeated gateway turns", async t => {
+  const privateToolName = "browser_toggle_visibility";
+  const root = await mkdtemp(join(tmpdir(), "privacyai-identifier-alias-"));
+  const seenNames = [];
+  const upstream = await startServer(async (request, response) => {
+    const body = await readRequestJson(request);
+    seenNames.push(body.input[0].tools[0].tools[0].name);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.completed", response: { id: "identifier-alias", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+
+  const gateway = await startCodexProviderGateway({
+    baseDir: root,
+    verificationDbPath: join(root, "context.sqlite3"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true,
+    sanitizer: async text => {
+      const found = text.includes(privateToolName);
+      return {
+        sanitizedPrompt: found ? text.replaceAll(privateToolName, "[PRIVATE_VALUE_5]") : text,
+        sessionMap: found ? { "[PRIVATE_VALUE_5]": privateToolName } : {}
+      };
+    }
+  });
+  t.after(() => gateway.close());
+
+  const body = sampleRequest();
+  body.instructions = `Use ${privateToolName}.`;
+  body.tools = [];
+  body.input = [{
+    type: "tool_search_output",
+    call_id: "tool-search-repeat",
+    status: "completed",
+    execution: "client",
+    tools: [{
+      type: "namespace",
+      name: "stealth-browser",
+      description: "Browser tools",
+      tools: [{
+        type: "function",
+        name: privateToolName,
+        description: `Call ${privateToolName}`,
+        strict: false,
+        parameters: { type: "object", properties: {} }
+      }]
+    }]
+  }];
+  body.client_metadata = { thread_id: "identifier-alias-thread" };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(`${gateway.baseURL}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+  }
+
+  assert.deepEqual(seenNames, ["PRIVATE_VALUE_5", "PRIVATE_VALUE_5"]);
+});
+
+test("provider-safe tool aliases avoid collisions with real tool names", async () => {
+  const privateToolName = "browser_toggle_visibility";
+  const body = sampleRequest();
+  body.instructions = "safe";
+  body.tools = [{
+    type: "function",
+    name: "PRIVATE_VALUE_5",
+    description: "existing tool",
+    strict: false,
+    parameters: { type: "object", properties: {} }
+  }, {
+    type: "function",
+    name: privateToolName,
+    description: "protected tool",
+    strict: false,
+    parameters: { type: "object", properties: {} }
+  }];
+  body.input = [];
+
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: async text => {
+      const found = text.includes(privateToolName);
+      return {
+        sanitizedPrompt: found ? text.replaceAll(privateToolName, "[PRIVATE_VALUE_5]") : text,
+        sessionMap: found ? { "[PRIVATE_VALUE_5]": privateToolName } : {}
+      };
+    }
+  });
+  const alias = result.body.tools[1].name;
+
+  assert.notEqual(alias, "PRIVATE_VALUE_5");
+  assert.match(alias, /^privacyai_[a-f0-9]{24}(?:_\d+)?$/);
+  assert.match(alias, /^[A-Za-z0-9_-]+$/);
+  assert.equal(result.sessionMapAdditions[alias], privateToolName);
+
+  const call = { type: "function_call", call_id: "collision-call", name: alias, arguments: "{}" };
+  restoreResponseItem(call, result.sessionMapAdditions);
+  assert.equal(call.name, privateToolName);
 });
 
 test("tool JSON Schema private keys are sanitized consistently and restored in function arguments", async () => {
@@ -1416,6 +1582,25 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
     body: JSON.stringify(conflictedBody)
   });
   assert.equal(conflicted.status, 502);
+  assert.equal(upstreamRequests, 1);
+
+  maps.set("codex-provider:alias-heavy-child", {
+    sessionMap: Object.fromEntries(
+      Array.from({ length: 8 }, (_, index) => [`PRIVATE_ALIAS_${index + 1}`, PRIVATE_EMAIL])
+    )
+  });
+  const aliasHeavyBody = structuredClone(childBody);
+  aliasHeavyBody.client_metadata.thread_id = "alias-heavy-child";
+  aliasHeavyBody.client_metadata["x-codex-turn-metadata"] = JSON.stringify({
+    thread_id: "alias-heavy-child",
+    parent_thread_id: "parent"
+  });
+  const aliasHeavy = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(aliasHeavyBody)
+  });
+  assert.equal(aliasHeavy.status, 502);
   assert.equal(upstreamRequests, 1);
 });
 

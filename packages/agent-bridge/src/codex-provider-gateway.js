@@ -20,6 +20,7 @@ import { SessionVault } from "./session-vault.js";
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const MAX_ALIASES_PER_ORIGINAL = 8;
 const CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex";
 const API_UPSTREAM = "https://api.openai.com/v1";
 const HOP_BY_HOP_HEADERS = new Set([
@@ -851,23 +852,35 @@ function commitCacheWrites(cache, writes = [], maxEntries = 2048, verificationSt
 
 function mergeInheritedSessionMap(current, inherited) {
   const merged = { ...current };
-  const originals = new Map(Object.entries(merged).map(([placeholder, original]) => [original, placeholder]));
+  const aliasesPerOriginal = new Map();
+  for (const original of Object.values(merged)) {
+    aliasesPerOriginal.set(original, (aliasesPerOriginal.get(original) || 0) + 1);
+  }
+
   for (const [placeholder, original] of Object.entries(inherited || {})) {
-    if (Object.hasOwn(merged, placeholder) && merged[placeholder] !== original) {
+    if (Object.hasOwn(merged, placeholder)) {
+      if (merged[placeholder] !== original) {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_SESSION_MAP_COLLISION",
+          "PrivacyAI blocked ambiguous placeholder inheritance between Codex threads."
+        );
+      }
+      continue;
+    }
+
+    const aliasCount = aliasesPerOriginal.get(original) || 0;
+    if (aliasCount >= MAX_ALIASES_PER_ORIGINAL) {
       throw gatewayError(
         "PRIVACYAI_CODEX_SESSION_MAP_COLLISION",
-        "PrivacyAI blocked ambiguous placeholder inheritance between Codex threads."
+        "PrivacyAI blocked excessive aliases for one inherited private value."
       );
     }
-    const existingPlaceholder = originals.get(original);
-    if (existingPlaceholder && existingPlaceholder !== placeholder) {
-      throw gatewayError(
-        "PRIVACYAI_CODEX_SESSION_MAP_COLLISION",
-        "PrivacyAI blocked ambiguous private-value inheritance between Codex threads."
-      );
-    }
+
+    // One original may intentionally have both a text placeholder and a
+    // provider-identifier-safe alias. Restoration is unambiguous because both
+    // aliases resolve to the same local value.
     merged[placeholder] = original;
-    originals.set(original, placeholder);
+    aliasesPerOriginal.set(original, aliasCount + 1);
   }
   return merged;
 }

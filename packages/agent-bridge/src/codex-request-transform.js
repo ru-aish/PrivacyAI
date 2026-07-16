@@ -66,6 +66,9 @@ const RESERVED_METADATA_FIELDS = new Set([
   "x-codex-turn-state"
 ]);
 
+const PROVIDER_IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]+$/;
+const PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH = 64;
+
 export async function sanitizeCodexRequestBody(body, options = {}) {
   throwIfAborted(options.signal);
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -100,6 +103,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   const uncached = [];
   const cacheWrites = [];
   const itemRecords = [];
+  const initialSessionMap = { ...(options.sessionMap || {}) };
   const completeMap = { ...(options.sessionMap || {}) };
   const sessionMapAdditions = {};
 
@@ -181,8 +185,17 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     }
   }
 
+  const providerIdentifierMappings = buildProviderIdentifierMappings(
+    slots,
+    completeMap,
+    sessionMapAdditions,
+    initialSessionMap
+  );
+
   slots.forEach((entry, index) => {
-    resolved[index] = sanitizeKnownValue(entry.value, completeMap);
+    resolved[index] = entry.providerIdentifier
+      ? sanitizeProviderIdentifier(entry.value, providerIdentifierMappings)
+      : sanitizeKnownValue(entry.value, completeMap);
   });
 
   const keyRenames = [];
@@ -670,8 +683,8 @@ function collectResponseItem(item, slots, path) {
         new Set(["type", "id", "name", "namespace", "arguments", "call_id", "internal_chat_message_metadata_passthrough"]),
         "function_call"
       );
-      collectRequiredString(item, "name", slots, path);
-      collectOptionalString(item, "namespace", slots, path);
+      collectRequiredProviderIdentifier(item, "name", slots, path);
+      collectOptionalProviderIdentifier(item, "namespace", slots, path);
       requireProtocolIdentity(item.call_id, "function call id");
       collectJsonStringField(item, "arguments", slots, path);
       return;
@@ -683,8 +696,8 @@ function collectResponseItem(item, slots, path) {
       );
       validateStatus(item.status, "custom tool status", false);
       requireProtocolIdentity(item.call_id, "custom tool call id");
-      collectRequiredString(item, "name", slots, path);
-      collectOptionalString(item, "namespace", slots, path);
+      collectRequiredProviderIdentifier(item, "name", slots, path);
+      collectOptionalProviderIdentifier(item, "namespace", slots, path);
       collectRequiredString(item, "input", slots, path);
       return;
     case "tool_search_call":
@@ -715,7 +728,7 @@ function collectResponseItem(item, slots, path) {
         "custom_tool_call_output"
       );
       requireProtocolIdentity(item.call_id, "custom output call id");
-      collectOptionalString(item, "name", slots, path);
+      collectOptionalProviderIdentifier(item, "name", slots, path);
       collectOutputPayload(item.output, slots, [...path, "output"]);
       return;
     case "tool_search_output":
@@ -968,7 +981,7 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         new Set(["type", "name", "description", "strict", "defer_loading", "parameters"]),
         "function tool"
       );
-      collectRequiredString(tool, "name", slots, path);
+      collectRequiredProviderIdentifier(tool, "name", slots, path);
       collectRequiredString(tool, "description", slots, path);
       if (typeof tool.strict !== "boolean") {
         throw gatewayError(
@@ -992,7 +1005,7 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         );
       }
       assertOnlyKeys(tool, new Set(["type", "name", "description", "tools"]), "tool namespace");
-      collectRequiredString(tool, "name", slots, path);
+      collectRequiredProviderIdentifier(tool, "name", slots, path);
       collectRequiredString(tool, "description", slots, path);
       if (!Array.isArray(tool.tools)) {
         throw gatewayError(
@@ -1039,7 +1052,7 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         );
       }
       assertOnlyKeys(tool, new Set(["type", "name", "description", "format"]), "custom tool");
-      collectRequiredString(tool, "name", slots, path);
+      collectRequiredProviderIdentifier(tool, "name", slots, path);
       collectRequiredString(tool, "description", slots, path);
       assertPlainObject(tool.format, "custom tool format");
       assertOnlyKeys(tool.format, new Set(["type", "syntax", "definition"]), "custom tool format");
@@ -1324,6 +1337,43 @@ function collectOptionalString(object, key, slots, path) {
   slots.push({ path: [...path, key], value: object[key] });
 }
 
+function collectRequiredProviderIdentifier(object, key, slots, path) {
+  if (typeof object?.[key] !== "string") {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      `PrivacyAI blocked Codex data without a string ${key}.`
+    );
+  }
+  assertProviderIdentifier(object[key], key);
+  slots.push({ path: [...path, key], value: object[key], providerIdentifier: true });
+}
+
+function collectOptionalProviderIdentifier(object, key, slots, path) {
+  if (object?.[key] == null) return;
+  if (typeof object[key] !== "string") {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      `PrivacyAI blocked Codex data with a non-string ${key}.`
+    );
+  }
+  assertProviderIdentifier(object[key], key);
+  slots.push({ path: [...path, key], value: object[key], providerIdentifier: true });
+}
+
+function assertProviderIdentifier(value, label) {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 256 ||
+    !PROVIDER_IDENTIFIER_PATTERN.test(value)
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_TOOL_IDENTIFIER",
+      `PrivacyAI blocked an invalid Codex provider identifier in ${label}.`
+    );
+  }
+}
+
 function validateStatus(value, label, required) {
   if (value == null && !required) return;
   if (!new Set(["completed", "in_progress", "incomplete"]).has(value)) {
@@ -1542,6 +1592,177 @@ function artifactTypeForSlot(entry) {
 function slotIdentity(entry) {
   const path = entry.path || [...(entry.parentPath || []), entry.oldKey || "key"];
   return path.map(value => String(value).replaceAll("/", "~1")).join("/");
+}
+
+function buildProviderIdentifierMappings(slots, completeMap, additions, initialSessionMap) {
+  const identifiers = slots
+    .filter(entry => entry.providerIdentifier === true)
+    .map(entry => entry.value);
+  if (identifiers.length === 0) return [];
+
+  const relevantByOriginal = new Map();
+  for (const [placeholder, original] of Object.entries(completeMap)) {
+    if (typeof original !== "string" || original.length === 0) continue;
+    if (!identifiers.some(identifier => includesIgnoreCase(identifier, original))) continue;
+    const key = original.toLocaleLowerCase("en-US");
+    const group = relevantByOriginal.get(key) || { original, placeholders: [] };
+    group.placeholders.push(placeholder);
+    relevantByOriginal.set(key, group);
+  }
+
+  const reservedIdentifiers = new Set(
+    identifiers.map(identifier => identifier.toLocaleLowerCase("en-US"))
+  );
+  const assignedAliases = new Map();
+  const mappings = [];
+
+  for (const group of relevantByOriginal.values()) {
+    let alias = group.placeholders.find(placeholder =>
+      providerIdentifierAliasAvailable(
+        placeholder,
+        group.original,
+        reservedIdentifiers,
+        completeMap,
+        assignedAliases
+      )
+    );
+    if (!alias) {
+      alias = allocateProviderIdentifierAlias(
+        group.placeholders,
+        group.original,
+        reservedIdentifiers,
+        completeMap,
+        assignedAliases
+      );
+    }
+
+    assignedAliases.set(alias.toLocaleLowerCase("en-US"), group.original);
+    if (!Object.hasOwn(completeMap, alias)) completeMap[alias] = group.original;
+    if (!Object.hasOwn(initialSessionMap, alias)) additions[alias] = group.original;
+    mappings.push({ original: group.original, alias });
+  }
+
+  return mappings.sort((left, right) => right.original.length - left.original.length);
+}
+
+function sanitizeProviderIdentifier(value, mappings) {
+  const matches = [];
+  for (const { original, alias } of mappings) {
+    const pattern = new RegExp(escapeRegExp(original), "gi");
+    for (const match of value.matchAll(pattern)) {
+      matches.push({ start: match.index, end: match.index + match[0].length, alias });
+    }
+  }
+  matches.sort((left, right) => left.start - right.start || right.end - left.end);
+
+  let cursor = 0;
+  let sanitized = "";
+  for (const match of matches) {
+    if (match.start < cursor) continue;
+    sanitized += value.slice(cursor, match.start) + match.alias;
+    cursor = match.end;
+  }
+  sanitized += value.slice(cursor);
+  assertProviderIdentifier(sanitized, "provider-bound tool name");
+  return sanitized;
+}
+
+function allocateProviderIdentifierAlias(
+  placeholders,
+  original,
+  reservedIdentifiers,
+  completeMap,
+  assignedAliases
+) {
+  for (const placeholder of placeholders) {
+    const normalized = placeholder
+      .replace(/^\[+|\]+$/g, "")
+      .replace(/[^A-Za-z0-9_-]+/g, "_")
+      .replace(/^_+|_+$/g, "");
+    if (
+      normalized &&
+      normalized.length <= PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH &&
+      providerIdentifierAliasAvailable(
+        normalized,
+        original,
+        reservedIdentifiers,
+        completeMap,
+        assignedAliases
+      )
+    ) {
+      return normalized;
+    }
+  }
+
+  const seed = `${placeholders.join("\0")}\0${original}`;
+  const digest = createHash("sha256").update(seed).digest("hex").slice(0, 24);
+  const base = `privacyai_${digest}`;
+  if (providerIdentifierAliasAvailable(
+    base,
+    original,
+    reservedIdentifiers,
+    completeMap,
+    assignedAliases
+  )) {
+    return base;
+  }
+
+  for (let index = 2; index < 10000; index += 1) {
+    const candidate = `${base}_${index}`;
+    if (providerIdentifierAliasAvailable(
+      candidate,
+      original,
+      reservedIdentifiers,
+      completeMap,
+      assignedAliases
+    )) {
+      return candidate;
+    }
+  }
+
+  throw gatewayError(
+    "PRIVACYAI_CODEX_IDENTIFIER_ALIAS_EXHAUSTED",
+    "PrivacyAI could not allocate a safe provider identifier alias."
+  );
+}
+
+function providerIdentifierAliasAvailable(
+  candidate,
+  original,
+  reservedIdentifiers,
+  completeMap,
+  assignedAliases
+) {
+  if (
+    typeof candidate !== "string" ||
+    candidate.length === 0 ||
+    candidate.length > PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH ||
+    !PROVIDER_IDENTIFIER_PATTERN.test(candidate)
+  ) {
+    return false;
+  }
+  const normalizedCandidate = candidate.toLocaleLowerCase("en-US");
+  if (normalizedCandidate === original.toLocaleLowerCase("en-US")) return false;
+  if (reservedIdentifiers.has(normalizedCandidate)) return false;
+
+  for (const [placeholder, mappedOriginal] of Object.entries(completeMap)) {
+    if (
+      placeholder.toLocaleLowerCase("en-US") === normalizedCandidate &&
+      mappedOriginal !== original
+    ) {
+      return false;
+    }
+  }
+  const assignedOriginal = assignedAliases.get(normalizedCandidate);
+  return assignedOriginal == null || assignedOriginal === original;
+}
+
+function includesIgnoreCase(value, fragment) {
+  return value.toLocaleLowerCase("en-US").includes(fragment.toLocaleLowerCase("en-US"));
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function mergeDetectedMappings(completeMap, aggregateAdditions, additions) {
