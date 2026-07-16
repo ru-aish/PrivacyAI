@@ -207,6 +207,7 @@ export async function captureCodexPromptInput(options) {
       detached: process.platform !== "win32"
     });
     let stdout = "";
+    let stderr = "";
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let settled = false;
@@ -244,8 +245,10 @@ export async function captureCodexPromptInput(options) {
         ));
       }
     });
+    child.stderr.setEncoding("utf8");
     child.stderr.on("data", chunk => {
-      stderrBytes += chunk.length;
+      stderr += chunk;
+      stderrBytes += Buffer.byteLength(chunk, "utf8");
       if (stderrBytes > maxBytes) {
         finish(startupAuditError(
           "PRIVACYAI_CODEX_CAPTURE_TOO_LARGE",
@@ -253,13 +256,10 @@ export async function captureCodexPromptInput(options) {
         ));
       }
     });
-    child.on("close", code => {
+    child.on("close", (code, signal) => {
       if (settled) return;
       if (code !== 0) {
-        finish(startupAuditError(
-          "PRIVACYAI_CODEX_CAPTURE_FAILED",
-          "PrivacyAI could not verify Codex's model-visible startup input."
-        ));
+        finish(codexCaptureFailure(stderr, code, signal));
         return;
       }
       try {
@@ -617,6 +617,25 @@ function staticContextTooLargeError() {
   return startupAuditError(
     "PRIVACYAI_STARTUP_CONTEXT_TOO_LARGE",
     "PrivacyAI blocked startup because implicit project context was too large to classify atomically."
+  );
+}
+
+function codexCaptureFailure(stderr, code, signal) {
+  if (/Missing optional dependency @openai\/codex-[A-Za-z0-9_-]+/i.test(stderr)) {
+    return startupAuditError(
+      "PRIVACYAI_CODEX_EXECUTABLE_BROKEN",
+      "Codex has an incomplete platform package. Reinstall it with: npm install -g @openai/codex@latest"
+    );
+  }
+  if (signal === "SIGSEGV" || code === 139) {
+    return startupAuditError(
+      "PRIVACYAI_CODEX_EXECUTABLE_BROKEN",
+      "Codex crashed while PrivacyAI was rendering startup input. Reinstall Codex before trying again."
+    );
+  }
+  return startupAuditError(
+    "PRIVACYAI_CODEX_CAPTURE_FAILED",
+    "PrivacyAI could not verify Codex's model-visible startup input."
   );
 }
 

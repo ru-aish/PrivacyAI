@@ -44,6 +44,7 @@ test("Codex gateway preflights static and rendered context before spawning", asy
     env: { CODEX_HOME: codexHome },
     launchLockDir: join(root, "locks"),
     healthOptions: { skip: true },
+    verifyNativeExecutable: async () => ({ version: "test" }),
     sanitizer: passThroughSanitizer,
     verificationStore,
     auditCodexStaticStartupContext: async options => {
@@ -100,6 +101,7 @@ test("Codex gateway closes, releases its lock, and cleans up when spawning fails
       cwd: root,
       launchLockDir: join(root, "locks"),
       healthOptions: { skip: true },
+    verifyNativeExecutable: async () => ({ version: "test" }),
       sanitizer: passThroughSanitizer,
       verificationStore: new MemoryContextVerificationStore(),
       auditCodexStaticStartupContext: async () => ({ fileCount: 0, serializedBytes: 0 }),
@@ -126,6 +128,37 @@ test("Codex gateway closes, releases its lock, and cleans up when spawning fails
   await lock.release();
 });
 
+test("a broken Codex executable fails before static scanning or gateway startup", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-broken-codex-"));
+  const configPath = await writeTestConfig(root);
+  let staticScanStarted = false;
+  let gatewayStarted = false;
+
+  await assert.rejects(
+    launchNativeTui("codex", [], {
+      configPath,
+      binary: "/fake/broken-codex",
+      cwd: root,
+      healthOptions: { skip: true },
+      verifyNativeExecutable: async () => {
+        const error = new Error("Codex crashed during startup check.");
+        error.code = "PRIVACYAI_CODEX_EXECUTABLE_BROKEN";
+        throw error;
+      },
+      auditCodexStaticStartupContext: async () => {
+        staticScanStarted = true;
+      },
+      startCodexProviderGateway: async () => {
+        gatewayStarted = true;
+      }
+    }),
+    error => error?.code === "PRIVACYAI_CODEX_EXECUTABLE_BROKEN"
+  );
+
+  assert.equal(staticScanStarted, false);
+  assert.equal(gatewayStarted, false);
+});
+
 test("a failed static preflight prevents gateway and Codex startup", async () => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-launch-preflight-failure-"));
   const configPath = await writeTestConfig(root);
@@ -140,6 +173,7 @@ test("a failed static preflight prevents gateway and Codex startup", async () =>
       cwd: root,
       launchLockDir: join(root, "locks"),
       healthOptions: { skip: true },
+    verifyNativeExecutable: async () => ({ version: "test" }),
       sanitizer: passThroughSanitizer,
       verificationStore: new MemoryContextVerificationStore(),
       auditCodexStaticStartupContext: async () => {
@@ -181,6 +215,7 @@ test("explicit strict mode preflights before trust discovery and never starts a 
     python: "/fake/python3",
     launchLockDir: join(root, "locks"),
     healthOptions: { skip: true },
+    verifyNativeExecutable: async () => ({ version: "test" }),
     sanitizer: passThroughSanitizer,
     verificationStore: {
       close() { verificationStoreClosed += 1; }

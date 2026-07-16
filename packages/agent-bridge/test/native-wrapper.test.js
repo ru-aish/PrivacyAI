@@ -671,6 +671,36 @@ test("Codex startup capture drains UTF-8 output before parsing", async () => {
   assert.deepEqual(result, [{ text: "€" }]);
 });
 
+test("Codex startup capture reports an incomplete platform package", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-capture-broken-"));
+  const fakeCodex = join(root, "fake-codex.js");
+  await writeFile(
+    fakeCodex,
+    [
+      "#!/usr/bin/env node",
+      "process.stderr.write('Error: Missing optional dependency @openai/codex-linux-x64.');",
+      "process.exit(1);"
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  await chmod(fakeCodex, 0o755);
+
+  await assert.rejects(
+    captureCodexPromptInput({
+      codexPath: fakeCodex,
+      args: [],
+      cwd: root,
+      env: process.env,
+      prompt: "ignored",
+      timeoutMs: 5000
+    }),
+    error =>
+      error?.code === "PRIVACYAI_CODEX_EXECUTABLE_BROKEN" &&
+      error.message.includes("npm install -g @openai/codex@latest") &&
+      !error.message.includes(root)
+  );
+});
+
 test("Codex startup capture timeout follows configured MCP startup budgets", async () => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-codex-capture-timeout-"));
   const codexHome = join(root, "codex-home");

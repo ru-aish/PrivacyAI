@@ -12,7 +12,7 @@ import {
   openContextVerificationStore,
   verificationFingerprint
 } from "./context-verification-store.js";
-import { resolveExecutable } from "./executable.js";
+import { resolveExecutable, verifyNativeExecutable } from "./executable.js";
 import { acquireNativeLaunchLock } from "./launch-lock.js";
 import { checkPrivacyModel } from "./model-health.js";
 import {
@@ -67,10 +67,24 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   }
 
   const binary = options.binary || (await resolveExecutable(flavor));
-  if (!binary) throw new Error(`${flavor} is not installed or is not available on PATH.`);
+  if (!binary) {
+    if (flavor === "codex") {
+      throw new Error(
+        "Codex is not installed, is not available on PATH, or its platform package is incomplete. " +
+        "Reinstall it with: npm install -g @openai/codex@latest"
+      );
+    }
+    throw new Error(`${flavor} is not installed or is not available on PATH.`);
+  }
 
   let cwd = options.cwd || process.cwd();
   if (flavor === "codex") cwd = resolve(codexEffectiveCwd(forwardedArgs, cwd));
+  await (options.verifyNativeExecutable || verifyNativeExecutable)(flavor, binary, {
+    cwd,
+    env: { ...process.env, ...options.env },
+    timeoutMs: options.executableProbeTimeoutMs,
+    maxBytes: options.executableProbeMaxBytes
+  });
 
   const runtimeDir = await mkdtemp(join(tmpdir(), "privacyai-agent-"));
   await chmod(runtimeDir, 0o700);
