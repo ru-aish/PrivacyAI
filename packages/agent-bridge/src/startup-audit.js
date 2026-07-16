@@ -1,13 +1,35 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, readdir } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { homedir } from "node:os";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
+
+import { localSanitize } from "@privacy-ai/sdk";
 
 import { assertNoProtectedOriginals, sanitizeModelVisibleValue } from "./context-gateway.js";
+import { buildCodexRequestVerificationSeed } from "./codex-request-transform.js";
 
 const DEFAULT_CAPTURE_LIMIT = 2 * 1024 * 1024;
 const DEFAULT_STATIC_LIMIT = 200000;
 const DEFAULT_STATIC_FILES = 100;
+const DEFAULT_CODEX_STATIC_LIMIT = 2 * 1024 * 1024;
+const DEFAULT_CODEX_STATIC_FILES = 1000;
+const CODEX_STATIC_TEXT_EXTENSIONS = new Set([
+  ".json", ".md", ".rules", ".toml", ".txt", ".yaml", ".yml"
+]);
+const CODEX_HOME_FILES = Object.freeze(["AGENTS.md", "AGENTS.override.md", "config.toml"]);
+const CODEX_HOME_DIRECTORIES = Object.freeze(["rules", "skills"]);
+const CODEX_PROJECT_FILES = Object.freeze([
+  "AGENTS.md",
+  "AGENTS.override.md",
+  join(".codex", "AGENTS.md"),
+  join(".codex", "AGENTS.override.md"),
+  join(".codex", "config.toml")
+]);
+const CODEX_PROJECT_DIRECTORIES = Object.freeze([
+  join(".codex", "rules"),
+  join(".codex", "skills")
+]);
 const CLAUDE_INSTRUCTION_FILES = Object.freeze([
   "CLAUDE.md",
   "CLAUDE.local.md",
@@ -22,6 +44,48 @@ const CLAUDE_CONTEXT_DIRECTORIES = Object.freeze([
   join(".claude", "agents"),
   join(".claude", "plugins")
 ]);
+
+/**
+ * Classify every locally discoverable Codex startup source before any Codex
+ * subprocess is allowed to start. The rendered prompt audit still runs later,
+ * but only after this static boundary has succeeded.
+ */
+export async function auditCodexStaticStartupContext(options = {}) {
+  if (!options.cwd) throw new TypeError("Codex static startup audit requires cwd.");
+  const staticSanitizer = options.staticSanitizer || (async text => {
+    const result = await localSanitize(text);
+    return {
+      sanitizedPrompt: result.sanitizedText,
+      sessionMap: result.sessionMap
+    };
+  });
+  if (typeof staticSanitizer !== "function") {
+    throw new TypeError("Codex static startup audit requires a deterministic local sanitizer.");
+  }
+
+  const roots = await codexStaticRoots(options.cwd, options);
+  const files = await collectCodexStaticStartupContext(options.cwd, { ...options, roots });
+  if (files.length === 0) {
+    return { fileCount: 0, serializedBytes: 0, sessionMapAdditions: {} };
+  }
+
+  const payload = files.map(file => ({
+    path: displayStaticPath(file.path, roots),
+    content: file.content
+  }));
+  const serialized = JSON.stringify(payload);
+  const staticResult = await staticSanitizer(serialized);
+  const sessionMapAdditions = staticResult?.sessionMap || {};
+  if (options.blockHighRisk !== false) {
+    throwIfHighRiskStartupValues(sessionMapAdditions, "Codex");
+  }
+
+  return {
+    fileCount: files.length,
+    serializedBytes: Buffer.byteLength(serialized),
+    sessionMapAdditions
+  };
+}
 
 export async function auditCodexStartupContext(options = {}) {
   if (!options.codexPath) throw new TypeError("Codex startup audit requires codexPath.");
@@ -66,12 +130,28 @@ export async function auditCodexStartupContext(options = {}) {
       [canaryPlaceholder]: "[PRIVACYAI_STARTUP_CANARY]"
     }
   });
-  throwIfHighRiskStartupValues(inspection.sessionMapAdditions, "Codex");
+  if (options.blockHighRisk !== false) {
+    throwIfHighRiskStartupValues(inspection.sessionMapAdditions, "Codex");
+  }
+
+  let primedItemCount = 0;
+  if (options.primeRequestCache === true && options.verificationStore) {
+    primedItemCount = primeCodexRenderedVerification(payload, {
+      verificationStore: options.verificationStore,
+      policyFingerprint: options.policyFingerprint,
+      // The canary proves the renderer kept private originals local, but it is
+      // deliberately excluded from persistent request-cache records. Only
+      // genuine discoveries from the rendered startup context are retained.
+      sessionMap: inspection.sessionMapAdditions
+    });
+  }
 
   return {
     itemCount: Array.isArray(payload) ? payload.length : 1,
     serializedBytes: Buffer.byteLength(serialized),
-    canaryPlaceholder
+    canaryPlaceholder,
+    primedItemCount,
+    sessionMapAdditions: inspection.sessionMapAdditions
   };
 }
 
@@ -117,7 +197,8 @@ export function captureCodexPromptInput(options) {
     const child = spawn(options.codexPath, args, {
       cwd: options.cwd,
       env: options.env,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32"
     });
     let stdout = "";
     let stdoutBytes = 0;
@@ -128,7 +209,7 @@ export function captureCodexPromptInput(options) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      child.kill("SIGTERM");
+      terminateProbeTree(child);
       if (error) rejectPromise(error);
       else resolvePromise(value);
     };
@@ -245,6 +326,108 @@ function isHighRiskPlaceholder(placeholder) {
   return /(?:PASSWORD|SECRET|TOKEN|CREDENTIAL|API_KEY|AWS_ACCESS_KEY|EMAIL|PHONE|SSN|CREDIT_CARD|MEDICAL|MRN|PRIVATE_IDENTIFIER|PRIVATE_VALUE|PERSON)/.test(normalized);
 }
 
+function primeCodexRenderedVerification(payload, options) {
+  const policyFingerprint = String(options.policyFingerprint || "startup-context-v1");
+  const sessionKey = "codex-provider:privacyai-startup-preflight";
+  const body = {
+    model: "privacyai-startup-preflight",
+    input: Array.isArray(payload) ? payload : [payload],
+    stream: false,
+    store: false,
+    client_metadata: { thread_id: "privacyai-startup-preflight" }
+  };
+  const seed = buildCodexRequestVerificationSeed(body, options.sessionMap, {
+    policyFingerprint
+  });
+
+  options.verificationStore.saveThread(sessionKey, {
+    parentSessionKeys: [],
+    sessionMap: options.sessionMap,
+    policyFingerprint
+  });
+  for (const [, record] of seed.cacheWrites) {
+    options.verificationStore.putVerification(record);
+  }
+  for (const item of seed.itemRecords) {
+    options.verificationStore.recordThreadItem({ ...item, sessionKey });
+  }
+  options.verificationStore.prune();
+  return seed.itemRecords.length;
+}
+
+async function collectCodexStaticStartupContext(cwd, options) {
+  const roots = options.roots || await codexStaticRoots(cwd, options);
+  const files = [];
+  const seen = new Set();
+  const maxFiles = Number(options.maxFiles || DEFAULT_CODEX_STATIC_FILES);
+  const maxBytes = Number(options.maxBytes || DEFAULT_CODEX_STATIC_LIMIT);
+  let totalBytes = 0;
+
+  for (const name of CODEX_HOME_FILES) await addFile(join(roots.codexHome, name));
+  for (const name of CODEX_HOME_DIRECTORIES) await addDirectory(join(roots.codexHome, name));
+  for (const directory of ancestors(resolve(cwd), roots.projectRoot)) {
+    for (const name of CODEX_PROJECT_FILES) await addFile(join(directory, name));
+    for (const name of CODEX_PROJECT_DIRECTORIES) await addDirectory(join(directory, name));
+  }
+  return files;
+
+  async function addDirectory(path) {
+    let entries;
+    try {
+      entries = await readdir(path, { withFileTypes: true });
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
+      throw error;
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const child = join(path, entry.name);
+      if (entry.isDirectory()) await addDirectory(child);
+      else if (entry.isFile() && isCodexStaticTextFile(child)) await addFile(child);
+      if (files.length > maxFiles) throw staticContextTooLargeError();
+    }
+  }
+
+  async function addFile(path) {
+    if (seen.has(path)) return;
+    let metadata;
+    try {
+      metadata = await lstat(path);
+    } catch (error) {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
+      throw error;
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink()) return;
+    if (metadata.size > maxBytes || totalBytes + metadata.size > maxBytes) {
+      throw staticContextTooLargeError();
+    }
+    const content = await readFile(path, "utf8");
+    totalBytes += Buffer.byteLength(content);
+    seen.add(path);
+    files.push({ path, content });
+  }
+}
+
+async function codexStaticRoots(cwd, options = {}) {
+  const env = options.env || process.env;
+  return {
+    projectRoot: options.projectRoot || await findProjectRoot(cwd),
+    codexHome: resolve(options.codexHome || env.CODEX_HOME || join(homedir(), ".codex"))
+  };
+}
+
+function displayStaticPath(path, roots) {
+  const fromCodexHome = relative(roots.codexHome, path);
+  if (fromCodexHome && !fromCodexHome.startsWith("..")) {
+    return join("<CODEX_HOME>", fromCodexHome);
+  }
+  return relative(roots.projectRoot, path) || basename(path);
+}
+
+function isCodexStaticTextFile(path) {
+  return CODEX_STATIC_TEXT_EXTENSIONS.has(extname(path).toLowerCase());
+}
+
 async function collectClaudeStartupContext(cwd, options) {
   const root = await findProjectRoot(cwd);
   const files = [];
@@ -326,6 +509,16 @@ function ancestors(start, root) {
     current = parent;
   }
   return result;
+}
+
+function terminateProbeTree(child) {
+  if (!child?.pid) return;
+  try {
+    if (process.platform === "win32") child.kill("SIGTERM");
+    else process.kill(-child.pid, "SIGTERM");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
 }
 
 function staticContextTooLargeError() {

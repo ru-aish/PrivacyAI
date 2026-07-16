@@ -92,17 +92,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     transformed.prompt_cache_key = hashCacheKey(transformed.prompt_cache_key);
   }
 
-  const slots = [];
-  if (typeof transformed.instructions === "string") {
-    slots.push(slot(transformed, ["instructions"]));
-  }
-  collectResponseItems(transformed.input, slots, ["input"]);
-  if (transformed.tools != null) collectToolDefinitions(transformed.tools, slots, ["tools"]);
-  if (transformed.text?.format?.schema != null) {
-    const schemaPath = ["text", "format", "schema"];
-    collectAllStringValues(transformed.text.format.schema, slots, schemaPath);
-    collectJsonSchemaKeys(transformed.text.format.schema, slots, schemaPath);
-  }
+  const slots = collectModelVisibleSlots(transformed);
 
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
   const resolved = new Array(slots.length);
@@ -185,6 +175,65 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     policyFingerprint,
     sessionKey: codexSessionKey(body, options.fallbackSessionId, options.headers)
   };
+}
+
+/**
+ * Build persistent verification records for a request whose complete
+ * model-visible content has already been classified as one atomic startup
+ * manifest. This warms the exact per-item gateway cache before the user's real
+ * Codex process starts, without asking the local model to classify the same
+ * rendered prompt a second time.
+ */
+export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options = {}) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw gatewayError("PRIVACYAI_CODEX_INVALID_REQUEST", "Codex provider request body must be a JSON object.");
+  }
+  if (!Array.isArray(body.input)) {
+    throw gatewayError("PRIVACYAI_CODEX_INVALID_REQUEST", "Codex provider request input must be an array.");
+  }
+
+  const transformed = deepClone(body);
+  const slots = collectModelVisibleSlots(transformed);
+  const completeMap = { ...(sessionMap || {}) };
+  const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
+  const cacheWrites = [];
+  const itemRecords = [];
+
+  for (const entry of slots) {
+    const artifactType = artifactTypeForSlot(entry);
+    const contentHash = modelVisibleContentHash(entry.value);
+    const cacheKey = modelVisibleCacheKey(entry.value, artifactType, policyFingerprint);
+    cacheWrites.push([cacheKey, {
+      cacheKey,
+      contentHash,
+      artifactType,
+      policyFingerprint,
+      sessionMapAdditions: relevantSessionMap(entry.value, completeMap)
+    }]);
+    itemRecords.push({
+      slotKey: slotIdentity(entry),
+      cacheKey,
+      contentHash,
+      artifactType
+    });
+  }
+
+  return { cacheWrites, itemRecords, policyFingerprint };
+}
+
+function collectModelVisibleSlots(transformed) {
+  const slots = [];
+  if (typeof transformed.instructions === "string") {
+    slots.push(slot(transformed, ["instructions"]));
+  }
+  collectResponseItems(transformed.input, slots, ["input"]);
+  if (transformed.tools != null) collectToolDefinitions(transformed.tools, slots, ["tools"]);
+  if (transformed.text?.format?.schema != null) {
+    const schemaPath = ["text", "format", "schema"];
+    collectAllStringValues(transformed.text.format.schema, slots, schemaPath);
+    collectJsonSchemaKeys(transformed.text.format.schema, slots, schemaPath);
+  }
+  return slots;
 }
 
 export function codexSessionContext(body, fallbackSessionId, headers = {}) {

@@ -115,7 +115,12 @@ export async function discoverCodexHookTrust(options) {
 
 function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(codexPath, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(codexPath, args, {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32"
+    });
     let stdoutBuffer = "";
     let stderr = "";
     let settled = false;
@@ -124,7 +129,7 @@ function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs }) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      child.kill("SIGTERM");
+      terminateProbeTree(child);
       if (error) reject(error);
       else resolve(value);
     };
@@ -177,6 +182,16 @@ function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs }) {
     child.stdin.write(`${JSON.stringify({ method: "initialized", params: {} })}\n`);
     child.stdin.write(`${JSON.stringify({ method: "hooks/list", id: 2, params: { cwds: [cwd] } })}\n`);
   });
+}
+
+function terminateProbeTree(child) {
+  if (!child?.pid) return;
+  try {
+    if (process.platform === "win32") child.kill("SIGTERM");
+    else process.kill(-child.pid, "SIGTERM");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
 }
 
 export function codexEffectiveCwd(args, fallback = process.cwd()) {

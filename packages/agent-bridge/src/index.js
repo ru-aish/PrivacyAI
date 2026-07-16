@@ -20,6 +20,7 @@ export {
   verificationFingerprint
 } from "./context-verification-store.js";
 export {
+  buildCodexRequestVerificationSeed,
   codexSessionContext,
   codexSessionKey,
   restoreCodexCompactResponse,
@@ -37,10 +38,12 @@ export {
   savePrivacyConfig
 } from "./config-store.js";
 export { resolveExecutable } from "./executable.js";
+export { acquireNativeLaunchLock } from "./launch-lock.js";
 export { buildCodexIsolationArgs, prepareAgentRuntimeIsolation } from "./runtime-isolation.js";
 export {
   auditClaudeStartupContext,
   auditCodexStartupContext,
+  auditCodexStaticStartupContext,
   captureCodexPromptInput
 } from "./startup-audit.js";
 export { processHookEvent } from "./hook-adapter.js";

@@ -15,6 +15,7 @@ import {
   assertNoProtectedOriginals,
   auditClaudeStartupContext,
   auditCodexStartupContext,
+  auditCodexStaticStartupContext,
   buildCodexHookDeclarationArgs,
   captureCodexPromptInput,
   buildCodexIsolationArgs,
@@ -28,6 +29,7 @@ import {
   processPromptSubmission,
   rebaseSessionAdditions,
   runOnboarding,
+  sanitizeCodexRequestBody,
   validateNativeArguments,
   validateNativeEnvironment,
   writeClaudeSettings
@@ -872,4 +874,171 @@ function runProcess(command, args) {
     child.on("error", reject);
     child.on("exit", code => resolve({ code, stdout, stderr }));
   });
+}
+
+
+test("Codex static preflight classifies home and project startup files without spawning Codex", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-static-preflight-"));
+  const codexHome = join(root, "codex-home");
+  await mkdir(join(root, ".git"), { recursive: true });
+  await mkdir(join(codexHome, "skills", "private-skill"), { recursive: true });
+  await writeFile(join(root, "AGENTS.md"), "Safe project instructions.\n");
+  await writeFile(
+    join(codexHome, "skills", "private-skill", "SKILL.md"),
+    "Contact startup.private@example.test before launch.\n"
+  );
+
+  let calls = 0;
+  const sanitizer = async text => {
+    calls += 1;
+    return {
+      sanitizedPrompt: text.replaceAll("startup.private@example.test", "[EMAIL_1]"),
+      sessionMap: text.includes("startup.private@example.test")
+        ? { "[EMAIL_1]": "startup.private@example.test" }
+        : {}
+    };
+  };
+  const store = new MemoryContextVerificationStore();
+  const result = await auditCodexStaticStartupContext({
+    cwd: root,
+    env: { CODEX_HOME: codexHome },
+    sanitizer,
+    verificationStore: store,
+    policyFingerprint: "static-preflight-v1",
+    blockHighRisk: false,
+    maxContextChars: 4096,
+    maxBytes: 100000
+  });
+
+  assert.equal(result.fileCount, 2);
+  assert.equal(calls > 0, true);
+  assert.equal(result.sessionMapAdditions["[EMAIL_1]"], "startup.private@example.test");
+
+  await assert.rejects(
+    auditCodexStaticStartupContext({
+      cwd: root,
+      env: { CODEX_HOME: codexHome },
+      sanitizer: async () => {
+        throw new Error("cached static manifest should be reused");
+      },
+      verificationStore: store,
+      policyFingerprint: "static-preflight-v1",
+      blockHighRisk: true,
+      maxContextChars: 4096,
+      maxBytes: 100000
+    }),
+    error => error?.code === "PRIVACYAI_UNSAFE_STARTUP_CONTEXT"
+  );
+});
+
+test("rendered Codex startup audit primes exact gateway item verification", async () => {
+  const store = new MemoryContextVerificationStore();
+  const policyFingerprint = "rendered-preflight-v1";
+  let capturedPayload;
+  const result = await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    capture: async ({ prompt }) => {
+      capturedPayload = [
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "stable rendered startup instructions" }]
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: prompt }]
+        }
+      ];
+      return capturedPayload;
+    },
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+    verificationStore: store,
+    policyFingerprint,
+    blockHighRisk: false,
+    primeRequestCache: true
+  });
+
+  assert.equal(result.primedItemCount, 2);
+  assert.deepEqual(
+    store.loadThread("codex-provider:privacyai-startup-preflight").sessionMap,
+    {},
+    "the synthetic canary must never be persisted as a real session mapping"
+  );
+
+  const body = {
+    model: "test-model",
+    input: capturedPayload,
+    stream: false,
+    store: false,
+    client_metadata: { thread_id: "real-thread" }
+  };
+  let sanitizerCalls = 0;
+  const transformed = await sanitizeCodexRequestBody(body, {
+    sanitizer: async () => {
+      sanitizerCalls += 1;
+      throw new Error("primed rendered startup items must not be classified again");
+    },
+    sessionMap: {},
+    policyFingerprint,
+    cache: {
+      get(cacheKey, fingerprint) {
+        return store.getVerification(cacheKey, fingerprint);
+      }
+    }
+  });
+
+  assert.equal(sanitizerCalls, 0);
+  assert.deepEqual(transformed.body.input, capturedPayload);
+});
+
+test("Codex prompt renderer terminates its entire probe process group", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-probe-tree-"));
+  const fakeCodex = join(root, "fake-codex-tree.js");
+  const childPidPath = join(root, "child.pid");
+  await writeFile(
+    fakeCodex,
+    [
+      "#!/usr/bin/env node",
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      `const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });`,
+      "child.unref();",
+      `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+      "process.stdout.write(JSON.stringify([{ text: 'rendered' }]));"
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  await chmod(fakeCodex, 0o755);
+
+  assert.deepEqual(
+    await captureCodexPromptInput({
+      codexPath: fakeCodex,
+      args: [],
+      cwd: root,
+      env: process.env,
+      prompt: "ignored",
+      timeoutMs: 5000
+    }),
+    [{ text: "rendered" }]
+  );
+
+  const childPid = Number(await readFile(childPidPath, "utf8"));
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && processExists(childPid)) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(processExists(childPid), false);
+});
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
 }
