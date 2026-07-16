@@ -27,6 +27,7 @@ const PART_FIELDS = new Set([
   "text",
   "functionCall",
   "functionResponse",
+  "thought",
   "thoughtSignature"
 ]);
 
@@ -42,7 +43,7 @@ const FUNCTION_DECLARATION_FIELDS = new Set([
 ]);
 
 export async function sanitizeAgyRequestBody(body, options = {}) {
-  validateAgyRequestBody(body);
+  validateAgyRequestBody(body, { functionNameMode: "native" });
   if (typeof options.sanitizer !== "function") {
     throw new TypeError("AGY request transformation requires a sanitizer function.");
   }
@@ -85,7 +86,7 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
   }
 
   artifactResult.values.forEach((value, index) => setAtPath(transformed, slots[index].path, value));
-  validateAgyRequestBody(transformed);
+  validateAgyRequestBody(transformed, { functionNameMode: "provider" });
 
   return {
     body: transformed,
@@ -107,7 +108,7 @@ export function agySessionKey(body, fallbackSessionId) {
   );
 }
 
-export function validateAgyRequestBody(body) {
+export function validateAgyRequestBody(body, options = {}) {
   assertPlainObject(body, "request envelope");
   assertOnlyKeys(body, OUTER_FIELDS, "request envelope");
   assertOpaqueString(body.project, "project", 512);
@@ -121,11 +122,14 @@ export function validateAgyRequestBody(body) {
   assertOnlyKeys(request, REQUEST_FIELDS, "generation request");
   assertOpaqueString(request.sessionId, "session id", 512);
 
-  validateContents(request.contents, "request.contents");
+  validateContents(request.contents, "request.contents", options);
   if (request.systemInstruction != null) {
-    validateContent(request.systemInstruction, "request.systemInstruction", { systemInstruction: true });
+    validateContent(request.systemInstruction, "request.systemInstruction", {
+      ...options,
+      systemInstruction: true
+    });
   }
-  if (request.tools != null) validateTools(request.tools);
+  if (request.tools != null) validateTools(request.tools, options);
   if (request.toolConfig != null) validateJsonControl(request.toolConfig, "request.toolConfig");
   if (request.labels != null) validateLabels(request.labels);
   if (request.generationConfig != null) validateJsonControl(request.generationConfig, "request.generationConfig");
@@ -281,7 +285,7 @@ export function normalizeAgySessionMap(body, sessionMap = {}) {
   }
 
   for (const [placeholder, original] of toolMappings) {
-    const alias = isAgyFunctionName(placeholder) && !occupied.has(placeholder)
+    const alias = isProviderFunctionName(placeholder) && !occupied.has(placeholder)
       ? placeholder
       : allocateAgyToolAlias(original, occupied);
     output[alias] = original;
@@ -307,13 +311,13 @@ function normalizeAgyArtifactResult(result) {
   const additions = {};
   const value = result.value.map((sanitizedName, index) => {
     const original = result.sourceValues[index];
-    if (sanitizedName === original) return original;
+    if (sanitizedName === original && isProviderFunctionName(original)) return original;
 
     let alias = aliasesByOriginal.get(original);
     if (!alias) {
       const existingAlias = Object.entries(result.existingSessionMap || {})
         .find(([, mappedOriginal]) => mappedOriginal === original)?.[0];
-      alias = isAgyFunctionName(existingAlias) && !sourceNames.has(existingAlias)
+      alias = isProviderFunctionName(existingAlias) && !sourceNames.has(existingAlias)
         ? existingAlias
         : allocateAgyToolAlias(original, occupied);
       aliasesByOriginal.set(original, alias);
@@ -354,8 +358,12 @@ function allocateAgyToolAlias(original, occupied) {
   );
 }
 
-function isAgyFunctionName(value) {
+function isProviderFunctionName(value) {
   return typeof value === "string" && /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/.test(value);
+}
+
+function isNativeFunctionName(value) {
+  return typeof value === "string" && /^[A-Za-z_][A-Za-z0-9_.:/-]{0,255}$/.test(value);
 }
 
 function contentArtifactType(content) {
@@ -365,11 +373,11 @@ function contentArtifactType(content) {
   return content.role === "model" ? "assistant_message" : "message_text";
 }
 
-function validateContents(contents, label) {
+function validateContents(contents, label, options = {}) {
   if (!Array.isArray(contents) || contents.length === 0) {
     throw agyError("PRIVACYAI_AGY_INVALID_REQUEST", `${label} must be a non-empty array.`);
   }
-  contents.forEach((content, index) => validateContent(content, `${label}[${index}]`));
+  contents.forEach((content, index) => validateContent(content, `${label}[${index}]`, options));
 }
 
 function validateContent(content, label, options = {}) {
@@ -398,6 +406,9 @@ function validatePart(part, label, options = {}) {
       `${label} must contain exactly one supported model-visible payload.`
     );
   }
+  if (Object.hasOwn(part, "thought") && typeof part.thought !== "boolean") {
+    throw agyError("PRIVACYAI_AGY_INVALID_PART", `${label}.thought must be a boolean.`);
+  }
   if (part.thoughtSignature != null) {
     assertOpaqueString(part.thoughtSignature, `${label}.thoughtSignature`, 16 * 1024 * 1024);
   }
@@ -413,29 +424,29 @@ function validatePart(part, label, options = {}) {
       "PrivacyAI supports only text parts in AGY system instructions."
     );
   }
-  if (part.functionCall != null) validateFunctionCall(part.functionCall, `${label}.functionCall`);
-  if (part.functionResponse != null) validateFunctionResponse(part.functionResponse, `${label}.functionResponse`);
+  if (part.functionCall != null) validateFunctionCall(part.functionCall, `${label}.functionCall`, options);
+  if (part.functionResponse != null) validateFunctionResponse(part.functionResponse, `${label}.functionResponse`, options);
 }
 
-function validateFunctionCall(value, label) {
+function validateFunctionCall(value, label, options = {}) {
   assertPlainObject(value, label);
   assertOnlyKeys(value, FUNCTION_CALL_FIELDS, label);
   if (value.id != null) assertOpaqueString(value.id, `${label}.id`, 1024);
-  assertAgyFunctionName(value.name, `${label}.name`);
+  assertAgyFunctionName(value.name, `${label}.name`, options);
   assertPlainObject(value.args, `${label}.args`);
 }
 
-function validateFunctionResponse(value, label) {
+function validateFunctionResponse(value, label, options = {}) {
   assertPlainObject(value, label);
   assertOnlyKeys(value, FUNCTION_RESPONSE_FIELDS, label);
   if (value.id != null) assertOpaqueString(value.id, `${label}.id`, 1024);
-  assertAgyFunctionName(value.name, `${label}.name`);
+  assertAgyFunctionName(value.name, `${label}.name`, options);
   if (value.response == null || typeof value.response !== "object") {
     throw agyError("PRIVACYAI_AGY_INVALID_FUNCTION_RESPONSE", `${label}.response must be structured data.`);
   }
 }
 
-function validateTools(tools) {
+function validateTools(tools, options = {}) {
   if (!Array.isArray(tools)) {
     throw agyError("PRIVACYAI_AGY_INVALID_TOOLS", "request.tools must be an array.");
   }
@@ -450,7 +461,7 @@ function validateTools(tools) {
       const declarationLabel = `${label}.functionDeclarations[${declarationIndex}]`;
       assertPlainObject(declaration, declarationLabel);
       assertOnlyKeys(declaration, FUNCTION_DECLARATION_FIELDS, declarationLabel);
-      assertAgyFunctionName(declaration.name, `${declarationLabel}.name`);
+      assertAgyFunctionName(declaration.name, `${declarationLabel}.name`, options);
       if (declaration.description != null && typeof declaration.description !== "string") {
         throw agyError("PRIVACYAI_AGY_INVALID_TOOLS", `${declarationLabel}.description must be a string.`);
       }
@@ -513,8 +524,11 @@ function assertOnlyKeys(value, allowed, label) {
   }
 }
 
-function assertAgyFunctionName(value, label) {
-  if (!isAgyFunctionName(value)) {
+function assertAgyFunctionName(value, label, options = {}) {
+  const isValid = options.functionNameMode === "native"
+    ? isNativeFunctionName(value)
+    : isProviderFunctionName(value);
+  if (!isValid) {
     throw agyError(
       "PRIVACYAI_AGY_INVALID_FUNCTION_NAME",
       `PrivacyAI blocked invalid ${label}.`

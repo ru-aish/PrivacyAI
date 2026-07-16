@@ -80,6 +80,7 @@ test("AGY session-map migration replaces stale bracket tool placeholders", () =>
 test("AGY request transformation leaves protocol identities outside the sanitizer", async () => {
   const body = sampleRequest();
   body.request.contents[1].parts[0].thoughtSignature = "opaque-signature";
+  body.request.contents[1].parts[0].thought = true;
   const observed = [];
   const sanitizer = async text => {
     observed.push(text);
@@ -94,7 +95,50 @@ test("AGY request transformation leaves protocol identities outside the sanitize
   assert.equal(result.body.requestId, "request-123");
   assert.equal(result.body.request.contents[1].parts[0].functionResponse.id, "call-1");
   assert.equal(result.body.request.contents[1].parts[0].thoughtSignature, "opaque-signature");
+  assert.equal(result.body.request.contents[1].parts[0].thought, true);
   assert.equal(result.body.request.contents[0].role, "user");
+});
+
+test("AGY request transformation aliases native MCP names before provider validation", async () => {
+  const nativeName = "stealth-browser/browser_status";
+  const body = sampleRequest();
+  body.request.tools[0].functionDeclarations[0].name = nativeName;
+  body.request.contents[1].parts[0].functionResponse.name = nativeName;
+
+  const result = await sanitizeAgyRequestBody(body, {
+    sanitizer: deterministicSanitizer
+  });
+  const declarationName = result.body.request.tools[0].functionDeclarations[0].name;
+  const responseName = result.body.request.contents[1].parts[0].functionResponse.name;
+
+  assert.equal(declarationName, responseName);
+  assert.match(declarationName, /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/);
+  assert.doesNotMatch(declarationName, /\//);
+  assert.equal(result.sessionMapAdditions[declarationName], nativeName);
+});
+
+test("AGY request transformation rejects malformed native function names", async () => {
+  const body = sampleRequest();
+  body.request.tools[0].functionDeclarations[0].name = "stealth browser/browser_status";
+
+  await assert.rejects(
+    sanitizeAgyRequestBody(body, { sanitizer: deterministicSanitizer }),
+    error => error?.code === "PRIVACYAI_AGY_INVALID_FUNCTION_NAME"
+  );
+});
+
+test("AGY request transformation rejects non-boolean thought metadata", async t => {
+  for (const invalidThought of ["true", null]) {
+    await t.test(String(invalidThought), async () => {
+      const body = sampleRequest();
+      body.request.contents[1].parts[0].thought = invalidThought;
+
+      await assert.rejects(
+        sanitizeAgyRequestBody(body, { sanitizer: deterministicSanitizer }),
+        error => error?.code === "PRIVACYAI_AGY_INVALID_PART"
+      );
+    });
+  }
 });
 
 test("AGY request cache reuses unchanged history and tools after session-map growth", async () => {
@@ -218,6 +262,11 @@ test("AGY upstream headers preserve opaque encodings and normalize transformed m
 
 test("AGY transport proxy sanitizes a real CONNECT request and restores streamed output", async t => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-agy-transport-"));
+  const nativeToolName = "stealth-browser/browser_status";
+  const requestBody = sampleRequest();
+  requestBody.request.tools[0].functionDeclarations[0].name = nativeToolName;
+  requestBody.request.contents[1].parts[0].functionResponse.name = nativeToolName;
+  requestBody.request.contents[1].parts[0].thought = true;
   const observed = [];
   const runtime = await startAgyTransportRuntime({
     sanitizer: deterministicSanitizer,
@@ -232,7 +281,11 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
       assert.match(parsed.request.contents[0].parts[0].text, /\[EMAIL_1\]/);
       const toolAlias = parsed.request.tools[0].functionDeclarations[0].name;
       assert.match(toolAlias, /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/);
-      assert.notEqual(toolAlias, "send_private_email");
+      assert.doesNotMatch(toolAlias, /\//);
+      assert.notEqual(toolAlias, nativeToolName);
+      assert.equal(parsed.request.contents[1].parts[0].functionResponse.name, toolAlias);
+      assert.equal(parsed.request.contents[1].parts[0].thought, true);
+      assert.equal(JSON.stringify(parsed).includes(nativeToolName), false);
 
       const upstream = observed.length === 1
         ? Readable.from([
@@ -258,7 +311,7 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   assert.equal(Object.hasOwn(runtime.env, "HTTP_PROXY"), false);
   assert.match(runtime.env.HTTPS_PROXY, /^http:\/\/privacyai:/);
 
-  const response = await proxyHttpRequest(runtime, sampleRequest());
+  const response = await proxyHttpRequest(runtime, requestBody);
   assert.match(response.statusLine, /^HTTP\/1\.1 200/);
   assert.equal(observed.length, 1);
   const events = parseEvents(response.body);
@@ -270,10 +323,14 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
     .join("");
   assert.equal(text, `result for ${PRIVATE_EMAIL}`);
 
-  const unexpected = await proxyHttpRequest(runtime, sampleRequest());
+  const unexpected = await proxyHttpRequest(runtime, requestBody);
   assert.match(unexpected.statusLine, /^HTTP\/1\.1 502/);
   assert.match(unexpected.body, /PRIVACYAI_AGY_UNSUPPORTED_SUCCESS_RESPONSE/);
   assert.equal(observed.length, 2);
+  assert.equal(
+    observed[0].request.tools[0].functionDeclarations[0].name,
+    observed[1].request.tools[0].functionDeclarations[0].name
+  );
 });
 
 test("AGY opaque forwarding cancels upstream work after downstream disconnect", { timeout: 5000 }, async t => {
