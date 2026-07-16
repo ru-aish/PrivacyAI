@@ -82,6 +82,30 @@ and whole-document patches are rejected rather than guessed. Browser privacy
 mode uses the same verified patch engine for its optional small local rewrites,
 while strict privacy mode continues to return only exact sensitive spans.
 
+## Image privacy engine
+
+Image OCR, region mapping, masking retries, and post-mask verification are available from the optional Node entry point. Importing the main SDK entry does not load Sharp or Tesseract.
+
+```js
+import { createImageSanitizer } from "@privacy-ai/sdk/image";
+
+const imageSanitizer = createImageSanitizer();
+const result = await imageSanitizer.sanitize(imageDataUrl, {
+  sanitizer: strictTextSanitizer,
+  sessionMap: {}
+});
+
+console.log(result.dataUrl);              // provider-safe PNG data URL
+console.log(result.maskStrategy);         // exact, line, or block
+console.log(result.verificationAttempts); // 1 to 3
+
+await imageSanitizer.close();
+```
+
+The engine accepts canonical base64 PNG, JPEG, and WebP data URLs. It runs two local Tesseract passes, classifies the OCR text through the supplied strict sanitizer once, masks exact OCR word regions, and verifies the rendered image with OCR. If verification still sees a protected original, the engine rerenders from the untouched normalized image with a whole-line mask and then a broader opaque block. It fails closed after the final attempt.
+
+The result includes `dataUrl`, `changed`, `sessionMapAdditions`, `detectedLineCount`, `regionCount`, `maskStrategy`, and `verificationAttempts`. Consumers such as the Codex gateway remain responsible for request-shape validation and transport policy.
+
 ## Environment Variables
 
 ```env

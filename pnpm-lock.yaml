@@ -30,6 +30,9 @@ importers:
 
   apps/web-demo:
     dependencies:
+      '@privacy-ai/agent-bridge':
+        specifier: workspace:*
+        version: link:../../packages/agent-bridge
       '@privacy-ai/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
