@@ -9,6 +9,7 @@ import {
 } from "./prompts.js";
 import { PrivacyGuardianError } from "./errors.js";
 import { parseAndApplyTextEdits } from "./text-edits.js";
+import { sanitizeKnownText } from "./session-map.js";
 
 export const SANITIZATION_MODES = Object.freeze({
   STRICT: "strict",
@@ -144,7 +145,11 @@ export class AiSanitizer {
 
     const detections = await this.fallbackDetector.detect(text);
     const fallback = this.sanitizationMode === SANITIZATION_MODES.STRICT
-      ? buildStrictRedactionPlan(text, detections, options).toResult("strict-regex-fallback")
+      ? strictPlanToResult(
+          text,
+          buildStrictRedactionPlan(text, detections, options),
+          "strict-regex-fallback"
+        )
       : redact(text, detections);
     return {
       ...fallback,
@@ -237,7 +242,7 @@ async function enforceStrictSpanResult(originalText, spans, detector, options = 
   }
   const combined = mergeDetections([...detectorDetections, ...modelDetections]);
   const plan = buildStrictRedactionPlan(originalText, combined, options);
-  return { safe_prompt: plan.apply(), session_map: { ...plan.sessionMap } };
+  return strictPlanToSafeResult(originalText, plan);
 }
 
 function parseSanitizerResponse(text, originalText, mode) {
@@ -330,11 +335,7 @@ async function enforceStrictSafeResult(originalText, parsed, detector, options =
   const modelDetections = sessionMapToDetections(originalText, modelMap, detectorDetections);
   const combined = mergeDetections([...detectorDetections, ...modelDetections]);
   const plan = buildStrictRedactionPlan(originalText, combined, options);
-
-  return {
-    safe_prompt: plan.apply(),
-    session_map: { ...plan.sessionMap }
-  };
+  return strictPlanToSafeResult(originalText, plan);
 }
 
 function buildStrictRedactionPlan(originalText, detections, options = {}) {
@@ -347,7 +348,12 @@ function buildStrictRedactionPlan(originalText, detections, options = {}) {
     if (plan.replacements.some(current => rangesOverlap(current, detection))) continue;
 
     const type = normalizeReplacementType(detection.type);
-    const valueKey = `${type}\0${detection.value}`;
+    const originalValue = originalText.slice(detection.start, detection.end);
+    // A session map is a global original -> placeholder contract. Reusing one
+    // placeholder per case-insensitive original guarantees that applying the
+    // returned map reconstructs the exact strict output, even when different
+    // detectors assign different types to separate occurrences.
+    const valueKey = originalValue.toLocaleLowerCase("en-US");
     let dummy = reusableDummies.get(valueKey);
     if (!dummy) {
       typeCounts[type] = (typeCounts[type] || 0) + 1;
@@ -358,7 +364,7 @@ function buildStrictRedactionPlan(originalText, detections, options = {}) {
     plan.addReplacement(
       detection.start,
       detection.end,
-      originalText.slice(detection.start, detection.end),
+      originalValue,
       dummy,
       type,
       detection.source || "strict"
@@ -366,6 +372,45 @@ function buildStrictRedactionPlan(originalText, detections, options = {}) {
   }
 
   return plan;
+}
+
+function strictPlanToSafeResult(originalText, plan) {
+  const sessionMap = canonicalSessionMap(plan.sessionMap);
+  return {
+    safe_prompt: sanitizeKnownText(originalText, sessionMap),
+    session_map: sessionMap
+  };
+}
+
+function strictPlanToResult(originalText, plan, privacySource) {
+  const safe = strictPlanToSafeResult(originalText, plan);
+  return {
+    originalText,
+    sanitizedText: safe.safe_prompt,
+    sessionMap: safe.session_map,
+    detections: plan.replacements.map(replacement => ({
+      type: replacement.type,
+      value: replacement.original,
+      start: replacement.start,
+      end: replacement.end,
+      confidence: 1,
+      source: replacement.reason || privacySource,
+      replacement: replacement.replacement
+    })),
+    privacySource
+  };
+}
+
+function canonicalSessionMap(sessionMap) {
+  const canonical = {};
+  const seenOriginals = new Set();
+  for (const [placeholder, original] of Object.entries(sessionMap || {})) {
+    const key = String(original).toLocaleLowerCase("en-US");
+    if (!original || seenOriginals.has(key)) continue;
+    seenOriginals.add(key);
+    canonical[placeholder] = original;
+  }
+  return canonical;
 }
 
 function shouldRedactStrict(detection, text, options = {}) {

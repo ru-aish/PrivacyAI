@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { AiSanitizer, parseSanitizerSpans } from "../src/ai-sanitizer.js";
 import { createDetectorPipeline } from "../src/detectors/index.js";
 import { redact } from "../src/redactor.js";
+import { sanitizeKnownText } from "../src/session-map.js";
 
 test("falls back to regex redaction when local AI JSON is invalid", async () => {
   const provider = {
@@ -96,4 +97,38 @@ test("strict exact spans redact password aliases even inside protected code text
   assert.equal(result.privacySource, "ai-span-sanitizer");
   assert.equal(result.sanitizedText.includes(secret), false);
   assert.equal(Object.values(result.sessionMap).includes(secret), true);
+});
+
+
+test("strict sanitizer output is exactly reconstructible from one canonical placeholder per original", async () => {
+  const original = [
+    "Alex Morgan owns shared.private@example.test.",
+    "Contact Alex Morgan again at shared.private@example.test."
+  ].join("\n");
+  const provider = {
+    async chat() {
+      return {
+        text: JSON.stringify({
+          spans: [
+            { value: "Alex Morgan", type: "PERSON" },
+            { value: "Alex Morgan", type: "PRIVATE_IDENTIFIER" },
+            { value: "shared.private@example.test", type: "EMAIL" },
+            { value: "shared.private@example.test", type: "PRIVATE_IDENTIFIER" }
+          ]
+        }),
+        raw: {},
+        provider: {}
+      };
+    }
+  };
+  const sanitizer = new AiSanitizer({ provider, model: "mock" });
+  const result = await sanitizer.sanitize(original);
+
+  assert.equal(result.sanitizedText, sanitizeKnownText(original, result.sessionMap));
+  assert.equal(
+    new Set(Object.values(result.sessionMap).map(value => value.toLowerCase())).size,
+    Object.keys(result.sessionMap).length
+  );
+  assert.equal(result.sanitizedText.includes("Alex Morgan"), false);
+  assert.equal(result.sanitizedText.includes("shared.private@example.test"), false);
 });
