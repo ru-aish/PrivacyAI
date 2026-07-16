@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -12,6 +12,7 @@ import {
   installAgyGlobalHook,
   launchAgy,
   parseAgyArguments,
+  parseAgyPrivacyMode,
   processAgyHookEvent
 } from "../src/index.js";
 
@@ -33,6 +34,29 @@ test("AGY argument parsing extracts separate and inline one-shot prompts", () =>
     promptIndex: 0,
     promptStyle: "inline:-p"
   });
+});
+
+test("AGY privacy mode defaults to transport and keeps native arguments unchanged", () => {
+  assert.deepEqual(parseAgyPrivacyMode(["--model", "Gemini 3.5 Flash (Low)"]), {
+    mode: "transport",
+    args: ["--model", "Gemini 3.5 Flash (Low)"]
+  });
+  assert.deepEqual(parseAgyPrivacyMode(["--privacy-transport", "--continue"]), {
+    mode: "transport",
+    args: ["--continue"]
+  });
+  assert.deepEqual(parseAgyPrivacyMode(["--privacy-gateway", "--continue"]), {
+    mode: "transport",
+    args: ["--continue"]
+  });
+  assert.deepEqual(parseAgyPrivacyMode(["--privacy-strict", "--print", "hello"]), {
+    mode: "strict",
+    args: ["--print", "hello"]
+  });
+  assert.throws(
+    () => parseAgyPrivacyMode(["--privacy-strict", "--privacy-gateway"]),
+    /Choose only one AGY privacy mode/
+  );
 });
 
 test("AGY argument parsing fails closed for interactive, resumed, and permission-bypass modes", () => {
@@ -223,7 +247,62 @@ test("AGY cleanup preserves a replacement lock owner", async () => {
   assert.equal(await readFile(lockPath, "utf8"), replacement);
 });
 
-test("AGY launch sanitizes the prompt before spawning and keeps the guard installed", async () => {
+test("AGY transport launch preserves native arguments and cleans up the runtime", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-transport-launch-"));
+  const stderr = new PassThrough();
+  let warning = "";
+  stderr.on("data", chunk => { warning += chunk; });
+  let runtimeClosed = false;
+  let observed;
+  const sanitizer = async () => {
+    throw new Error("transport launcher must not pre-sanitize the CLI prompt");
+  };
+
+  const args = ["--conversation", "conversation-1", "--dangerously-skip-permissions"];
+  const code = await launchAgy(args, {
+    cwd: root,
+    homeDir: root,
+    binary: "/test/agy",
+    stderr,
+    env: { USER_DEFINED: "kept" },
+    loadPrivacyConfig: async () => ({
+      configured: true,
+      path: join(root, "privacy-config.json"),
+      config: { provider: "ollama", model: "test", baseURL: "http://127.0.0.1:11434" }
+    }),
+    checkPrivacyModel: async () => ({ ok: true }),
+    sanitizer,
+    startAgyTransportRuntime: async options => {
+      assert.equal(options.sanitizer, sanitizer);
+      assert.equal(options.maxContextChars, 5120);
+      return {
+        env: {
+          HTTPS_PROXY: "http://privacyai:test@127.0.0.1:1234",
+          SSL_CERT_FILE: "/tmp/privacyai-ca.pem"
+        },
+        async close() { runtimeClosed = true; }
+      };
+    },
+    runChild: async (binary, childArgs, options) => {
+      observed = { binary, childArgs, options };
+      assert.equal(runtimeClosed, false);
+      return 17;
+    }
+  });
+
+  assert.equal(code, 17);
+  assert.equal(runtimeClosed, true);
+  assert.equal(observed.binary, "/test/agy");
+  assert.deepEqual(observed.childArgs, args);
+  assert.equal(observed.options.cwd, root);
+  assert.equal(observed.options.env.USER_DEFINED, "kept");
+  assert.equal(observed.options.env.GEMINI_DIR, join(root, ".gemini"));
+  assert.equal(observed.options.env.PRIVACYAI_AGY_PRIVACY_MODE, "transport");
+  assert.equal(observed.options.env.HTTPS_PROXY, "http://privacyai:test@127.0.0.1:1234");
+  assert.match(warning, /transport active/);
+});
+
+test("AGY strict launch sanitizes the prompt before spawning and keeps the guard installed", async () => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-agy-launch-"));
   const hooksPath = join(root, "hooks.json");
   const stderr = new PassThrough();
@@ -231,7 +310,7 @@ test("AGY launch sanitizes the prompt before spawning and keeps the guard instal
   stderr.on("data", chunk => { warning += chunk; });
   let observed;
 
-  const code = await launchAgy(["--model", "auto", "--print", "Email real@example.test"], {
+  const code = await launchAgy(["--privacy-strict", "--model", "auto", "--print", "Email real@example.test"], {
     cwd: root,
     binary: "/test/agy",
     sessionToken: "launch-token",
@@ -262,9 +341,45 @@ test("AGY launch sanitizes the prompt before spawning and keeps the guard instal
   assert.deepEqual(observed.args, ["--model", "auto", "--print", "Email [EMAIL_1]"]);
   assert.equal(observed.options.cwd, root);
   assert.equal(observed.options.env.PRIVACYAI_AGENT_FLAVOR, "agy");
+  assert.equal(observed.options.env.PRIVACYAI_AGY_PRIVACY_MODE, "strict");
   assert.equal(observed.options.env.PRIVACYAI_AGY_SESSION_TOKEN, "launch-token");
-  assert.match(warning, /all tools are isolated/);
+  assert.match(warning, /strict mode/);
   await assert.rejects(readFile(hooksPath), error => error?.code === "ENOENT");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("AGY strict launch removes its runtime directory when hook cleanup fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-cleanup-failure-"));
+  const cleanupError = new Error("hook cleanup failed");
+  let runtimeDir;
+
+  await assert.rejects(
+    launchAgy(["--privacy-strict", "--print", "Email real@example.test"], {
+      cwd: root,
+      binary: "/test/agy",
+      stderr: new PassThrough(),
+      loadPrivacyConfig: async () => ({
+        configured: true,
+        path: join(root, "privacy-config.json"),
+        config: { provider: "ollama", model: "test", baseURL: "http://127.0.0.1:11434" }
+      }),
+      checkPrivacyModel: async () => ({ ok: true }),
+      sanitizer: async () => ({
+        sanitizedPrompt: "Email [EMAIL_1]",
+        sessionMap: { "[EMAIL_1]": "real@example.test" }
+      }),
+      installAgyGlobalHook: async options => {
+        runtimeDir = options.runtimeDir;
+        return async () => { throw cleanupError; };
+      },
+      runChild: async () => 0
+    }),
+    error => error === cleanupError
+  );
+
+  assert.ok(runtimeDir);
+  await assert.rejects(access(runtimeDir), error => error?.code === "ENOENT");
+  await rm(root, { recursive: true, force: true });
 });
 
 test("AGY hook executable ignores unrelated AGY processes before reading the session map", async () => {

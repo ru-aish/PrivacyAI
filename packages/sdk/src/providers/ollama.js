@@ -42,7 +42,10 @@ export class OllamaProvider {
 
       const bodyText = await response.text();
       if (!response.ok) {
-        throw new ProviderError(`Ollama returned HTTP ${response.status}`, bodyText);
+        throw new ProviderError(`Ollama returned HTTP ${response.status}`, {
+          status: response.status,
+          bodyText
+        });
       }
 
       let body;

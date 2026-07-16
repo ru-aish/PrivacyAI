@@ -141,7 +141,11 @@ disabled until they have an equivalent protected boundary. The prior prompt-only
 Codex mode remains available with `privacyai codex --privacy-strict`.
 
 Claude Code continues to use startup isolation plus supported native prompt/tool
-hooks. AGY remains fresh one-shot and tool-denied because its installed hook API
-cannot safely replace arguments and results. All hosts fail closed when a
-provider-facing boundary cannot be verified. See
-`docs/native-agent-tui-wrapper.md` for architecture, tests, and limitations.
+hooks. AGY now defaults to a process-scoped selective HTTPS boundary around the
+stock CLI: normal files, terminal, browser, MCPs, account, model, and native tool
+execution remain available while supported model-bound text/JSON is sanitized
+locally and streamed output is restored before AGY consumes it. The earlier
+fresh one-shot, tool-denied behavior remains available as
+`privacyai agy --privacy-strict`. All hosts fail closed when a provider-facing
+boundary cannot be verified. See `docs/native-agent-tui-wrapper.md` for
+architecture, tests, and limitations.

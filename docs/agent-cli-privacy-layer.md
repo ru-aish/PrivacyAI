@@ -1,4 +1,4 @@
-> **Implementation update — July 2026:** This document records the earlier hook investigation. The current Codex implementation now uses stock Codex through a bidirectional loopback Responses gateway, preserving normal local tools, user MCPs, history, skills, plugins, and account usage while sanitizing the final supported provider request and restoring streamed output locally. Prompt-only Codex isolation remains available only as `--privacy-strict`. Claude and AGY retain their host-specific P0 boundaries. See `docs/native-agent-tui-wrapper.md` for the current contract.
+> **Implementation update — July 2026:** This document records the earlier hook investigation. Codex now uses stock Codex through a bidirectional loopback Responses gateway. AGY now uses stock Antigravity through a process-scoped selective HTTPS boundary that preserves native tools and sanitizes the supported model request/response path. Prompt-only strict modes remain explicit fail-closed fallbacks. Claude retains its host-specific P0 boundary. See `docs/native-agent-tui-wrapper.md` for the current contract.
 
 # Agent CLI privacy layer: verified design for Claude Code and Codex
 

@@ -1,7 +1,7 @@
 # PrivacyAI native Claude Code, Codex, and Antigravity wrapper
 
-Status: Codex provider-gateway implementation stacked on the P0 context-boundary
-branch, July 2026.
+Status: Codex provider gateway and AGY selective transport implementation stacked
+on the P0 context-boundary branch, July 2026.
 
 ## Product invariant
 
@@ -20,7 +20,7 @@ capabilities.
 | Claude Code | Prompt/startup isolation and supported lifecycle hooks | Supported native file, terminal, and tool paths. |
 | Codex | Stock Codex through a bidirectional localhost Responses gateway | Normal account, model, `CODEX_HOME`, history, skills, plugins, user MCPs, filesystem, shell, patch, Git, resume, fork, exec, and review. |
 | Codex strict fallback | Credential-only temporary home and hook denial | Prompt-only reasoning; tool-capable paths denied. |
-| AGY | Fresh one-shot prompt isolation | Prompt only; all scoped tools denied. |
+| AGY | Stock AGY through a process-scoped selective HTTPS boundary | Normal account, model, files, terminal, browser, MCPs, and native tools for supported text/JSON turns. |
 
 ## Codex architecture
 
@@ -203,15 +203,36 @@ private failure/batch path without a shape-preserving replacement stops.
 
 ## Antigravity
 
-AGY supports only:
+`privacyai agy` now keeps the installed stock AGY runtime and its normal account,
+model, files, terminal, browser, MCPs, and native tool execution. PrivacyAI adds
+an ephemeral process-only CA plus an authenticated loopback CONNECT proxy.
+Connections to unrelated hosts are tunneled unchanged. On the current AGY model
+host, non-generation routes remain opaque while the supported
+`streamGenerateContent` route is validated and transformed.
 
-```bash
-privacyai agy --print "fresh one-shot prompt"
+```text
+stock AGY
+  -> native local tool work
+  -> complete supported model request
+  -> local bounded classification + persistent verification cache
+  -> complete sanitized model request
+  -> streamed response restoration
+  -> stock AGY executes the native tool call
 ```
 
-The prompt is sanitized before launch. A scoped wildcard hook denies every tool
-call because the installed AGY protocol cannot rewrite tool arguments or outputs.
-Interactive, resume, reuse, and permission-bypass modes are rejected.
+Private function names receive deterministic aliases that remain valid under the
+provider's function-name grammar and are restored locally before execution. The
+local classifier window does not reduce the remote model context: oversized
+artifacts are inspected in bounded chunks and rebuilt before forwarding.
+
+Current fail-closed limitations are unsupported image/media parts, model route or
+schema drift, compressed model-generation payloads, Windows, and environments
+that already require an HTTP/SOCKS proxy. The previous prompt-only boundary is
+retained explicitly as:
+
+```bash
+privacyai agy --privacy-strict --print "fresh one-shot prompt"
+```
 
 ## Reusable SDK v0.0.2 layer
 

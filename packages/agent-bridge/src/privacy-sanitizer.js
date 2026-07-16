@@ -1,12 +1,19 @@
 import { createHash } from "node:crypto";
 
-import { PrivateAI, STRICT_PRIVACY_SANITIZER_PROMPT } from "@privacy-ai/sdk";
+import {
+  PrivateAI,
+  ProviderError,
+  STRICT_PRIVACY_SANITIZER_PROMPT
+} from "@privacy-ai/sdk";
+
+const DEFAULT_TRANSIENT_RETRY_COUNT = 1;
+const DEFAULT_TRANSIENT_RETRY_DELAY_MS = 100;
 
 export function createPrivacySanitizer(config, options = {}) {
   if (options.sanitizer) return options.sanitizer;
 
   const privacyMaxTokens = derivePrivacyMaxTokens(config, options);
-  const client = new PrivateAI({
+  const client = options.privacyClient || new PrivateAI({
     provider: config.provider,
     model: config.model,
     privacyModel: config.model,
@@ -19,9 +26,24 @@ export function createPrivacySanitizer(config, options = {}) {
     sanitizationMode: "strict",
     loadEnv: false
   });
+  const retryCount = transientRetryCount(options.transientProviderRetryCount);
+  const retryDelayMs = transientRetryDelay(options.transientProviderRetryDelayMs);
 
-  const sanitizer = async (prompt, sanitizeOptions = {}) =>
-    normalizeSanitizerResult(await client.sanitize(prompt, sanitizeOptions));
+  const sanitizer = async (prompt, sanitizeOptions = {}) => {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return normalizeSanitizerResult(await client.sanitize(prompt, sanitizeOptions));
+      } catch (error) {
+        if (
+          attempt >= retryCount ||
+          !isTransientProviderError(error, sanitizeOptions.signal)
+        ) {
+          throw error;
+        }
+        await waitForRetry(retryDelayMs, sanitizeOptions.signal);
+      }
+    }
+  };
   const identity = {
     boundary: "strict-agent",
     policyVersion: 3,
@@ -36,6 +58,21 @@ export function createPrivacySanitizer(config, options = {}) {
     fingerprint: createHash("sha256").update(JSON.stringify(identity)).digest("hex")
   };
   return sanitizer;
+}
+
+export function isTransientProviderError(error, signal) {
+  if (!(error instanceof ProviderError) || signal?.aborted) return false;
+  if (String(error.code || "").startsWith("PRIVACYAI_")) return false;
+
+  const status = Number(error.details?.status);
+  if (Number.isInteger(status)) return status >= 500 && status <= 599;
+
+  const message = String(error.message || "");
+  if (/(?:request failed|request timed out|returned non-JSON response)/i.test(message)) {
+    return true;
+  }
+  return /response did not include (?:choices\[0\]\.message\.content|message\.content)/i.test(message) &&
+    error.details?.error != null;
 }
 
 export function derivePrivacyMaxTokens(config = {}, options = {}) {
@@ -74,6 +111,52 @@ function normalizedContextTokens(value) {
     throw new TypeError("PrivacyAI local-model context must be at least 2048 tokens.");
   }
   return numCtx;
+}
+
+function transientRetryCount(value) {
+  if (value == null) return DEFAULT_TRANSIENT_RETRY_COUNT;
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count < 0 || count > 3) {
+    throw new TypeError("transientProviderRetryCount must be an integer between 0 and 3.");
+  }
+  return count;
+}
+
+function transientRetryDelay(value) {
+  if (value == null) return DEFAULT_TRANSIENT_RETRY_DELAY_MS;
+  const delay = Number(value);
+  if (!Number.isSafeInteger(delay) || delay < 0 || delay > 10000) {
+    throw new TypeError("transientProviderRetryDelayMs must be an integer between 0 and 10000.");
+  }
+  return delay;
+}
+
+function waitForRetry(delayMs, signal) {
+  if (signal?.aborted) return Promise.reject(abortReason(signal));
+  if (delayMs === 0) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = callback => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(abortReason(signal)));
+    const timer = setTimeout(() => finish(resolve), delayMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+function abortReason(signal) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  const error = new Error("PrivacyAI stopped local sanitization because the client disconnected.");
+  error.name = "AbortError";
+  error.code = "PRIVACYAI_REQUEST_ABORTED";
+  return error;
 }
 
 export function normalizeSanitizerResult(result) {
