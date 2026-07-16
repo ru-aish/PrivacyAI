@@ -4,6 +4,8 @@ import { AiSanitizer, parseSanitizerSpans } from "../src/ai-sanitizer.js";
 import { createDetectorPipeline } from "../src/detectors/index.js";
 import { redact } from "../src/redactor.js";
 import { sanitizeKnownText } from "../src/session-map.js";
+import { OpenAICompatibleProvider } from "../src/providers/openai-compatible.js";
+import { OllamaProvider } from "../src/providers/ollama.js";
 
 test("falls back to regex redaction when local AI JSON is invalid", async () => {
   const provider = {
@@ -131,4 +133,78 @@ test("strict sanitizer output is exactly reconstructible from one canonical plac
   );
   assert.equal(result.sanitizedText.includes("Alex Morgan"), false);
   assert.equal(result.sanitizedText.includes("shared.private@example.test"), false);
+});
+
+for (const [name, Provider, config] of [
+  ["OpenAI-compatible", OpenAICompatibleProvider, { baseURL: "http://127.0.0.1:1234/v1" }],
+  ["Ollama", OllamaProvider, { baseURL: "http://127.0.0.1:11434" }]
+]) {
+  test(`${name} provider aborts its local HTTP request when PrivacyAI is cancelled`, async () => {
+    const controller = new AbortController();
+    const provider = new Provider({
+      ...config,
+      model: "test-model",
+      timeoutMs: 5000,
+      fetch: async (_url, options = {}) => new Promise((resolve, reject) => {
+        const abort = () => {
+          const error = new Error("fetch aborted");
+          error.name = "AbortError";
+          reject(error);
+        };
+        if (options.signal?.aborted) abort();
+        else options.signal?.addEventListener("abort", abort, { once: true });
+      })
+    });
+
+    const pending = provider.chat({
+      model: "test-model",
+      messages: [{ role: "user", content: "test" }],
+      signal: controller.signal
+    });
+    const reason = new Error("Codex client disconnected");
+    reason.code = "PRIVACYAI_CODEX_CLIENT_DISCONNECTED";
+    controller.abort(reason);
+
+    await assert.rejects(
+      pending,
+      error =>
+        error?.code === "PRIVACYAI_CODEX_CLIENT_DISCONNECTED" &&
+        !error.message.includes("timed out")
+    );
+  });
+}
+
+test("strict sanitizer propagates cancellation during a repair request", async () => {
+  const controller = new AbortController();
+  let calls = 0;
+  let markRepairStarted;
+  const repairStarted = new Promise(resolve => {
+    markRepairStarted = resolve;
+  });
+  const provider = {
+    async chat(request) {
+      calls += 1;
+      if (calls === 1) return { text: "not-json", raw: {}, provider: {} };
+      markRepairStarted();
+      return new Promise((resolve, reject) => {
+        const abort = () => reject(request.signal?.reason || new Error("repair aborted"));
+        if (request.signal?.aborted) abort();
+        else request.signal?.addEventListener("abort", abort, { once: true });
+      });
+    }
+  };
+  const sanitizer = new AiSanitizer({ provider, model: "mock" });
+  const pending = sanitizer.sanitize("Contact private.person@example.test", {
+    signal: controller.signal
+  });
+
+  await repairStarted;
+  const reason = new Error("Codex client disconnected");
+  reason.code = "PRIVACYAI_CODEX_CLIENT_DISCONNECTED";
+  controller.abort(reason);
+
+  await assert.rejects(
+    pending,
+    error => error?.code === "PRIVACYAI_CODEX_CLIENT_DISCONNECTED"
+  );
 });

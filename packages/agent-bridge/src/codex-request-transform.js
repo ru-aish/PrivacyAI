@@ -67,6 +67,7 @@ const RESERVED_METADATA_FIELDS = new Set([
 ]);
 
 export async function sanitizeCodexRequestBody(body, options = {}) {
+  throwIfAborted(options.signal);
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     throw gatewayError("PRIVACYAI_CODEX_INVALID_REQUEST", "Codex provider request body must be a JSON object.");
   }
@@ -117,35 +118,67 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     if (cached?.sessionMapAdditions && typeof cached.sessionMapAdditions === "object") {
       mergeDetectedMappings(completeMap, sessionMapAdditions, cached.sessionMapAdditions);
     } else {
-      uncached.push({ index, cacheKey, contentHash, artifactType, value: entry.value });
+      uncached.push({
+        index,
+        cacheKey,
+        contentHash,
+        artifactType,
+        artifactKey: artifactIdentityForSlot(entry),
+        value: entry.value
+      });
     }
   }
 
   if (uncached.length > 0) {
-    const result = await sanitizeStructuredValue(uncached.map(entry => entry.value), {
-      sanitizer: options.sanitizer,
-      sessionMap: completeMap,
-      maxContextChars: options.maxContextChars
-    });
-    if (!Array.isArray(result.value) || result.value.length !== uncached.length) {
-      throw gatewayError(
-        "PRIVACYAI_CODEX_INVALID_SANITIZED_REQUEST",
-        "PrivacyAI blocked the Codex request because sanitization changed its model-visible shape."
-      );
-    }
+    const artifacts = groupUncachedArtifacts(uncached);
+    for (let artifactIndex = 0; artifactIndex < artifacts.length; artifactIndex += 1) {
+      throwIfAborted(options.signal);
+      const artifact = artifacts[artifactIndex];
+      const result = await sanitizeStructuredValue(artifact.entries.map(entry => entry.value), {
+        sanitizer: options.sanitizer,
+        sessionMap: completeMap,
+        maxContextChars: options.maxContextChars,
+        artifactType: `codex_${artifact.artifactType}`,
+        signal: options.signal,
+        onBatchComplete: typeof options.onBatchComplete === "function"
+          ? details => options.onBatchComplete({
+              ...details,
+              artifactIndex,
+              artifactCount: artifacts.length,
+              artifactKey: artifact.artifactKey,
+              artifactType: artifact.artifactType
+            })
+          : undefined
+      });
+      if (!Array.isArray(result.value) || result.value.length !== artifact.entries.length) {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_SANITIZED_REQUEST",
+          "PrivacyAI blocked the Codex request because sanitization changed its model-visible shape."
+        );
+      }
 
-    const discoveredMap = { ...completeMap, ...result.sessionMapAdditions };
-    uncached.forEach(entry => {
-      const verificationMap = relevantSessionMap(entry.value, discoveredMap);
-      mergeDetectedMappings(completeMap, sessionMapAdditions, verificationMap);
-      cacheWrites.push([entry.cacheKey, {
-        cacheKey: entry.cacheKey,
-        contentHash: entry.contentHash,
-        artifactType: entry.artifactType,
-        policyFingerprint,
-        sessionMapAdditions: verificationMap
-      }]);
-    });
+      const discoveredMap = { ...completeMap, ...result.sessionMapAdditions };
+      for (const entry of artifact.entries) {
+        const verificationMap = relevantSessionMap(entry.value, discoveredMap);
+        mergeDetectedMappings(completeMap, sessionMapAdditions, verificationMap);
+        cacheWrites.push([entry.cacheKey, {
+          cacheKey: entry.cacheKey,
+          contentHash: entry.contentHash,
+          artifactType: entry.artifactType,
+          policyFingerprint,
+          sessionMapAdditions: verificationMap
+        }]);
+      }
+      if (typeof options.onArtifactComplete === "function") {
+        await options.onArtifactComplete({
+          artifactIndex,
+          artifactCount: artifacts.length,
+          artifactKey: artifact.artifactKey,
+          artifactType: artifact.artifactType,
+          slotCount: artifact.entries.length
+        });
+      }
+    }
   }
 
   slots.forEach((entry, index) => {
@@ -1469,6 +1502,32 @@ function modelVisibleContentHash(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function groupUncachedArtifacts(entries) {
+  const groups = new Map();
+  for (const entry of entries) {
+    let group = groups.get(entry.artifactKey);
+    if (!group) {
+      group = {
+        artifactKey: entry.artifactKey,
+        artifactType: entry.artifactType,
+        entries: []
+      };
+      groups.set(entry.artifactKey, group);
+    }
+    group.entries.push(entry);
+  }
+  return [...groups.values()];
+}
+
+function artifactIdentityForSlot(entry) {
+  const path = entry.path || entry.parentPath || [];
+  if (path[0] === "instructions") return "instructions";
+  if (path[0] === "input" && Number.isSafeInteger(path[1])) return `input/${path[1]}`;
+  if (path[0] === "tools" && Number.isSafeInteger(path[1])) return `tools/${path[1]}`;
+  if (path[0] === "text") return "text/format/schema";
+  return path.slice(0, 2).map(value => String(value)).join("/") || "request";
+}
+
 function artifactTypeForSlot(entry) {
   const path = entry.path || entry.parentPath || [];
   if (path[0] === "instructions") return "instructions";
@@ -1540,6 +1599,16 @@ function deepClone(value) {
 function safeResponseItemType(value) {
   const text = String(value || "missing");
   return /^[A-Za-z0-9._-]{1,120}$/.test(text) ? text : "invalid";
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  const error = new Error("PrivacyAI stopped the Codex request because the client disconnected.");
+  error.name = "AbortError";
+  error.code = "PRIVACYAI_REQUEST_ABORTED";
+  throw error;
 }
 
 function gatewayError(code, message) {

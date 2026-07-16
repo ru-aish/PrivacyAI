@@ -805,6 +805,64 @@ test("downstream disconnect cancels the active upstream SSE request", async t =>
   ]);
 });
 
+test("downstream disconnect aborts in-flight sanitization before any upstream request", async t => {
+  let upstreamRequests = 0;
+  const upstream = await startServer(async (_request, response) => {
+    upstreamRequests += 1;
+    response.writeHead(500, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "unexpected upstream request" }));
+  });
+  t.after(() => upstream.close());
+
+  let markStarted;
+  const sanitizerStarted = new Promise(resolve => {
+    markStarted = resolve;
+  });
+  let markAborted;
+  const sanitizerAborted = new Promise(resolve => {
+    markAborted = resolve;
+  });
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async (text, options = {}) => {
+      markStarted();
+      return new Promise((resolve, reject) => {
+        const abort = () => {
+          markAborted();
+          reject(options.signal?.reason || new Error("sanitizer aborted"));
+        };
+        if (options.signal?.aborted) {
+          abort();
+          return;
+        }
+        options.signal?.addEventListener("abort", abort, { once: true });
+      });
+    },
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-sanitizer-disconnect-")),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const target = new URL(`${gateway.baseURL}/responses`);
+  const request = http.request(target, {
+    method: "POST",
+    headers: { "content-type": "application/json" }
+  });
+  request.on("error", () => {});
+  request.end(JSON.stringify(sampleRequest()));
+
+  await sanitizerStarted;
+  request.destroy();
+  await Promise.race([
+    sanitizerAborted,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("sanitizer did not abort after client disconnect")), 1500)
+    )
+  ]);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(upstreamRequests, 0);
+});
+
 test("gateway protects compact requests and passes upstream status codes without retrying", async t => {
   let requests = 0;
   const upstream = await startServer(async (request, response) => {
@@ -1114,6 +1172,77 @@ test("gateway chooses ChatGPT or API upstream and strips forwarding headers", as
   }
 });
 
+test("Codex sanitization isolates independent model-visible artifacts", async () => {
+  const seen = [];
+  const body = {
+    model: "gpt-5.4-mini",
+    instructions: "INSTRUCTIONS_ARTIFACT",
+    input: [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "MESSAGE_ARTIFACT" }]
+      },
+      {
+        type: "function_call_output",
+        call_id: "call-artifact-isolation",
+        output: "TOOL_OUTPUT_ARTIFACT"
+      }
+    ],
+    stream: true,
+    client_metadata: { session_id: "artifact-isolation" }
+  };
+
+  const result = await sanitizeCodexRequestBody(body, {
+    maxContextChars: 2048,
+    sanitizer: async text => {
+      seen.push(text);
+      return { sanitizedPrompt: text, sessionMap: {} };
+    }
+  });
+
+  assert.deepEqual(result.body, body);
+  assert.equal(seen.length, 3);
+  for (const text of seen) {
+    const artifacts = [
+      "INSTRUCTIONS_ARTIFACT",
+      "MESSAGE_ARTIFACT",
+      "TOOL_OUTPUT_ARTIFACT"
+    ].filter(marker => text.includes(marker));
+    assert.equal(artifacts.length, 1, `classifier batch mixed artifacts: ${artifacts.join(",")}`);
+  }
+});
+
+test("oversized Codex artifacts are sanitized in bounded batches and reconstructed", async () => {
+  const secret = "boundary.secret@example.test";
+  const body = {
+    model: "gpt-5.4-mini",
+    instructions: "x".repeat(1260) + secret + "y".repeat(1800),
+    input: [],
+    stream: true,
+    client_metadata: { session_id: "bounded-artifact" }
+  };
+  const batchSizes = [];
+  const result = await sanitizeCodexRequestBody(body, {
+    maxContextChars: 1400,
+    sanitizer: async text => {
+      batchSizes.push(text.length);
+      const found = text.includes(secret);
+      return {
+        sanitizedPrompt: found ? text.replaceAll(secret, "[EMAIL_1]") : text,
+        sessionMap: found ? { "[EMAIL_1]": secret } : {}
+      };
+    }
+  });
+
+  assert.equal(batchSizes.length > 1, true);
+  assert.equal(batchSizes.every(size => size <= 1400), true);
+  assert.equal(result.body.instructions.includes(secret), false);
+  assert.equal(result.body.instructions.includes("[EMAIL_1]"), true);
+  assert.deepEqual(result.sessionMapAdditions, { "[EMAIL_1]": secret });
+  assert.deepEqual(result.body.input, []);
+});
+
 test("request item cache survives session-map growth", async () => {
   const cache = new Map();
   let calls = 0;
@@ -1126,6 +1255,7 @@ test("request item cache survives session-map growth", async () => {
     cache,
     sanitizer: classify
   });
+  const firstCalls = calls;
   for (const [key, value] of first.cacheWrites) cache.set(key, value);
   const completeMap = { ...first.sessionMapAdditions };
 
@@ -1135,7 +1265,7 @@ test("request item cache survives session-map growth", async () => {
     sanitizer: classify
   });
   for (const [key, value] of second.cacheWrites) cache.set(key, value);
-  assert.equal(calls, 1, "map growth must not rescan unchanged model-visible items");
+  assert.equal(calls, firstCalls, "map growth must not rescan unchanged model-visible items");
   assert.deepEqual(second.body, first.body);
 
   const third = await sanitizeCodexRequestBody(sampleRequest(), {
@@ -1304,7 +1434,7 @@ test("gateway reuses persisted thread verification after restart and invalidates
     body: JSON.stringify(body)
   });
   assert.equal(response.status, 200, await response.text());
-  assert.equal(sanitizerCalls, 1);
+  assert.equal(sanitizerCalls > 1, true, "independent artifacts should be classified separately");
   await first.close();
 
   const cachedOnly = async () => {
@@ -1505,7 +1635,7 @@ test("custom sanitizers without stable identity never reuse persisted verificati
     body: JSON.stringify(sampleRequest())
   });
   assert.equal(response.status, 200, await response.text());
-  assert.equal(firstCalls, 1);
+  assert.equal(firstCalls > 1, true, "independent artifacts should be classified separately");
   await first.close();
 
   const second = await startCodexProviderGateway({

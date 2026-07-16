@@ -72,7 +72,7 @@ export async function startCodexProviderGateway(options = {}) {
       sessionCaches
     };
     handleRequest(request, response, requestContext).catch(error => {
-      reportGatewayError(requestContext, error, "request");
+      if (!isCancellationError(error)) reportGatewayError(requestContext, error, "request");
       writeGatewayFailure(response, error);
     });
   });
@@ -114,6 +114,18 @@ export async function startCodexProviderGateway(options = {}) {
 }
 
 async function handleRequest(request, response, context) {
+  const lifecycle = createDownstreamLifecycle(request, response);
+  try {
+    return await handleRequestCore(request, response, {
+      ...context,
+      requestSignal: lifecycle.signal
+    });
+  } finally {
+    lifecycle.cleanup();
+  }
+}
+
+async function handleRequestCore(request, response, context) {
   applyLocalResponseSecurityHeaders(response);
   const url = new URL(request.url || "/", `http://${LOOPBACK_HOST}`);
   const prefix = `/${context.nonce}`;
@@ -159,6 +171,7 @@ async function handleRequest(request, response, context) {
 
   const identity = codexSessionContext(body, undefined, request.headers);
   const transformed = await context.serial.run(identity.sessionKey, async () => {
+    throwIfAborted(context.requestSignal);
     const currentVault = await context.vault.load(identity.sessionKey);
     const currentThread = context.verificationStore.loadThread(identity.sessionKey);
     const currentSessionMap = mergeInheritedSessionMap(
@@ -184,8 +197,12 @@ async function handleRequest(request, response, context) {
       cache,
       policyFingerprint: context.policyFingerprint,
       maxContextChars: context.maxContextChars,
-      headers: request.headers
+      headers: request.headers,
+      signal: context.requestSignal,
+      onBatchComplete: context.onSanitizerBatchComplete,
+      onArtifactComplete: context.onSanitizerArtifactComplete
     });
+    throwIfAborted(context.requestSignal);
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
     if (!sessionMapsEqual(currentVault?.sessionMap || {}, completeMap)) {
       await context.vault.save(identity.sessionKey, completeMap);
@@ -218,6 +235,7 @@ async function handleRequest(request, response, context) {
     return { body: result.body, sessionMap: completeMap };
   });
 
+  throwIfAborted(context.requestSignal);
   return proxyTransformed(
     request,
     response,
@@ -411,9 +429,11 @@ async function proxySseResponse(
     for (const output of restorer.end()) await writeWithBackpressure(response, output);
     response.end();
   } catch (error) {
-    reportGatewayError(context, error, "sse");
-    upstreamResponse.destroy(error);
-    response.destroy(error);
+    const cancelled = isCancellationError(error) || response.destroyed || response.writableEnded;
+    if (!cancelled) reportGatewayError(context, error, "sse");
+    upstreamResponse.destroy();
+    if (!response.destroyed && !response.writableEnded) response.destroy();
+    if (!cancelled) throw error;
   }
 }
 
@@ -512,7 +532,6 @@ function makeUpstreamRequest(url, method, headers, body, options = {}) {
     const downstream = options.downstream;
     const cleanup = () => {
       downstream?.off("close", onDownstreamClose);
-      request.off("error", onError);
     };
     const onError = error => {
       if (settled) return;
@@ -533,7 +552,6 @@ function makeUpstreamRequest(url, method, headers, body, options = {}) {
         return;
       }
       settled = true;
-      request.off("error", onError);
       upstreamResponse.on("error", () => {});
       const finish = () => cleanup();
       upstreamResponse.once("end", finish);
@@ -561,6 +579,44 @@ function forwardResponseHeaders(response, headers, transformed) {
 function applyLocalResponseSecurityHeaders(response) {
   response.setHeader("cache-control", "no-store");
   response.setHeader("x-content-type-options", "nosniff");
+}
+
+function createDownstreamLifecycle(request, response) {
+  const controller = new AbortController();
+  const abort = () => {
+    if (controller.signal.aborted || response.writableEnded) return;
+    controller.abort(gatewayError(
+      "PRIVACYAI_CODEX_CLIENT_DISCONNECTED",
+      "PrivacyAI stopped the Codex request because the client disconnected."
+    ));
+  };
+  request.once("aborted", abort);
+  response.once("close", abort);
+  return {
+    signal: controller.signal,
+    cleanup() {
+      request.off("aborted", abort);
+      response.off("close", abort);
+    }
+  };
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  throw gatewayError(
+    "PRIVACYAI_REQUEST_ABORTED",
+    "PrivacyAI stopped the Codex request because the client disconnected."
+  );
+}
+
+function isCancellationError(error) {
+  return (
+    error?.name === "AbortError" ||
+    error?.code === "PRIVACYAI_REQUEST_ABORTED" ||
+    error?.code === "PRIVACYAI_CODEX_CLIENT_DISCONNECTED"
+  );
 }
 
 function readBody(stream, maxBytes, options = {}) {
@@ -665,7 +721,7 @@ function safeGatewayDiagnostic(value) {
 function writeGatewayFailure(response, error) {
   if (response.destroyed || response.writableEnded) return;
   if (response.headersSent) {
-    response.destroy(error);
+    response.destroy();
     return;
   }
   const code = error?.code || "PRIVACYAI_CODEX_GATEWAY_FAILURE";

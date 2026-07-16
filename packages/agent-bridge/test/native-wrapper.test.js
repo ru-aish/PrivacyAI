@@ -877,7 +877,7 @@ function runProcess(command, args) {
 }
 
 
-test("Codex static preflight classifies home and project startup files without spawning Codex", async () => {
+test("Codex static preflight detects home and project startup files without spawning Codex or the AI sanitizer", async () => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-codex-static-preflight-"));
   const codexHome = join(root, "codex-home");
   await mkdir(join(root, ".git"), { recursive: true });
@@ -902,7 +902,7 @@ test("Codex static preflight classifies home and project startup files without s
   const result = await auditCodexStaticStartupContext({
     cwd: root,
     env: { CODEX_HOME: codexHome },
-    sanitizer,
+    staticSanitizer: sanitizer,
     verificationStore: store,
     policyFingerprint: "static-preflight-v1",
     blockHighRisk: false,
@@ -919,8 +919,9 @@ test("Codex static preflight classifies home and project startup files without s
       cwd: root,
       env: { CODEX_HOME: codexHome },
       sanitizer: async () => {
-        throw new Error("cached static manifest should be reused");
+        throw new Error("static preflight must not call the AI sanitizer");
       },
+      staticSanitizer: sanitizer,
       verificationStore: store,
       policyFingerprint: "static-preflight-v1",
       blockHighRisk: true,

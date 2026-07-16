@@ -1,6 +1,7 @@
 import { ProviderError } from "../errors.js";
 import { normalizeBaseURL } from "../config.js";
 import { getFetch } from "../fetch.js";
+import { createProviderAbortContext, providerCancellationError } from "./abort.js";
 
 export class OllamaProvider {
   constructor(options = {}) {
@@ -17,8 +18,7 @@ export class OllamaProvider {
   }
 
   async chat(request) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const abortContext = createProviderAbortContext(request.signal, this.timeoutMs);
 
     try {
       const response = await this.fetch(`${this.baseURL}/api/chat`, {
@@ -37,7 +37,7 @@ export class OllamaProvider {
             num_ctx: request.numCtx || this.numCtx
           }
         }),
-        signal: controller.signal
+        signal: abortContext.signal
       });
 
       const bodyText = await response.text();
@@ -67,13 +67,16 @@ export class OllamaProvider {
         }
       };
     } catch (error) {
-      if (error.name === "AbortError") {
+      if (abortContext.externallyAborted()) {
+        throw providerCancellationError(ProviderError, abortContext.externalReason());
+      }
+      if (abortContext.didTimeout() || error.name === "AbortError") {
         throw new ProviderError(`Ollama request timed out after ${this.timeoutMs}ms.`);
       }
       if (error instanceof ProviderError) throw error;
       throw new ProviderError("Ollama request failed.", error);
     } finally {
-      clearTimeout(timer);
+      abortContext.cleanup();
     }
   }
 }

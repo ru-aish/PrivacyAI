@@ -137,6 +137,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         policyFingerprint,
         onGatewayError: options.onGatewayError,
         onSanitizedRequest: options.onSanitizedRequest,
+        onSanitizerBatchComplete: options.onSanitizerBatchComplete,
+        onSanitizerArtifactComplete: options.onSanitizerArtifactComplete,
         chatgptUpstream: options.chatgptUpstream,
         apiUpstream: options.apiUpstream,
         allowInsecureTestUpstream: options.allowInsecureTestUpstream

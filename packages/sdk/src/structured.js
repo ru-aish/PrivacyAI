@@ -16,6 +16,7 @@ const BATCH_OVERHEAD_CHARS = 128;
  * locally, so the classifier never needs to reproduce a large document.
  */
 export async function sanitizeStructuredValue(value, options = {}) {
+  throwIfAborted(options.signal);
   const initialMap = normalizeSessionMap(options.sessionMap);
   const maxContextChars = Number(options.maxContextChars ?? DEFAULT_MAX_CONTEXT_CHARS);
   if (!Number.isSafeInteger(maxContextChars) || maxContextChars <= 0) {
@@ -45,14 +46,18 @@ export async function sanitizeStructuredValue(value, options = {}) {
   const units = buildUnits(slots, maxContextChars - BATCH_OVERHEAD_CHARS);
   const batches = buildBatches(units, maxContextChars);
 
-  for (const batch of batches) {
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    throwIfAborted(options.signal);
+    const batch = batches[batchIndex];
     const rawBatchText = encodeBatch(batch);
     const knownSafeText = sanitizeKnownText(rawBatchText, state.completeMap);
     const shield = shieldKnownPlaceholders(knownSafeText, Object.keys(state.completeMap));
     const result = await options.sanitizer(shield.text, {
       identityConfidenceThreshold: options.identityConfidenceThreshold ?? 0.85,
-      artifactType: "structured_context"
+      artifactType: options.artifactType || "structured_context",
+      signal: options.signal
     });
+    throwIfAborted(options.signal);
     if (!result || typeof result.sanitizedPrompt !== "string") {
       throw new TypeError("Context privacy sanitizer did not return sanitizedPrompt.");
     }
@@ -73,6 +78,14 @@ export async function sanitizeStructuredValue(value, options = {}) {
       throw error;
     }
     mergeClassifierMap(relevantMap, state);
+    if (typeof options.onBatchComplete === "function") {
+      await options.onBatchComplete({
+        batchIndex,
+        batchCount: batches.length,
+        unitCount: batch.length,
+        inputChars: rawBatchText.length
+      });
+    }
   }
 
   const resolved = slots.map(slot => sanitizeKnownText(slot.value, state.completeMap));
@@ -87,6 +100,16 @@ export async function sanitizeStructuredValue(value, options = {}) {
     sessionMapAdditions: state.additions,
     changed: !valuesEqual(value, sanitizedValue)
   };
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const reason = signal.reason;
+  if (reason instanceof Error) throw reason;
+  const error = new Error("PrivacyAI stopped sanitization because the client disconnected.");
+  error.name = "AbortError";
+  error.code = "PRIVACYAI_REQUEST_ABORTED";
+  throw error;
 }
 
 function describeValue(value, slots, options = {}) {

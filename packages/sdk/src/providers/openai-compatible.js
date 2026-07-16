@@ -1,6 +1,7 @@
 import { ProviderError } from "../errors.js";
 import { normalizeBaseURL } from "../config.js";
 import { getFetch } from "../fetch.js";
+import { createProviderAbortContext, providerCancellationError } from "./abort.js";
 
 export class OpenAICompatibleProvider {
   constructor(options = {}) {
@@ -15,7 +16,7 @@ export class OpenAICompatibleProvider {
     }
   }
 
-  async resolveModel(requestedModel) {
+  async resolveModel(requestedModel, signal) {
     const targetModel = requestedModel || this.model;
     if (targetModel && targetModel !== "local-model") {
       return targetModel;
@@ -26,7 +27,8 @@ export class OpenAICompatibleProvider {
         method: "GET",
         headers: {
           authorization: `Bearer ${this.apiKey}`
-        }
+        },
+        signal
       });
       if (res.ok) {
         const json = await res.json();
@@ -37,6 +39,7 @@ export class OpenAICompatibleProvider {
         }
       }
     } catch (e) {
+      if (signal?.aborted) throw e;
       console.warn("OpenAICompatibleProvider: failed to auto-resolve model via /models", e);
     }
 
@@ -44,11 +47,10 @@ export class OpenAICompatibleProvider {
   }
 
   async chat(request) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const abortContext = createProviderAbortContext(request.signal, this.timeoutMs);
 
     try {
-      const resolvedModel = await this.resolveModel(request.model || this.model);
+      const resolvedModel = await this.resolveModel(request.model || this.model, abortContext.signal);
 
       const response = await this.fetch(`${this.baseURL}/chat/completions`, {
         method: "POST",
@@ -63,7 +65,7 @@ export class OpenAICompatibleProvider {
           max_tokens: request.maxTokens,
           stream: false
         }),
-        signal: controller.signal
+        signal: abortContext.signal
       });
 
       const bodyText = await response.text();
@@ -99,13 +101,16 @@ export class OpenAICompatibleProvider {
         }
       };
     } catch (error) {
-      if (error.name === "AbortError") {
+      if (abortContext.externallyAborted()) {
+        throw providerCancellationError(ProviderError, abortContext.externalReason());
+      }
+      if (abortContext.didTimeout() || error.name === "AbortError") {
         throw new ProviderError(`Provider request timed out after ${this.timeoutMs}ms.`);
       }
       if (error instanceof ProviderError) throw error;
       throw new ProviderError("Provider request failed.", error);
     } finally {
-      clearTimeout(timer);
+      abortContext.cleanup();
     }
   }
 }

@@ -206,7 +206,8 @@ test("enforcement performs case-insensitive replacements to prevent PII leaks of
 
   assert.doesNotMatch(result.sanitizedText, /john.smith@example.com/i);
   assert.match(result.sanitizedText, /contact1@example.com/);
-  assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact2@example.com.");
+  assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact1@example.com.");
+  assert.equal(Object.keys(result.sessionMap).length, 1);
 });
 
 test("ai sanitizer passes conversation context turns to the provider", async () => {

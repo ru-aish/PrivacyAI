@@ -77,8 +77,10 @@ export class AiSanitizer {
       model: this.model,
       messages,
       temperature: 0,
-      maxTokens: optionsMaxTokens(this)
+      maxTokens: optionsMaxTokens(this),
+      signal: options.signal
     });
+    throwIfAborted(options.signal);
 
     if (this.sanitizationMode === SANITIZATION_MODES.STRICT) {
       const spanResult = parseSanitizerSpans(response.text, text);
@@ -109,7 +111,8 @@ export class AiSanitizer {
           model: this.model,
           messages: repairMessages,
           temperature: 0,
-          maxTokens: optionsMaxTokens(this)
+          maxTokens: optionsMaxTokens(this),
+          signal: options.signal
         });
         const repairedParsed = parseSanitizerResponse(
           repairResponse.text,
@@ -131,10 +134,12 @@ export class AiSanitizer {
           }
         }
       } catch (err) {
+        if (options.signal?.aborted) throw abortReason(options.signal, err);
         console.error("Sanitizer repair retry failed:", err);
       }
     }
 
+    throwIfAborted(options.signal);
     if (isValid && parsed) {
       const enforced = this.sanitizationMode === SANITIZATION_MODES.STRICT
         ? await enforceStrictSafeResult(text, parsed, this.fallbackDetector, options)
@@ -830,6 +835,20 @@ function lineBreakSignature(text) {
 
 function rangesOverlap(a, b) {
   return a.start < b.end && b.start < a.end;
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw abortReason(signal);
+}
+
+function abortReason(signal, fallback) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  if (fallback instanceof Error) return fallback;
+  const error = new Error("PrivacyAI sanitizer request was cancelled.");
+  error.name = "AbortError";
+  error.code = "PRIVACYAI_REQUEST_ABORTED";
+  return error;
 }
 
 function escapeRegExp(value) {

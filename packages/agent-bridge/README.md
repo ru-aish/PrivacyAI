@@ -58,6 +58,19 @@ reserved JSON Schema keywords are not classified. `prompt_cache_key` is replaced
 with a stable SHA-256-derived local identifier. Workspace metadata and unknown
 client metadata are removed before forwarding.
 
+The local classifier window is independent of the target Codex model window.
+PrivacyAI groups model-visible data by owning artifact—such as one message, tool
+result, instruction block, tool definition, or output schema—then processes each
+artifact sequentially. Oversized artifacts are split into bounded overlapping
+chunks and rebuilt locally before the complete sanitized request is forwarded.
+Unrelated artifacts are never mixed into one classifier call, and an unchanged
+artifact can reuse its persisted verification without rescanning the thread.
+
+If Codex disconnects while classification or streaming is active, the abort
+propagates through the artifact loop and into the LM Studio/Ollama HTTP request.
+PrivacyAI cancels the upstream request and treats the disconnect as normal
+cancellation rather than an unhandled gateway failure.
+
 ### Response restoration
 
 SSE is parsed as a protocol, not rewritten as arbitrary bytes. UTF-8 and SSE
