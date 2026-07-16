@@ -76,6 +76,7 @@ export function printHelp(output = process.stdout) {
   output.write("  privacyai codex [...]   Open stock Codex through the local provider gateway\n");
   output.write("  privacyai codex resume <id>  Resume through the protected gateway (never use raw codex resume)\n");
   output.write("  privacyai codex fork <id>    Fork through the protected gateway (never use raw codex fork)\n");
+  output.write("  Unix-like Codex TUI: /resume [--all|--last|id] or /fork [--all|--last|id]\n");
   output.write("  privacyai codex --privacy-strict [...]  Use prompt-only fallback isolation\n");
   output.write("  privacyai agy --print \"...\"  Send a protected one-shot Antigravity prompt\n");
   output.write("  privacyai doctor        Check local setup\n");

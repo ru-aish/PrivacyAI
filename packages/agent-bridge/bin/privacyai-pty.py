@@ -3,8 +3,8 @@
 
 The child owns a real pseudo-terminal, so its native TUI, slash commands,
 keyboard handling, colors, and permission dialogs remain unchanged. The bridge
-only watches output for a PrivacyAI reinjection marker and types the already
-sanitized prompt back into the native composer.
+watches output for PrivacyAI reinjection markers and can restart a protected
+Codex TUI when the user enters an exact local /resume or /fork command.
 """
 
 from __future__ import annotations
@@ -26,21 +26,30 @@ import tty
 from pathlib import Path
 
 MARKER = re.compile(rb"\[PRIVACYAI_REINJECT:([0-9a-fA-F-]{36})\]")
+SESSION_ACTION = re.compile(
+    rb"^\s*/(resume|fork)(?:\s+(--last|--all|[A-Za-z0-9][A-Za-z0-9._:-]{0,255}))?\s*$"
+)
 MAX_SCAN_BYTES = 16384
+MAX_SESSION_ACTION_BYTES = 512
 REINJECT_DELAY_SECONDS = 0.55
 SUBMIT_DELAY_SECONDS = 0.12
+SESSION_ACTION_EXIT_CODE = 86
+CHILD_TERMINATION_SECONDS = 2.0
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--runtime-dir", required=True)
     parser.add_argument("--flavor", choices=("claude", "codex"), required=True)
+    parser.add_argument("--session-action-file")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.command and args.command[0] == "--":
         args.command = args.command[1:]
     if not args.command:
         parser.error("missing wrapped command")
+    if args.session_action_file and args.flavor != "codex":
+        parser.error("session actions are supported only for Codex")
     return args
 
 
@@ -79,6 +88,171 @@ def encode_paste(prompt: str, flavor: str) -> bytes:
     return payload
 
 
+def parse_session_action(value: bytes) -> dict[str, object] | None:
+    match = SESSION_ACTION.fullmatch(value)
+    if not match:
+        return None
+    selector = match.group(2)
+    return {
+        "version": 1,
+        "action": match.group(1).decode("ascii"),
+        "selector": selector.decode("ascii") if selector else None,
+    }
+
+
+def write_session_action(runtime_dir: Path, requested_path: str, action: dict[str, object]) -> None:
+    path = Path(requested_path).resolve()
+    if path.parent != runtime_dir:
+        raise RuntimeError("Codex session action file must remain inside the private runtime directory.")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(action, output, separators=(",", ":"))
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def terminate_child(pid: int) -> int:
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+
+    deadline = time.monotonic() + CHILD_TERMINATION_SECONDS
+    while time.monotonic() < deadline:
+        waited_pid, status = os.waitpid(pid, os.WNOHANG)
+        if waited_pid == pid:
+            return status
+        time.sleep(0.02)
+
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    _, status = os.waitpid(pid, 0)
+    return status
+
+
+class SessionActionTracker:
+    def __init__(self) -> None:
+        self.buffer = bytearray()
+        self.disabled = False
+        self.line_known_empty = True
+        self.escape_state: str | None = None
+        self.escape_reset_allowed = False
+
+    def feed(self, data: bytes) -> tuple[bytes, dict[str, object] | None]:
+        forwarded = bytearray()
+        for value in data:
+            forwarded.append(value)
+
+            if self.escape_state is not None:
+                if self.escape_state == "start":
+                    if value in (ord("["), ord("O")):
+                        self.escape_state = "csi"
+                        continue
+                    if value == ord("]"):
+                        self.escape_state = "osc"
+                        continue
+                    if value in (ord("P"), ord("X"), ord("^"), ord("_")):
+                        self.escape_state = "string"
+                        continue
+                    if 0x30 <= value <= 0x7E:
+                        self._finish_escape()
+                        continue
+
+                    reset_allowed = self.escape_reset_allowed
+                    self._clear_escape()
+                    if reset_allowed:
+                        self.disabled = False
+                    else:
+                        continue
+                elif self.escape_state == "csi":
+                    if 0x40 <= value <= 0x7E:
+                        self._finish_escape()
+                    continue
+                elif self.escape_state == "osc":
+                    if value == 7:
+                        self._finish_escape()
+                    elif value == 27:
+                        self.escape_state = "osc_escape"
+                    continue
+                elif self.escape_state == "string":
+                    if value == 27:
+                        self.escape_state = "string_escape"
+                    continue
+                elif self.escape_state in ("osc_escape", "string_escape"):
+                    base_state = self.escape_state.removesuffix("_escape")
+                    if value == ord("\\"):
+                        self._finish_escape()
+                    elif value != 27:
+                        self.escape_state = base_state
+                    continue
+
+            if value in (10, 13):
+                action = None if self.disabled else parse_session_action(bytes(self.buffer))
+                if action is not None:
+                    return bytes(forwarded[:-1]), action
+                self._reset_line()
+                continue
+
+            if value in (8, 127):
+                if not self.disabled and self.buffer:
+                    self.buffer.pop()
+                    self.line_known_empty = len(self.buffer) == 0
+                continue
+            if value in (3, 21):
+                self._reset_line()
+                continue
+            if value == 27:
+                self.escape_state = "start"
+                self.escape_reset_allowed = self.line_known_empty
+                self.disabled = True
+                self.buffer.clear()
+                continue
+            if 32 <= value <= 126:
+                if self.disabled:
+                    self.line_known_empty = False
+                    continue
+                if len(self.buffer) >= MAX_SESSION_ACTION_BYTES:
+                    self.disabled = True
+                    self.line_known_empty = False
+                    self.buffer.clear()
+                else:
+                    self.buffer.append(value)
+                    self.line_known_empty = False
+                continue
+
+            self.disabled = True
+            self.buffer.clear()
+
+        return bytes(forwarded), None
+
+    def _finish_escape(self) -> None:
+        reset_allowed = self.escape_reset_allowed
+        self._clear_escape()
+        if reset_allowed:
+            self.disabled = False
+
+    def _clear_escape(self) -> None:
+        self.escape_state = None
+        self.escape_reset_allowed = False
+
+    def _reset_line(self) -> None:
+        self.buffer.clear()
+        self.disabled = False
+        self.line_known_empty = True
+        self._clear_escape()
+
+
 def exit_code_from_status(status: int) -> int:
     if os.WIFEXITED(status):
         return os.WEXITSTATUS(status)
@@ -103,6 +277,8 @@ def main() -> int:
     handled: set[str] = set()
     scheduled: list[tuple[float, str]] = []
     child_status: int | None = None
+    session_action_requested = False
+    action_tracker = SessionActionTracker() if args.session_action_file else None
 
     def resize(_signum=None, _frame=None) -> None:
         copy_window_size(stdin_fd if stdin_is_tty else stdout_fd, master_fd)
@@ -149,7 +325,15 @@ def main() -> int:
                 except OSError:
                     data = b""
                 if data:
-                    os.write(master_fd, data)
+                    forwarded, action = action_tracker.feed(data) if action_tracker else (data, None)
+                    if forwarded:
+                        os.write(master_fd, forwarded)
+                    if action is not None:
+                        os.write(stdout_fd, b"\r\n")
+                        write_session_action(runtime_dir, args.session_action_file, action)
+                        child_status = terminate_child(pid)
+                        session_action_requested = True
+                        break
                 else:
                     inputs.remove(stdin_fd)
 
@@ -186,6 +370,8 @@ def main() -> int:
         except OSError:
             pass
 
+    if session_action_requested:
+        return SESSION_ACTION_EXIT_CODE
     return exit_code_from_status(child_status or 0)
 
 

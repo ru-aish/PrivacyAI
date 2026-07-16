@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -86,6 +86,103 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   assert.equal(gatewayOptions.maxContextChars, 5120);
   assert.equal(gatewayOptions.verificationStore, verificationStore);
   await assert.rejects(access(spawned.options.env.PRIVACYAI_WRAPPER_DIR), /ENOENT/);
+});
+
+test("Codex gateway relaunches protected resume and fork actions requested inside the TUI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-session-action-"));
+  const configPath = await writeTestConfig(root);
+  const launches = [];
+  let closed = 0;
+
+  const result = await launchNativeTui("codex", ["--no-alt-screen", "-C", root], {
+    configPath,
+    binary: "/fake/stock-codex",
+    python: "/fake/python3",
+    cwd: root,
+    launchLockDir: join(root, "locks"),
+    healthOptions: { skip: true },
+    verifyNativeExecutable: async () => ({ version: "test" }),
+    sanitizer: passThroughSanitizer,
+    verificationStore: new MemoryContextVerificationStore(),
+    auditCodexStaticStartupContext: async () => ({ fileCount: 0, serializedBytes: 0 }),
+    auditCodexStartupContext: async () => ({ itemCount: 1, primedItemCount: 1 }),
+    startCodexProviderGateway: async () => ({
+      baseURL: "http://127.0.0.1:17777/test-nonce",
+      async close() {
+        closed += 1;
+      }
+    }),
+    spawnInherited: async (command, args) => {
+      launches.push({ command, args });
+      assert.equal(command, "/fake/python3");
+      assert.equal(args.includes("/fake/stock-codex"), true);
+      assert.equal(args.includes('model_provider="privacyai"'), true);
+
+      if (launches.length === 1) {
+        const actionFlag = args.indexOf("--session-action-file");
+        assert.notEqual(actionFlag, -1);
+        await writeFile(
+          args[actionFlag + 1],
+          JSON.stringify({ version: 1, action: "resume", selector: "--last" }),
+          { mode: 0o600 }
+        );
+        return 86;
+      }
+      return 0;
+    },
+    showLaunchProgress: false
+  });
+
+  assert.equal(result, 0);
+  assert.equal(closed, 1);
+  assert.equal(launches.length, 2);
+  assert.equal(launches[0].args.includes("resume"), false);
+  assert.deepEqual(launches[1].args.slice(-5), [
+    "--no-alt-screen",
+    "-C",
+    root,
+    "resume",
+    "--last"
+  ]);
+});
+
+test("Windows keeps interactive Codex on the direct protected gateway launch path", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-windows-gateway-"));
+  const configPath = await writeTestConfig(root);
+  let spawned;
+  let closed = 0;
+
+  const result = await launchNativeTui("codex", ["--no-alt-screen"], {
+    configPath,
+    binary: "C:\\fake\\codex.exe",
+    platform: "win32",
+    cwd: root,
+    launchLockDir: join(root, "locks"),
+    healthOptions: { skip: true },
+    verifyNativeExecutable: async () => ({ version: "test" }),
+    sanitizer: passThroughSanitizer,
+    verificationStore: new MemoryContextVerificationStore(),
+    auditCodexStaticStartupContext: async () => ({ fileCount: 0, serializedBytes: 0 }),
+    auditCodexStartupContext: async () => ({ itemCount: 1, primedItemCount: 1 }),
+    startCodexProviderGateway: async () => ({
+      baseURL: "http://127.0.0.1:17777/test-nonce",
+      async close() {
+        closed += 1;
+      }
+    }),
+    spawnInherited: async (command, args) => {
+      spawned = { command, args };
+      return 0;
+    },
+    showLaunchProgress: false
+  });
+
+  assert.equal(result, 0);
+  assert.equal(closed, 1);
+  assert.equal(spawned.command, "C:\\fake\\codex.exe");
+  assert.equal(spawned.args.includes("--session-action-file"), false);
+  assert.equal(spawned.args.includes("--no-alt-screen"), true);
+  assert.equal(spawned.args.includes('model_provider="privacyai"'), true);
 });
 
 test("Codex gateway closes, releases its lock, and cleans up when spawning fails", async () => {

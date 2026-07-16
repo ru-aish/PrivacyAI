@@ -935,6 +935,110 @@ test("Unix PTY helper reinjects a pending sanitized prompt into an unchanged chi
   assert.match(result.stdout, /RECEIVED:Use \[API_KEY_1\] now/);
 });
 
+test("Unix PTY helper converts exact Codex session commands into private launcher actions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-pty-session-action-"));
+  const actionPath = join(root, "action.json");
+  const input = "/resume --last" + String.fromCharCode(13);
+
+  const result = await runProcessWithInput("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--session-action-file",
+    actionPath,
+    "--",
+    "/bin/cat"
+  ], input);
+
+  assert.equal(result.code, 86);
+  assert.deepEqual(JSON.parse(await readFile(actionPath, "utf8")), {
+    version: 1,
+    action: "resume",
+    selector: "--last"
+  });
+  assert.equal((await stat(actionPath)).mode & 0o777, 0o600);
+
+  const terminalActionPath = join(root, "terminal-action.json");
+  const terminalInput =
+    String.fromCharCode(27) + "[?1;2c" +
+    String.fromCharCode(27) + "]10;rgb:0000/0000/0000" +
+    String.fromCharCode(27) + "\\" +
+    "/resume --all" + String.fromCharCode(13);
+  const terminalResult = await runProcessWithInput("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--session-action-file",
+    terminalActionPath,
+    "--",
+    "/bin/cat"
+  ], terminalInput);
+
+  assert.equal(terminalResult.code, 86);
+  assert.deepEqual(JSON.parse(await readFile(terminalActionPath, "utf8")), {
+    version: 1,
+    action: "resume",
+    selector: "--all"
+  });
+
+  const forkActionPath = join(root, "fork-action.json");
+  const forkInput = String.fromCharCode(27) + "/fork --all" + String.fromCharCode(13);
+  const forkResult = await runProcessWithInput("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--session-action-file",
+    forkActionPath,
+    "--",
+    "/bin/cat"
+  ], forkInput);
+
+  assert.equal(forkResult.code, 86);
+  assert.deepEqual(JSON.parse(await readFile(forkActionPath, "utf8")), {
+    version: 1,
+    action: "fork",
+    selector: "--all"
+  });
+
+  const navigationActionPath = join(root, "navigation-action.json");
+  const finiteTui = join(root, "finite-tui.py");
+  await writeFile(
+    finiteTui,
+    [
+      "import os,sys",
+      "data=b''",
+      "while not data.endswith((b'\\r', b'\\n')):",
+      "    chunk=os.read(sys.stdin.fileno(), 1)",
+      "    if not chunk: break",
+      "    data += chunk",
+      "print('FORWARDED:'+data.hex(), flush=True)"
+    ].join("\n")
+  );
+  const navigationInput =
+    "draft" + String.fromCharCode(27) + "[D" + "/resume --last" + String.fromCharCode(13);
+  const navigationResult = await runProcessWithInput("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--session-action-file",
+    navigationActionPath,
+    "--",
+    "python3",
+    finiteTui
+  ], navigationInput);
+
+  assert.equal(navigationResult.code, 0);
+  await assert.rejects(readFile(navigationActionPath, "utf8"), /ENOENT/);
+});
+
 function jsonResponse(body, options = {}) {
   return {
     ok: options.ok ?? true,
@@ -958,6 +1062,23 @@ function runProcess(command, args) {
     });
     child.on("error", reject);
     child.on("exit", code => resolve({ code, stdout, stderr }));
+  });
+}
+
+function runProcessWithInput(command, args, input) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", chunk => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", chunk => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("exit", code => resolve({ code, stdout, stderr }));
+    child.stdin.end(input);
   });
 }
 

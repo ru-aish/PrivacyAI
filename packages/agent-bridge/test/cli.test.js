@@ -17,6 +17,8 @@ test("CLI help directs resume and fork through the protected wrapper", () => {
   assert.match(text, /never use raw codex resume/);
   assert.match(text, /privacyai codex fork <id>/);
   assert.match(text, /never use raw codex fork/);
+  assert.match(text, /Unix-like Codex TUI: \/resume/);
+  assert.match(text, /\/fork \[--all\|--last\|id\]/);
 });
 
 test("Codex CLI prints only structured privacy-safe gateway diagnostics", async () => {

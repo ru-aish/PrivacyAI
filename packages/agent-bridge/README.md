@@ -18,10 +18,13 @@ and tests.
 
 `privacyai codex` starts the installed stock Codex binary with a temporary custom
 provider configuration. The user keeps the same OpenAI login, model, workspace,
-configuration, history, skills, plugins, and MCP servers. Resume and fork with
-`privacyai codex resume ...` and `privacyai codex fork ...`. Invoking raw
-`codex resume` or `codex fork` does not start this gateway and can send
-unsanitized local history directly to the configured Codex provider.
+configuration, history, skills, plugins, and MCP servers. On Unix-like systems,
+inside the protected TUI, use `/resume` or `/fork` to open the stock picker;
+`--all`, `--last`, and an
+explicit session ID are supported. The shell forms `privacyai codex resume ...`
+and `privacyai codex fork ...` remain available. Invoking raw `codex resume` or
+`codex fork` does not start this gateway and can send unsanitized local history
+directly to the configured Codex provider.
 
 ```text
 stock Codex

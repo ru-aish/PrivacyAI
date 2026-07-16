@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,12 @@ import { fileURLToPath } from "node:url";
 import { loadPrivacyConfig } from "./config-store.js";
 import { buildCodexProviderArgs, parseCodexPrivacyMode } from "./codex-provider-config.js";
 import { startCodexProviderGateway } from "./codex-provider-gateway.js";
+import {
+  CODEX_TUI_SESSION_ACTION_EXIT_CODE,
+  buildCodexTuiSessionActionArgs,
+  parseCodexTuiSessionActionRecord,
+  supportsCodexTuiSessionActions
+} from "./codex-tui-session-action.js";
 import {
   openContextVerificationStore,
   verificationFingerprint
@@ -181,11 +187,15 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       );
       await reportLaunchProgress(options, "launch", "Startup context is safe; launching Codex");
 
-      return await (options.spawnInherited || spawnInherited)(
+      return await launchCodexGatewayTui({
         binary,
-        [...protectedArgs, ...forwardedArgs],
-        { cwd, env }
-      );
+        protectedArgs,
+        forwardedArgs,
+        runtimeDir,
+        cwd,
+        env,
+        options
+      });
     }
 
     const python =
@@ -272,6 +282,86 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
     await launchLock?.release();
     await rm(runtimeDir, { recursive: true, force: true });
   }
+}
+
+async function launchCodexGatewayTui({
+  binary,
+  protectedArgs,
+  forwardedArgs,
+  runtimeDir,
+  cwd,
+  env,
+  options
+}) {
+  const spawnProcess = options.spawnInherited || spawnInherited;
+  const platform = options.platform || process.platform;
+  if (
+    platform === "win32" ||
+    options.enableTuiSessionActions === false ||
+    !supportsCodexTuiSessionActions(forwardedArgs)
+  ) {
+    return spawnProcess(binary, [...protectedArgs, ...forwardedArgs], { cwd, env });
+  }
+
+  const python =
+    options.python ||
+    (await resolveExecutable("python3")) ||
+    (await resolveExecutable("python"));
+  if (!python) {
+    throw new Error(
+      "PrivacyAI requires Python 3 for protected /resume and /fork handling inside the Codex TUI."
+    );
+  }
+
+  const actionPath = join(runtimeDir, "codex-tui-session-action.json");
+  let currentArgs = forwardedArgs;
+
+  while (true) {
+    await rm(actionPath, { force: true });
+    const code = await spawnProcess(
+      python,
+      [
+        PTY_HELPER,
+        "--runtime-dir",
+        runtimeDir,
+        "--flavor",
+        "codex",
+        "--session-action-file",
+        actionPath,
+        "--",
+        binary,
+        ...protectedArgs,
+        ...currentArgs
+      ],
+      { cwd, env }
+    );
+
+    if (code !== CODEX_TUI_SESSION_ACTION_EXIT_CODE) return code;
+
+    const action = await readCodexTuiSessionAction(actionPath);
+    currentArgs = buildCodexTuiSessionActionArgs(forwardedArgs, action);
+    const target = action.selector ? `${action.action} ${action.selector}` : `${action.action} picker`;
+    await reportLaunchProgress(
+      options,
+      "session-action",
+      `Launching protected Codex ${target}`
+    );
+  }
+}
+
+async function readCodexTuiSessionAction(path) {
+  let record;
+  try {
+    record = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw new Error("PrivacyAI rejected a missing or malformed Codex TUI session action.");
+  }
+
+  const action = parseCodexTuiSessionActionRecord(record);
+  if (!action) {
+    throw new Error("PrivacyAI rejected an invalid Codex TUI session action.");
+  }
+  return action;
 }
 
 function launchPolicyFingerprint(sanitizer, options, boundary) {
