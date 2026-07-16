@@ -126,8 +126,10 @@ privacyai agy --print "your prompt"
 
 Codex now defaults to a bidirectional loopback Responses gateway. It keeps the
 normal `CODEX_HOME`, account, model, history, skills, plugins, user MCP servers,
-filesystem, shell, patch, Git, resume, fork, exec, and review workflows.
-Model-visible request content is sanitized locally; streamed assistant text and
+filesystem, shell, patch, Git, resume, fork, exec, and review workflows. Resume
+and fork through `privacyai codex resume ...` or `privacyai codex fork ...`;
+running raw `codex resume` or `codex fork` bypasses PrivacyAI and may submit
+unsanitized local history. Model-visible request content is sanitized locally; streamed assistant text and
 completed tool arguments are restored before stock Codex consumes them. The
 gateway adds no second OpenAI model turn. Provider-hosted search/apps/browser,
 images, realtime/WebSockets, remote clients, and alternate provider routes remain

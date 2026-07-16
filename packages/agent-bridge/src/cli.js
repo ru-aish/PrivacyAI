@@ -12,8 +12,13 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
   try {
     switch (command) {
       case "claude":
-      case "codex":
-        return await (options.launchNativeTui || launchNativeTui)(command, args, options.launchOptions);
+      case "codex": {
+        const launchOptions = { ...options.launchOptions };
+        if (command === "codex" && typeof launchOptions.onGatewayError !== "function") {
+          launchOptions.onGatewayError = diagnostic => writeGatewayDiagnostic(stderr, diagnostic);
+        }
+        return await (options.launchNativeTui || launchNativeTui)(command, args, launchOptions);
+      }
       case "agy":
       case "antigravity":
         return await (options.launchAgy || launchAgy)(args, options.agyOptions);
@@ -52,7 +57,10 @@ async function runDoctor(options) {
     return 1;
   }
 
-  const health = await checkPrivacyModel(loaded.config, options.healthOptions);
+  const health = await checkPrivacyModel(loaded.config, {
+    probeCompletion: true,
+    ...options.healthOptions
+  });
   options.stdout.write(`Configuration: ${loaded.path}\n`);
   options.stdout.write(`Provider: ${loaded.config.provider}\n`);
   options.stdout.write(`Model: ${loaded.config.model}\n`);
@@ -66,9 +74,22 @@ export function printHelp(output = process.stdout) {
   output.write("  privacyai onboard       Configure the local privacy model\n");
   output.write("  privacyai claude [...]  Open the normal Claude Code TUI with prompt protection\n");
   output.write("  privacyai codex [...]   Open stock Codex through the local provider gateway\n");
+  output.write("  privacyai codex resume <id>  Resume through the protected gateway (never use raw codex resume)\n");
+  output.write("  privacyai codex fork <id>    Fork through the protected gateway (never use raw codex fork)\n");
   output.write("  privacyai codex --privacy-strict [...]  Use prompt-only fallback isolation\n");
   output.write("  privacyai agy --print \"...\"  Send a protected one-shot Antigravity prompt\n");
   output.write("  privacyai doctor        Check local setup\n");
+}
+
+function writeGatewayDiagnostic(output, diagnostic) {
+  const code = safeDiagnosticField(diagnostic?.code, "PRIVACYAI_CODEX_GATEWAY_FAILURE");
+  const category = safeDiagnosticField(diagnostic?.category, "gateway").toLowerCase();
+  output.write(`[PrivacyAI] Codex gateway failure: ${category} (${code}).\n`);
+}
+
+function safeDiagnosticField(value, fallback) {
+  const text = String(value || "");
+  return /^[A-Za-z0-9_]{1,96}$/.test(text) ? text : fallback;
 }
 
 function safeMessage(error) {

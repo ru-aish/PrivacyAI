@@ -15,6 +15,11 @@ import {
   openContextVerificationStore,
   verificationFingerprint
 } from "./context-verification-store.js";
+import {
+  gatewayError,
+  publicGatewayFailure,
+  safeGatewayDiagnostic
+} from "./gateway-error.js";
 import { SessionVault } from "./session-vault.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -431,7 +436,6 @@ async function proxySseResponse(
     response.end();
   } catch (error) {
     const cancelled = isCancellationError(error) || response.destroyed || response.writableEnded;
-    if (!cancelled) reportGatewayError(context, error, "sse");
     upstreamResponse.destroy();
     if (!response.destroyed && !response.writableEnded) response.destroy();
     if (!cancelled) throw error;
@@ -701,22 +705,10 @@ function safeContentType(value) {
 function reportGatewayError(context, error, phase) {
   if (typeof context?.onGatewayError !== "function") return;
   try {
-    context.onGatewayError({
-      phase,
-      code: error?.code || "PRIVACYAI_CODEX_GATEWAY_FAILURE",
-      name: error?.name || "Error",
-      message: safeGatewayDiagnostic(error?.message)
-    });
+    context.onGatewayError(safeGatewayDiagnostic(error, phase));
   } catch {
     // Diagnostic callbacks are observational only and must not alter the boundary.
   }
-}
-
-function safeGatewayDiagnostic(value) {
-  return String(value || "")
-    .replace(/https?:\/\/\S+/gi, "[url]")
-    .replace(/[A-Za-z0-9_-]{32,}/g, "[redacted-token]")
-    .slice(0, 500);
 }
 
 function writeGatewayFailure(response, error) {
@@ -725,7 +717,7 @@ function writeGatewayFailure(response, error) {
     response.destroy();
     return;
   }
-  const code = error?.code || "PRIVACYAI_CODEX_GATEWAY_FAILURE";
+  const { code } = publicGatewayFailure(error);
   const status = code === "PRIVACYAI_CODEX_BODY_TOO_LARGE" ? 413 : 502;
   writeJson(response, status, {
     error: {
@@ -889,12 +881,6 @@ function sessionMapsEqual(left, right) {
   const leftEntries = Object.entries(left || {}).sort();
   const rightEntries = Object.entries(right || {}).sort();
   return JSON.stringify(leftEntries) === JSON.stringify(rightEntries);
-}
-
-function gatewayError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
 }
 
 class KeyedSerialQueue {

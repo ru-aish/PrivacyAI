@@ -2,6 +2,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import { StreamingPlaceholderRestorer, restoreValue } from "@privacy-ai/sdk";
 import { restoreResponseItem } from "./codex-request-transform.js";
+import { gatewayError as protocolError } from "./gateway-error.js";
 
 const DELTA_EVENT_TYPES = new Set([
   "response.output_text.delta",
@@ -427,10 +428,4 @@ function nextFrameBoundary(value) {
 function safeEventType(value) {
   const text = String(value || "missing");
   return /^[A-Za-z0-9._-]{1,120}$/.test(text) ? text : "invalid";
-}
-
-function protocolError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
 }

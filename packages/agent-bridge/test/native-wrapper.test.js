@@ -424,6 +424,7 @@ test("onboarding shows Ollama and LM Studio models in one numbered menu", async 
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "2",
     output,
@@ -468,6 +469,7 @@ test("LM Studio-only onboarding works when Ollama is not installed", async () =>
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: null,
     ask: async () => "",
     output: new PassThrough(),
@@ -494,6 +496,7 @@ test("onboarding recommends Ministral 3 3B and shows every downloaded language m
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "",
     output,
@@ -533,6 +536,7 @@ test("onboarding pulls the recommended Ministral model when it is not downloaded
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "",
     output,
@@ -557,6 +561,7 @@ test("onboarding can select a downloaded model by number without pulling it", as
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "2",
     output: new PassThrough(),
@@ -580,6 +585,7 @@ test("onboarding pulls a model name that is not downloaded", async () => {
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "custom-private-model:latest",
     output: new PassThrough(),

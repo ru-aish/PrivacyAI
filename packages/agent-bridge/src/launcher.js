@@ -14,7 +14,7 @@ import {
 } from "./context-verification-store.js";
 import { resolveExecutable, verifyNativeExecutable } from "./executable.js";
 import { acquireNativeLaunchLock } from "./launch-lock.js";
-import { checkPrivacyModel } from "./model-health.js";
+import { checkPrivacyModel, privacyModelHealthError } from "./model-health.js";
 import {
   validateNativeArguments,
   validateNativeEnvironment
@@ -59,12 +59,11 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   const loaded = await loadPrivacyConfig({ path: options.configPath });
   if (!loaded.configured) throw onboardingRequiredError();
 
-  const health = await checkPrivacyModel(loaded.config, options.healthOptions);
-  if (!health.ok) {
-    const error = onboardingRequiredError();
-    error.message = `${health.reason}\nRun: privacyai onboard`;
-    throw error;
-  }
+  const health = await checkPrivacyModel(loaded.config, {
+    probeCompletion: true,
+    ...options.healthOptions
+  });
+  if (!health.ok) throw privacyModelHealthError(health);
 
   const binary = options.binary || (await resolveExecutable(flavor));
   if (!binary) {

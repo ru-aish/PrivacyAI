@@ -7,6 +7,7 @@ import {
   sanitizeKnownValue,
   sanitizeStructuredValue
 } from "@privacy-ai/sdk";
+import { gatewayError } from "./gateway-error.js";
 
 const ALLOWED_TOP_LEVEL_FIELDS = new Set([
   "model",
@@ -1830,10 +1831,4 @@ function throwIfAborted(signal) {
   error.name = "AbortError";
   error.code = "PRIVACYAI_REQUEST_ABORTED";
   throw error;
-}
-
-function gatewayError(code, message) {
-  const error = new Error(message);
-  error.code = code;
-  return error;
 }

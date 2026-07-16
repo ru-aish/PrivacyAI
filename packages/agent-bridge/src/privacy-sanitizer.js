@@ -14,6 +14,7 @@ export function createPrivacySanitizer(config, options = {}) {
     apiKey: config.apiKey,
     timeoutMs: config.timeoutMs,
     numCtx: config.numCtx,
+    fetch: options.fetch,
     privacyMaxTokens,
     sanitizationMode: "strict",
     loadEnv: false

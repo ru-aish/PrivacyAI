@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import { loadPrivacyConfig } from "./config-store.js";
 import { resolveExecutable } from "./executable.js";
-import { checkPrivacyModel } from "./model-health.js";
+import { checkPrivacyModel, privacyModelHealthError } from "./model-health.js";
 import { createPrivacySanitizer } from "./privacy-sanitizer.js";
 import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
 
@@ -45,8 +45,11 @@ export async function launchAgy(userArgs = [], options = {}) {
   if (!loaded.configured) throw onboardingRequiredError();
 
   const checkHealth = options.checkPrivacyModel || checkPrivacyModel;
-  const health = await checkHealth(loaded.config, options.healthOptions);
-  if (!health.ok) throw new Error(`${health.reason}\nRun: privacyai onboard`);
+  const health = await checkHealth(loaded.config, {
+    probeCompletion: true,
+    ...options.healthOptions
+  });
+  if (!health.ok) throw privacyModelHealthError(health);
 
   const binary = options.binary || await resolveAgyExecutable(options);
   if (!binary) {

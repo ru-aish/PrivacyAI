@@ -291,3 +291,44 @@ test("local-model budgets derive bounded chunk and output sizes from numCtx", ()
     7777
   );
 });
+
+
+test("Codex launch distinguishes a missing configured model from a temporary readiness failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-model-health-"));
+  const configPath = await writeTestConfig(root);
+
+  await assert.rejects(
+    launchNativeTui("codex", [], {
+      configPath,
+      cwd: root,
+      healthOptions: {
+        fetch: async () => new Response(JSON.stringify({ models: [] }), {
+          headers: { "content-type": "application/json" }
+        })
+      }
+    }),
+    error => error?.code === "PRIVACYAI_MODEL_UNAVAILABLE" && /privacyai onboard/.test(error.message)
+  );
+
+  await assert.rejects(
+    launchNativeTui("codex", [], {
+      configPath,
+      cwd: root,
+      healthOptions: {
+        fetch: async () => new Response(JSON.stringify({ models: [{ name: "test-model" }] }), {
+          headers: { "content-type": "application/json" }
+        }),
+        readinessAttempts: 1,
+        sanitizer: async () => {
+          const error = new Error("Provider request failed.");
+          error.name = "ProviderError";
+          throw error;
+        }
+      }
+    }),
+    error =>
+      error?.code === "PRIVACYAI_MODEL_NOT_READY" &&
+      /finish loading/.test(error.message) &&
+      !/privacyai onboard/.test(error.message)
+  );
+});

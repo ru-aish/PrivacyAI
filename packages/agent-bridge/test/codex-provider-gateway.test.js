@@ -1863,3 +1863,115 @@ test("custom sanitizers without stable identity never reuse persisted verificati
   assert.equal(response.status, 502);
   assert.equal(secondCalls, 1);
 });
+
+
+test("gateway diagnostics expose only allowlisted structured fields", async t => {
+  let upstreamRequests = 0;
+  const diagnostics = [];
+  const upstream = await startServer((_request, response) => {
+    upstreamRequests += 1;
+    response.end();
+  });
+  t.after(() => upstream.close());
+
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async () => {
+      const error = new Error(`private prompt ${PRIVATE_EMAIL} at /home/private/workspace`);
+      error.name = PRIVATE_EMAIL;
+      error.code = `PRIVACYAI_${PRIVATE_KEY}`;
+      throw error;
+    },
+    onGatewayError(diagnostic) {
+      diagnostics.push(diagnostic);
+      throw new Error("diagnostic sink failure must remain observational");
+    },
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-safe-diagnostic-")),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  assert.equal(response.status, 502);
+  const body = await response.json();
+  assert.equal(body.error.code, "PRIVACYAI_CODEX_GATEWAY_FAILURE");
+  assert.deepEqual(diagnostics, [{
+    phase: "request",
+    code: "PRIVACYAI_CODEX_GATEWAY_FAILURE",
+    category: "gateway"
+  }]);
+  const serialized = JSON.stringify(diagnostics);
+  assert.equal(serialized.includes(PRIVATE_EMAIL), false);
+  assert.equal(serialized.includes(PRIVATE_KEY), false);
+  assert.equal(serialized.includes("/home/private"), false);
+  assert.equal(upstreamRequests, 0);
+});
+
+test("gateway categorizes local provider failures without exposing provider details", async t => {
+  const diagnostics = [];
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async () => {
+      const error = new Error(`Provider returned HTTP 503 for ${PRIVATE_EMAIL}`);
+      error.name = "ProviderError";
+      error.details = PRIVATE_KEY;
+      throw error;
+    },
+    onGatewayError: diagnostic => diagnostics.push(diagnostic),
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-provider-diagnostic-")),
+    apiUpstream: "http://127.0.0.1:9/v1",
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error.code, "PRIVACYAI_LOCAL_MODEL_FAILURE");
+  assert.deepEqual(diagnostics, [{
+    phase: "request",
+    code: "PRIVACYAI_LOCAL_MODEL_FAILURE",
+    category: "local_model"
+  }]);
+  assert.equal(JSON.stringify(diagnostics).includes(PRIVATE_EMAIL), false);
+  assert.equal(JSON.stringify(diagnostics).includes(PRIVATE_KEY), false);
+});
+
+test("stream failures emit exactly one structured gateway diagnostic", async t => {
+  const diagnostics = [];
+  const upstream = await startServer(async (request, response) => {
+    await readRequestJson(request);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(sse({ type: "response.output_text.delta", item_id: "msg", delta: "ok" }));
+    response.end("data: not-json\n\n");
+  });
+  t.after(() => upstream.close());
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    onGatewayError: diagnostic => diagnostics.push(diagnostic),
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-single-diagnostic-")),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  await response.text().catch(() => "");
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(diagnostics[0], {
+    phase: "request",
+    code: "PRIVACYAI_CODEX_INVALID_SSE",
+    category: "upstream"
+  });
+});
