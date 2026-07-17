@@ -675,6 +675,16 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
       const upstream = observed.length === 1
         ? Readable.from([
             Buffer.from(sseEvent(textEvent("result for [EMAIL_1]"))),
+            Buffer.from(sseEvent({
+              response: {
+                candidates: [{ content: { role: "model", parts: [{
+                  functionCall: {
+                    name: toolAlias,
+                    args: { "[EMAIL_1]": { nested: ["[EMAIL_1]"] } }
+                  }
+                }] } }]
+              }
+            })),
             Buffer.from(sseEvent(finishEvent()))
           ])
         : Readable.from([Buffer.from('{"unexpected":"success"}')]);
@@ -708,6 +718,14 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
     .filter(value => typeof value === "string")
     .join("");
   assert.equal(text, `result for ${PRIVATE_EMAIL}`);
+  const currentRequestCall = events
+    .flatMap(event => event.response?.candidates || [])
+    .flatMap(candidate => candidate.content?.parts || [])
+    .find(part => part.functionCall)?.functionCall;
+  assert.equal(currentRequestCall.name, nativeToolName);
+  assert.deepEqual(currentRequestCall.args, {
+    [PRIVATE_EMAIL]: { nested: [PRIVATE_EMAIL] }
+  });
   assert.equal(imageCalls.length, 2);
   assert.deepEqual(imageCalls[0].sessionMap, {});
   assert.equal(imageCalls[1].sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
@@ -1122,6 +1140,7 @@ test("AGY SSE restoration restores native function names, argument keys, and val
   const restorer = new AgySseRestorer({
     "[EMAIL_1]": PRIVATE_EMAIL,
     "[API_KEY_1]": PRIVATE_KEY,
+    "[PRIVATE_VALUE_89]": "deep-private-value",
     [toolAlias]: "send_private_email"
   });
   const event = {
@@ -1133,7 +1152,11 @@ test("AGY SSE restoration restores native function names, argument keys, and val
             functionCall: {
               id: "call-1",
               name: toolAlias,
-              args: { recipient: "[EMAIL_1]", token: "[API_KEY_1]" }
+              args: {
+                "[EMAIL_1]": {
+                  nested: [{ token: "[API_KEY_1]" }, "[PRIVATE_VALUE_89]"]
+                }
+              }
             },
             thoughtSignature: "opaque-signature"
           }]
@@ -1148,9 +1171,75 @@ test("AGY SSE restoration restores native function names, argument keys, and val
   const restored = parseEvents(outputs[0])[0];
   const call = restored.response.candidates[0].content.parts[0].functionCall;
   assert.equal(call.name, "send_private_email");
-  assert.equal(call.args.recipient, PRIVATE_EMAIL);
-  assert.equal(call.args.token, PRIVATE_KEY);
+  assert.deepEqual(call.args, {
+    [PRIVATE_EMAIL]: {
+      nested: [{ token: PRIVATE_KEY }, "deep-private-value"]
+    }
+  });
   assert.equal(restored.response.candidates[0].content.parts[0].thoughtSignature, "opaque-signature");
+});
+
+test("AGY SSE blocks unresolved private placeholders and internal aliases in function calls", () => {
+  for (const functionCall of [
+    { name: "public_tool", args: { nested: { value: "[PRIVATE_VALUE_404]" } } },
+    { name: "public_tool", args: { nested: { privacyai_tool_46e0293a1cab: "value" } } },
+    { name: "privacyai_tool_46e0293a1cab", args: {} }
+  ]) {
+    const restorer = new AgySseRestorer();
+    assert.throws(
+      () => restorer.write(Buffer.from(sseEvent({
+        response: { candidates: [{ content: { role: "model", parts: [{ functionCall }] } }] }
+      }))),
+      error =>
+        error?.code === "PRIVACYAI_AGY_UNRESOLVED_TOOL_CALL" &&
+        !error.message.includes("PRIVATE_VALUE_404") &&
+        !error.message.includes("privacyai_tool_")
+    );
+  }
+
+  const normal = restoreAgySseEvent({
+    response: { candidates: [{ content: { role: "model", parts: [{
+      functionCall: { name: "public_tool", args: { note: "Use [BUILD_1] normally" } }
+    }] } }] }
+  });
+  assert.equal(
+    normal[0].response.candidates[0].content.parts[0].functionCall.args.note,
+    "Use [BUILD_1] normally"
+  );
+});
+
+test("AGY SSE recursively restores and blocks function responses", () => {
+  const restored = restoreAgySseEvent({
+    response: { candidates: [{ content: { role: "model", parts: [{
+      functionResponse: {
+        name: "privacyai_tool_46e0293a1cab",
+        response: { "[EMAIL_1]": { nested: ["[PRIVATE_VALUE_89]"] } }
+      }
+    }] } }] }
+  }, {
+    privacyai_tool_46e0293a1cab: "send_private_email",
+    "[EMAIL_1]": PRIVATE_EMAIL,
+    "[PRIVATE_VALUE_89]": "deep-private-value"
+  });
+  assert.deepEqual(restored[0].response.candidates[0].content.parts[0].functionResponse, {
+    name: "send_private_email",
+    response: { [PRIVATE_EMAIL]: { nested: ["deep-private-value"] } }
+  });
+
+  for (const functionResponse of [
+    { name: "public_tool", response: { nested: { value: "[PRIVATE_VALUE_405]" } } },
+    { name: "public_tool", response: { privacyai_tool_46e0293a1cab: "value" } }
+  ]) {
+    assert.throws(
+      () => restoreAgySseEvent({
+        response: { candidates: [{ content: { role: "model", parts: [{ functionResponse }] } }] }
+      }),
+      error =>
+        error?.code === "PRIVACYAI_AGY_UNRESOLVED_TOOL_RESPONSE" &&
+        !error.message.includes("PRIVATE_VALUE_405") &&
+        !error.message.includes("privacyai_tool_")
+    );
+  }
 });
 
 test("AGY SSE flushes fragmented candidates without duplicating unrelated content", () => {

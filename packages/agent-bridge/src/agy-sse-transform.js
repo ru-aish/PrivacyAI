@@ -1,6 +1,16 @@
 import { StringDecoder } from "node:string_decoder";
 
-import { StreamingPlaceholderRestorer, restoreValue } from "@privacy-ai/sdk";
+import {
+  GENERATED_DUMMY_PATTERN_SOURCE,
+  StreamingPlaceholderRestorer,
+  findUnresolvedPlaceholders,
+  restoreValue
+} from "@privacy-ai/sdk";
+
+const AGY_PRIVATE_PLACEHOLDER_PATTERN = new RegExp(
+  String.raw`(?:\[(?:EMAIL|PHONE|PERSON|ORGANIZATION|LOCATION|SSN|CREDIT_CARD|API_KEY|AWS_ACCESS_KEY|URL_CREDENTIAL|URL_QUERY_SECRET|CONNECTION_STRING_CREDENTIAL|MEDICAL_ID|MRN|PRIVATE_IDENTIFIER|PRIVATE_VALUE|PASSWORD|SECRET|CREDENTIAL|TOKEN|IP_ADDRESS|POSTAL_CODE|ZIP|TOOL|TOOL_NAME|FUNCTION|FUNCTION_NAME)_\d+\]|${GENERATED_DUMMY_PATTERN_SOURCE}|\bprivacyai_tool_[0-9a-f]{12,64}\b)`,
+  "gi"
+);
 
 export class AgySseRestorer {
   constructor(sessionMap = {}, options = {}) {
@@ -143,12 +153,14 @@ export class AgySseRestorer {
       validateFunctionCall(part.functionCall);
       part.functionCall.name = restoreValue(part.functionCall.name, this.sessionMap);
       part.functionCall.args = restoreValue(part.functionCall.args, this.sessionMap);
+      assertResolvedToolPayload(part.functionCall, "PRIVACYAI_AGY_UNRESOLVED_TOOL_CALL");
       return;
     }
 
     validateFunctionResponse(part.functionResponse);
     part.functionResponse.name = restoreValue(part.functionResponse.name, this.sessionMap);
     part.functionResponse.response = restoreValue(part.functionResponse.response, this.sessionMap);
+    assertResolvedToolPayload(part.functionResponse, "PRIVACYAI_AGY_UNRESOLVED_TOOL_RESPONSE");
   }
 
   #flushTextStreams() {
@@ -257,9 +269,22 @@ function validateFunctionResponse(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw agySseError("PRIVACYAI_AGY_INVALID_TOOL_RESPONSE", "AGY function response must be an object.");
   }
-  if (typeof value.name !== "string" || value.response == null || typeof value.response !== "object") {
+  if (
+    typeof value.name !== "string" ||
+    !value.response ||
+    typeof value.response !== "object" ||
+    Array.isArray(value.response)
+  ) {
     throw agySseError("PRIVACYAI_AGY_INVALID_TOOL_RESPONSE", "AGY function response is malformed.");
   }
+}
+
+function assertResolvedToolPayload(value, code) {
+  if (findUnresolvedPlaceholders(value, AGY_PRIVATE_PLACEHOLDER_PATTERN).length === 0) return;
+  throw agySseError(
+    code,
+    "PrivacyAI blocked an unresolved private AGY tool payload."
+  );
 }
 
 function hasFinishReason(event) {
