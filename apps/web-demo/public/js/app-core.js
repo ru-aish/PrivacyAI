@@ -43,6 +43,32 @@ export function normalizeImagePreviewResponse(data, originalImageUrl) {
   };
 }
 
+export async function copyPromptToClipboard({
+  text,
+  clipboard,
+  button,
+  copiedLabel = "Copied",
+  resetDelayMs = 1200,
+  setTimeoutFn = setTimeout
+} = {}) {
+  const prompt = String(text || "");
+  if (!prompt) return false;
+  if (typeof clipboard?.writeText !== "function") return false;
+  try {
+    await clipboard.writeText(prompt);
+  } catch {
+    return false;
+  }
+  if (button) {
+    const originalLabel = button.textContent;
+    button.textContent = copiedLabel;
+    setTimeoutFn(() => {
+      button.textContent = originalLabel;
+    }, resetDelayMs);
+  }
+  return true;
+}
+
 export function formatBytes(bytes) {
   const value = Number(bytes || 0);
   if (value < 1024) return `${value} B`;

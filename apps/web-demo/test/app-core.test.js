@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   MAX_IMAGE_BYTES,
   buildImagePayload,
+  copyPromptToClipboard,
   formatBytes,
   normalizeImagePreviewResponse,
   validateImageFile
@@ -59,6 +60,63 @@ test("preview response normalization rejects malformed server output", () => {
   assert.throws(() => normalizeImagePreviewResponse({ status: "error", error: "blocked" }, "x"), /blocked/);
   assert.throws(() => normalizeImagePreviewResponse({ status: "success", sanitized_image_url: "data:image/png;base64,x" }, "x"), /invalid sanitized prompt/);
   assert.throws(() => normalizeImagePreviewResponse({ status: "success", sanitized_message: "safe", sanitized_image_url: "https://example.test/image.png" }, "x"), /invalid sanitized image/);
+});
+
+test("clipboard copy feedback updates the button on success and restores the label later", async () => {
+  const button = { textContent: "Copy safe prompt" };
+  const scheduled = [];
+  const copied = await copyPromptToClipboard({
+    text: "sanitized prompt",
+    clipboard: {
+      async writeText(text) {
+        assert.equal(text, "sanitized prompt");
+      }
+    },
+    button,
+    setTimeoutFn(callback) {
+      scheduled.push(callback);
+    }
+  });
+
+  assert.equal(copied, true);
+  assert.equal(button.textContent, "Copied");
+  assert.equal(scheduled.length, 1);
+  scheduled[0]();
+  assert.equal(button.textContent, "Copy safe prompt");
+});
+
+test("clipboard copy helper swallows rejected writes without changing the button state", async () => {
+  const button = { textContent: "Copy safe prompt" };
+  const copied = await copyPromptToClipboard({
+    text: "sanitized prompt",
+    clipboard: {
+      async writeText() {
+        throw new Error("permission denied");
+      }
+    },
+    button,
+    setTimeoutFn() {
+      assert.fail("copy feedback should not schedule on failure");
+    }
+  });
+
+  assert.equal(copied, false);
+  assert.equal(button.textContent, "Copy safe prompt");
+});
+
+test("clipboard copy helper returns false when the Clipboard API is unavailable", async () => {
+  const button = { textContent: "Copy safe prompt" };
+  const copied = await copyPromptToClipboard({
+    text: "sanitized prompt",
+    clipboard: {},
+    button,
+    setTimeoutFn() {
+      assert.fail("copy feedback should not schedule when Clipboard API is unavailable");
+    }
+  });
+
+  assert.equal(copied, false);
+  assert.equal(button.textContent, "Copy safe prompt");
 });
 
 test("byte formatting remains compact for the upload interface", () => {

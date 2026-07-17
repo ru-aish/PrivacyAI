@@ -1,5 +1,6 @@
 import {
   buildImagePayload,
+  copyPromptToClipboard,
   formatBytes,
   normalizeImagePreviewResponse,
   validateImageFile
@@ -28,6 +29,7 @@ const elements = {
   sanitizeOnlyButton: byId("sanitizeOnlyButton"),
   testConnectionButton: byId("testConnectionButton"),
   sanitizeImageButton: byId("sanitizeImageButton"),
+  copyPromptButton: byId("copyPromptButton"),
   textResults: byId("textResults"),
   imageResults: byId("imageResults"),
   errorSection: byId("errorSection"),
@@ -46,7 +48,6 @@ elements.testConnectionButton.addEventListener("click", testConnection);
 elements.sanitizeImageButton.addEventListener("click", sanitizeImage);
 elements.imageFile.addEventListener("change", event => selectImage(event.target.files?.[0]));
 elements.clearImageButton.addEventListener("click", clearImage);
-elements.copyPromptButton = byId("copyPromptButton");
 elements.copyPromptButton.addEventListener("click", copySafePrompt);
 
 elements.dropZone.addEventListener("keydown", event => {
@@ -267,10 +268,11 @@ function statusPill(text, changed) {
 async function copySafePrompt() {
   const prompt = byId("sanitizedImagePrompt").textContent;
   if (!prompt) return;
-  await navigator.clipboard.writeText(prompt);
-  const original = elements.copyPromptButton.textContent;
-  elements.copyPromptButton.textContent = "Copied";
-  setTimeout(() => { elements.copyPromptButton.textContent = original; }, 1200);
+  await copyPromptToClipboard({
+    text: prompt,
+    clipboard: navigator.clipboard,
+    button: elements.copyPromptButton
+  });
 }
 
 function showError(message) {
