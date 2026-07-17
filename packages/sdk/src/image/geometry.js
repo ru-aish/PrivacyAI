@@ -11,12 +11,17 @@ export function unionBoxes(boxes) {
   if (!Array.isArray(boxes) || boxes.length === 0) {
     throw new TypeError("PrivacyAI requires at least one image region box.");
   }
-  return [
-    Math.min(...boxes.map(box => box[0])),
-    Math.min(...boxes.map(box => box[1])),
-    Math.max(...boxes.map(box => box[2])),
-    Math.max(...boxes.map(box => box[3]))
-  ];
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const box of boxes) {
+    if (box[0] < x0) x0 = box[0];
+    if (box[1] < y0) y0 = box[1];
+    if (box[2] > x1) x1 = box[2];
+    if (box[3] > y1) y1 = box[3];
+  }
+  return [x0, y0, x1, y1];
 }
 
 export function expandBox(box, horizontal, vertical) {

@@ -59,6 +59,27 @@ async function post(base, pathname, payload) {
   return { response, body: await response.json() };
 }
 
+function createMockResponse() {
+  const state = {
+    statusCode: 0,
+    headers: {},
+    body: ""
+  };
+  return {
+    writableEnded: false,
+    destroyed: false,
+    writeHead(statusCode, headers) {
+      state.statusCode = statusCode;
+      state.headers = headers;
+    },
+    end(body) {
+      state.body = String(body || "");
+      this.writableEnded = true;
+    },
+    state
+  };
+}
+
 test("image preview returns the same mapped prompt and sanitized image that would cross the boundary", async t => {
   const base = await withServer(t, {
     async sanitize(imageUrl) {
@@ -176,6 +197,27 @@ test("unexpected sanitizer failures stay server-side and use a stable error shap
   assert.equal(body.status, "error");
   assert.equal(body.code, "INTERNAL_ERROR");
   assert.equal(body.error, "PrivacyAI could not complete the local sanitization preview.");
+});
+
+test("malformed Host headers are turned into safe client errors instead of crashing the request handler", async t => {
+  const app = await createWebDemoServer({
+    services: services({
+      async sanitize() {
+        return { dataUrl: SAFE_IMAGE, sessionMapAdditions: {}, changed: false };
+      }
+    })
+  });
+  t.after(() => app.close());
+  const handler = app.server.listeners("request")[0];
+  const req = { method: "GET", url: "/", headers: { host: "bad host" } };
+  const res = createMockResponse();
+
+  await handler(req, res);
+  assert.equal(res.state.statusCode, 400);
+  const body = JSON.parse(res.state.body);
+  assert.equal(body.status, "error");
+  assert.equal(body.code, "INVALID_URL");
+  assert.equal(body.error, "The request URL is invalid.");
 });
 
 test("playground status and static UI expose Ollama image privacy mode", async t => {

@@ -9,6 +9,7 @@ import {
   decodeImageDataUrl,
   locatePrivateRegions
 } from "../src/image/index.js";
+import { unionBoxes } from "../src/image/geometry.js";
 
 const PRIVATE = "alice.private@example.test";
 const PLACEHOLDER = "[EMAIL_1]";
@@ -306,6 +307,35 @@ test("Tesseract engine owns and terminates both lazy workers", async () => {
   assert.equal(terminated, 2);
 });
 
+test("Tesseract engine close tolerates worker initialization and termination failures", async () => {
+  const input = Buffer.from((await imageDataUrl()).split(",", 2)[1], "base64");
+
+  const initializing = createTesseractOcrEngine({
+    createWorker: async () => {
+      throw new Error("worker init failed");
+    }
+  });
+  await assert.rejects(initializing.recognize(input), /worker init failed/);
+  await assert.doesNotReject(initializing.close());
+
+  let terminateCalls = 0;
+  const terminating = createTesseractOcrEngine({
+    createWorker: async () => ({
+      async setParameters() {},
+      async recognize() {
+        return { data: { blocks: [] } };
+      },
+      async terminate() {
+        terminateCalls += 1;
+        throw new Error("worker terminate failed");
+      }
+    })
+  });
+  await terminating.recognize(input);
+  await assert.doesNotReject(terminating.close());
+  assert.equal(terminateCalls, 2);
+});
+
 test("Tesseract word alignment tolerates OCR case drift", async () => {
   const worker = () => ({
     async setParameters() {},
@@ -346,6 +376,11 @@ test("Tesseract word alignment tolerates OCR case drift", async () => {
   assert.equal(line.words[0].start, 6);
   assert.equal(line.words[0].end, 6 + PRIVATE.length);
   await engine.close();
+});
+
+test("unionBoxes handles large arrays without spread argument limits", () => {
+  const boxes = Array.from({ length: 70000 }, (_, index) => [index, index + 1, index + 2, index + 3]);
+  assert.deepEqual(unionBoxes(boxes), [0, 1, 70001, 70002]);
 });
 
 test("real CPU OCR removes private text from a generated developer screenshot", { timeout: 60_000 }, async () => {

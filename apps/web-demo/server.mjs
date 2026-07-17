@@ -77,8 +77,8 @@ export async function createWebDemoServer(options = {}) {
   }
 
   const server = http.createServer(async (req, res) => {
-    const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     try {
+      const url = parseRequestUrl(req);
       if (url.pathname.startsWith("/api/")) {
         await handleApi(req, res, url, services, maxBodyBytes);
         return;
@@ -211,6 +211,14 @@ async function handleApi(req, res, url, services, maxBodyBytes) {
   }
 
   return sendJson(res, 404, { status: "error", code: "NOT_FOUND", error: "Not found." });
+}
+
+function parseRequestUrl(req) {
+  try {
+    return new URL(req.url || "/", `http://${req.headers?.host || "localhost"}`);
+  } catch {
+    throw requestError("INVALID_URL", "The request URL is invalid.");
+  }
 }
 
 async function sanitizePrompt(message, services, sessionMap = {}) {
