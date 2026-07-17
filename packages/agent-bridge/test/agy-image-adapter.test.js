@@ -113,6 +113,23 @@ test("AGY image adapter lazily loads and closes its owned SDK engine once", asyn
   );
 });
 
+test("AGY image adapter shutdown tolerates a rejected lazy initialization", async () => {
+  const initializationFailure = new Error("image initialization failed");
+  const adapter = createAgyImageSanitizer({
+    async loadImageModule() {
+      await Promise.resolve();
+      throw initializationFailure;
+    }
+  });
+
+  await assert.rejects(
+    adapter.sanitize(SOURCE, { sanitizer, sessionMap: {} }),
+    error => error === initializationFailure
+  );
+  await assert.doesNotReject(adapter.close());
+  await assert.doesNotReject(adapter.close());
+});
+
 test("AGY image adapter does not close an injected engine", async () => {
   let closes = 0;
   const adapter = createAgyImageSanitizer({

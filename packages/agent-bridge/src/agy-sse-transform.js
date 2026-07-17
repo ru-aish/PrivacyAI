@@ -122,7 +122,7 @@ export class AgySseRestorer {
         this.textStreams.set(key, stream);
       }
       part.text = stream.restorer.push(part.text);
-      stream.template = structuredClone(event);
+      stream.template = event;
       return;
     }
 
@@ -164,25 +164,24 @@ export class AgySseRestorer {
 }
 
 function createTextFlushEvent(template, candidateIndex, partIndex, text) {
-  const sourceCandidate = template.response?.candidates?.[candidateIndex];
-  const sourceContent = sourceCandidate?.content;
-  const sourcePart = sourceContent?.parts?.[partIndex];
-  if (!sourceCandidate || !sourceContent || !sourcePart || typeof sourcePart.text !== "string") {
+  const event = structuredClone(template);
+  const candidate = event.response?.candidates?.[candidateIndex];
+  const content = candidate?.content;
+  const part = content?.parts?.[partIndex];
+  if (!candidate || !content || !part || typeof part.text !== "string") {
     throw agySseError(
       "PRIVACYAI_AGY_INVALID_SSE",
       "PrivacyAI could not flush an AGY text stream safely."
     );
   }
 
-  const event = structuredClone(template);
-  const candidate = structuredClone(sourceCandidate);
   candidate.content = {
-    ...structuredClone(sourceContent),
-    parts: [{ ...structuredClone(sourcePart), text }]
+    ...content,
+    parts: [{ ...part, text }]
   };
   delete candidate.finishReason;
   event.response = {
-    ...structuredClone(template.response),
+    ...event.response,
     candidates: [candidate]
   };
   return event;

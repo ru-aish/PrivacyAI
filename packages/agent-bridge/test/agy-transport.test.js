@@ -22,6 +22,8 @@ import { SessionVault } from "../src/session-vault.js";
 
 const PRIVATE_EMAIL = "alice.private@example.test";
 const PRIVATE_KEY = "agy-local-secret-key";
+const MODEL_SSE_PATH = "/v1internal:streamGenerateContent?alt=sse";
+const MODEL_SSE_PATH_WITH_EXTRA_QUERY = `${MODEL_SSE_PATH}&client=agy-test`;
 const SESSION_MAP = {
   "[EMAIL_1]": PRIVATE_EMAIL,
   "[API_KEY_1]": PRIVATE_KEY,
@@ -485,6 +487,7 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
     inlineData: { mimeType: "image/webp", data: "CCCC" }
   }];
   const observed = [];
+  const observedPaths = [];
   const imageCalls = [];
   const runtime = await startAgyTransportRuntime({
     sanitizer: deterministicSanitizer,
@@ -508,6 +511,7 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
     requestUpstream: async request => {
       const parsed = JSON.parse(request.body.toString("utf8"));
       observed.push(parsed);
+      observedPaths.push(request.path);
       assert.equal(JSON.stringify(parsed).includes(PRIVATE_EMAIL), false);
       assert.match(parsed.request.contents[0].parts[0].text, /\[EMAIL_1\]/);
       assert.deepEqual(parsed.request.contents[0].parts[1].inlineData, {
@@ -552,9 +556,10 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   assert.equal(Object.hasOwn(runtime.env, "HTTP_PROXY"), false);
   assert.match(runtime.env.HTTPS_PROXY, /^http:\/\/privacyai:/);
 
-  const response = await proxyHttpRequest(runtime, requestBody);
+  const response = await proxyHttpRequest(runtime, requestBody, MODEL_SSE_PATH_WITH_EXTRA_QUERY);
   assert.match(response.statusLine, /^HTTP\/1\.1 200/);
   assert.equal(observed.length, 1);
+  assert.equal(observedPaths[0], MODEL_SSE_PATH_WITH_EXTRA_QUERY);
   const events = parseEvents(response.body);
   const text = events
     .flatMap(event => event.response?.candidates || [])
@@ -578,6 +583,16 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
     observed[0].request.tools[0].functionDeclarations[0].name,
     observed[1].request.tools[0].functionDeclarations[0].name
   );
+
+  const unsupported = await proxyHttpRequest(
+    runtime,
+    requestBody,
+    "/v1internal:streamGenerateContent?alt=json"
+  );
+  assert.match(unsupported.statusLine, /^HTTP\/1\.1 502/);
+  assert.match(unsupported.body, /PRIVACYAI_AGY_UNSUPPORTED_MODEL_ROUTE/);
+  assert.equal(observed.length, 2);
+  assert.equal(imageCalls.length, 4);
 });
 
 test("AGY opaque forwarding cancels upstream work after downstream disconnect", { timeout: 5000 }, async t => {
@@ -723,6 +738,26 @@ test("AGY SSE restoration handles placeholders split across text events", () => 
   assert.equal(text, `contact ${PRIVATE_EMAIL} now`);
 });
 
+test("AGY SSE avoids cloning stream templates for every text chunk", () => {
+  const clone = globalThis.structuredClone;
+  let cloneCount = 0;
+  globalThis.structuredClone = value => {
+    cloneCount += 1;
+    return clone(value);
+  };
+
+  try {
+    const restorer = new AgySseRestorer({ "[EMAIL_1]": PRIVATE_EMAIL });
+    restorer.write(Buffer.from(sseEvent(textEvent("contact [EMAIL_"))));
+    restorer.write(Buffer.from(sseEvent(textEvent("1] now"))));
+    restorer.write(Buffer.from(sseEvent(finishEvent())));
+    restorer.end();
+    assert.ok(cloneCount <= 4, `expected at most four structured clones, received ${cloneCount}`);
+  } finally {
+    globalThis.structuredClone = clone;
+  }
+});
+
 test("AGY SSE restoration restores native function names, argument keys, and values", () => {
   const toolAlias = "privacyai_tool_46e0293a1cab";
   const restorer = new AgySseRestorer({
@@ -811,13 +846,13 @@ async function connectProxyTls(runtime) {
   return secureSocket;
 }
 
-async function proxyHttpRequest(runtime, body) {
+async function proxyHttpRequest(runtime, body, path = MODEL_SSE_PATH) {
   const secureSocket = await connectProxyTls(runtime);
 
   const payload = Buffer.from(JSON.stringify(body));
   secureSocket.write(Buffer.concat([
     Buffer.from(
-      "POST /v1internal:streamGenerateContent?alt=sse HTTP/1.1\r\n" +
+      `POST ${path} HTTP/1.1\r\n` +
       `Host: ${runtime.modelHost}\r\n` +
       "Authorization: Bearer fixture-token\r\n" +
       "Content-Type: application/json\r\n" +

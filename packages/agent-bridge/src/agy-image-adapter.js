@@ -68,7 +68,16 @@ export function createAgyImageSanitizer(options = {}) {
       if (closed) return;
       closed = true;
       if (!ownsEngine) return;
-      const resolved = engine || (enginePromise ? await enginePromise : null);
+
+      let resolved = engine;
+      if (!resolved && enginePromise) {
+        try {
+          resolved = await enginePromise;
+        } catch {
+          // Initialization already failed at the sanitize boundary. Shutdown
+          // remains best-effort so the rest of the runtime can still clean up.
+        }
+      }
       if (typeof resolved?.close === "function") await resolved.close();
     }
   };

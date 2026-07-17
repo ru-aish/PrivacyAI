@@ -345,7 +345,10 @@ async function copyOptionalPrivateFile(source, target) {
 }
 
 function normalizeOcr(value) {
-  return String(value || "").toLowerCase().replace(/\s+/g, "");
+  return String(value || "")
+    .normalize("NFKC")
+    .toLocaleLowerCase("und")
+    .replace(/[^\p{L}\p{N}]/gu, "");
 }
 
 function safeTail(value, max = 6000) {

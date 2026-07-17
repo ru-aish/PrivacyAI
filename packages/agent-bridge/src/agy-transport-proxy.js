@@ -112,8 +112,15 @@ async function handleInterceptedRequest(request, response, context) {
   }
 
   const url = new URL(request.url || "/", `https://${context.modelHost}`);
-  if (!isModelRoute(request.method, url)) {
+  if (!isModelPath(url)) {
     return proxyOpaqueRequest(request, response, context, url);
+  }
+  if (!isSupportedModelRoute(request.method, url)) {
+    request.resume();
+    throw proxyError(
+      "PRIVACYAI_AGY_UNSUPPORTED_MODEL_ROUTE",
+      "PrivacyAI supports only POST SSE requests on the AGY generation endpoint."
+    );
   }
 
   const lifecycle = downstreamLifecycle(request, response);
@@ -451,11 +458,13 @@ function normalizeHostHeader(value) {
   return String(value || "").toLowerCase().replace(/:443$/, "");
 }
 
-function isModelRoute(method, url) {
-  return method === "POST" &&
-    url.pathname === "/v1internal:streamGenerateContent" &&
-    url.searchParams.get("alt") === "sse" &&
-    [...url.searchParams.keys()].every(key => key === "alt");
+function isModelPath(url) {
+  return url.pathname === "/v1internal:streamGenerateContent";
+}
+
+function isSupportedModelRoute(method, url) {
+  const altValues = url.searchParams.getAll("alt");
+  return method === "POST" && altValues.length === 1 && altValues[0] === "sse";
 }
 
 function isTextualContentType(value) {
