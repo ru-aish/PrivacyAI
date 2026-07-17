@@ -318,7 +318,7 @@ class SqliteContextVerificationStore {
     this.assertOpen();
     const now = Date.now();
     const mutationId = requiredHash(record.mutationId, "mutationId");
-    this.statements.stageFileMutation.run(mutationId, requiredHash(record.worktreeId, "worktreeId"), requiredHash(record.pathHash, "pathHash"), requiredHash(record.expectedContentHash, "expectedContentHash"), requiredHash(record.nextContentHash, "nextContentHash"), record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : null, opaque(record.opaqueReference), now, now);
+    this.statements.stageFileMutation.run(mutationId, requiredHash(record.worktreeId, "worktreeId"), requiredHash(record.pathHash, "pathHash"), requiredHash(record.expectedContentHash, "expectedContentHash"), requiredHash(record.nextContentHash, "nextContentHash"), record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : null, requiredOpaqueReference(record.opaqueReference, "opaqueReference"), now, now);
     return this.getFileMutation(mutationId);
   }
 
@@ -332,10 +332,11 @@ class SqliteContextVerificationStore {
 
   commitFileMutation(mutationId, actualContentHash, committedReference) {
     this.assertOpen();
+    actualContentHash = requiredHash(actualContentHash, "actualContentHash");
     const row = this.statements.getFileMutation.get(mutationId);
     if (!row || row.status !== "pending") return { status: row?.status || "missing" };
     if (row.next_content_hash !== actualContentHash) return { status: "mismatch", expectedContentHash: row.next_content_hash };
-    this.statements.commitFileMutation.run(opaque(committedReference), Date.now(), mutationId);
+    this.statements.commitFileMutation.run(committedReference == null ? null : requiredOpaqueReference(committedReference, "committedReference"), Date.now(), mutationId);
     return this.getFileMutation(mutationId);
   }
 
@@ -482,26 +483,133 @@ class MemoryContextVerificationStore {
     this.prune();
   }
 
-  registerRepository(record) { this.repositories.set(requiredHash(record.repositoryId, "repositoryId"), { repositoryId: record.repositoryId, rootRef: opaque(record.rootRef), lastUsedAt: Date.now() }); this.prune(); }
-  getRepository(repositoryId) { const value = this.repositories.get(repositoryId); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
-  registerWorktree(record) { this.worktrees.set(requiredHash(record.worktreeId, "worktreeId"), { ...structuredClone(record), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() }); this.prune(); }
-  getWorktree(worktreeId) { const value = this.worktrees.get(worktreeId); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
-  putContentIdentity(record) { const contentHash = requiredHash(record.contentHash, "contentHash"); this.contentIdentities.set(contentHash, { contentHash, byteLength: optionalInteger(record.byteLength), kind: opaque(record.kind), lastUsedAt: Date.now() }); if (record.gitBlobHash) this.putGitBlobAlias({ ...record, contentHash }); this.prune(); return { contentHash }; }
-  putGitBlobAlias(record) { this.gitBlobAliases.set(requiredHash(record.gitBlobHash, "gitBlobHash"), { ...structuredClone(record), lastUsedAt: Date.now() }); this.prune(); }
-  getContentIdentity(contentHash) { const value = this.contentIdentities.get(contentHash); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
-  findContentByGitBlob(gitBlobHash) { const alias = this.gitBlobAliases.get(gitBlobHash); if (!alias || this.isExpired(alias)) return undefined; alias.lastUsedAt = Date.now(); return this.getContentIdentity(alias.contentHash); }
-  putFileMetadata(record) { const key = `${requiredHash(record.worktreeId, "worktreeId")}\0${requiredHash(record.pathHash, "pathHash")}`; this.fileMetadata.set(key, { ...structuredClone(record), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() }); if (record.versionHash) this.fileVersions.set(`${key}\0${record.versionHash}`, { ...structuredClone(record), versionRef: opaque(record.versionRef), lastUsedAt: Date.now() }); this.prune(); }
-  getFileMetadata(worktreeId, pathHash) { const value = this.fileMetadata.get(`${worktreeId}\0${pathHash}`); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
-  getFileVersion(worktreeId, pathHash, versionHash) { const value = this.fileVersions.get(`${worktreeId}\0${pathHash}\0${versionHash}`); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
-  putManifest(record) { const entries = normalizeManifestEntries(record.entries); const manifestHash = record.manifestHash || verificationFingerprint(entries); this.manifests.set(manifestHash, { manifestHash, worktreeId: record.worktreeId, metadataRef: opaque(record.metadataRef), entries, lastUsedAt: Date.now() }); this.prune(); return { manifestHash, entries }; }
-  getManifest(manifestHash) { const value = this.manifests.get(manifestHash); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
-  putPrivacyPlan(record) { const spans = normalizePrivacySpans(record.spans); const editPlan = normalizeEditPlan(record.editPlan); const planHash = record.planHash || verificationFingerprint({ spans, editPlan }); this.privacyPlans.set(`${record.contentHash}\0${record.policyFingerprint}`, { planHash, contentHash: record.contentHash, policyFingerprint: record.policyFingerprint, spans, editPlan, lastUsedAt: Date.now() }); this.prune(); return { planHash, spans, editPlan }; }
-  getPrivacyPlan(contentHash, policyFingerprint) { const value = this.privacyPlans.get(`${contentHash}\0${policyFingerprint}`); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
-  stageFileMutation(record) { const value = { ...structuredClone(record), opaqueReference: opaque(record.opaqueReference), status: "pending", lastUsedAt: Date.now() }; this.fileMutations.set(requiredHash(record.mutationId, "mutationId"), value); this.prune(); return structuredClone(value); }
-  getFileMutation(mutationId) { const value = this.fileMutations.get(mutationId); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
-  commitFileMutation(mutationId, actualContentHash, committedReference) { const value = this.fileMutations.get(mutationId); if (!value || value.status !== "pending") return { status: value?.status || "missing" }; if (value.nextContentHash !== actualContentHash) return { status: "mismatch", expectedContentHash: value.nextContentHash }; value.status = "committed"; value.committedReference = opaque(committedReference); return this.getFileMutation(mutationId); }
-  rollbackFileMutation(mutationId) { const value = this.fileMutations.get(mutationId); if (value?.status === "pending") value.status = "rolled_back"; return this.getFileMutation(mutationId); }
-  isExpired(value) { return Number(value.lastUsedAt || 0) < Date.now() - this.maxAgeMs; }
+  registerRepository(record) {
+    const repositoryId = requiredHash(record.repositoryId, "repositoryId");
+    const value = { repositoryId, rootRef: opaque(record.rootRef), lastUsedAt: Date.now() };
+    this.repositories.set(repositoryId, value);
+    this.prune();
+    return withoutLastUsed(value);
+  }
+
+  getRepository(repositoryId) {
+    return this.getFresh(this.repositories, repositoryId, withoutLastUsed);
+  }
+
+  registerWorktree(record) {
+    const worktreeId = requiredHash(record.worktreeId, "worktreeId");
+    const value = { worktreeId, repositoryId: requiredHash(record.repositoryId, "repositoryId"), pathHash: requiredHash(record.pathHash, "pathHash"), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() };
+    this.worktrees.set(worktreeId, value);
+    this.prune();
+    return withoutLastUsed(value);
+  }
+
+  getWorktree(worktreeId) {
+    return this.getFresh(this.worktrees, worktreeId, withoutLastUsed);
+  }
+
+  putContentIdentity(record) {
+    const contentHash = requiredHash(record.contentHash, "contentHash");
+    this.contentIdentities.set(contentHash, { contentHash, byteLength: optionalInteger(record.byteLength), kind: opaque(record.kind), lastUsedAt: Date.now() });
+    if (record.gitBlobHash) this.putGitBlobAlias({ gitBlobHash: record.gitBlobHash, contentHash, repositoryId: record.repositoryId });
+    this.prune();
+    return { contentHash };
+  }
+
+  putGitBlobAlias(record) {
+    const gitBlobHash = requiredHash(record.gitBlobHash, "gitBlobHash");
+    this.gitBlobAliases.set(gitBlobHash, { gitBlobHash, contentHash: requiredHash(record.contentHash, "contentHash"), repositoryId: record.repositoryId ? requiredHash(record.repositoryId, "repositoryId") : null, lastUsedAt: Date.now() });
+    this.prune();
+  }
+
+  getContentIdentity(contentHash) {
+    return this.getFresh(this.contentIdentities, contentHash, value => ({ contentHash: value.contentHash, byteLength: value.byteLength, kind: value.kind }));
+  }
+
+  findContentByGitBlob(gitBlobHash) {
+    const alias = this.getFresh(this.gitBlobAliases, gitBlobHash);
+    return alias ? this.getContentIdentity(alias.contentHash) : undefined;
+  }
+  putFileMetadata(record) {
+    const worktreeId = requiredHash(record.worktreeId, "worktreeId");
+    const pathHash = requiredHash(record.pathHash, "pathHash");
+    const contentHash = requiredHash(record.contentHash, "contentHash");
+    const key = compoundKey(worktreeId, pathHash);
+    this.fileMetadata.set(key, { worktreeId, pathHash, contentHash, byteLength: optionalInteger(record.byteLength), mode: optionalInteger(record.mode), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() });
+    if (record.versionHash) this.fileVersions.set(compoundKey(key, requiredHash(record.versionHash, "versionHash")), { worktreeId, pathHash, versionHash: record.versionHash, contentHash, gitBlobHash: record.gitBlobHash ? requiredHash(record.gitBlobHash, "gitBlobHash") : null, versionRef: opaque(record.versionRef), lastUsedAt: Date.now() });
+    this.prune();
+  }
+
+  getFileMetadata(worktreeId, pathHash) {
+    return this.getFresh(this.fileMetadata, compoundKey(worktreeId, pathHash), withoutLastUsed);
+  }
+
+  getFileVersion(worktreeId, pathHash, versionHash) {
+    return this.getFresh(this.fileVersions, compoundKey(compoundKey(worktreeId, pathHash), versionHash), withoutLastUsed);
+  }
+
+  putManifest(record) {
+    const entries = normalizeManifestEntries(record.entries);
+    const manifestHash = record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : verificationFingerprint(entries);
+    this.manifests.set(manifestHash, { manifestHash, worktreeId: requiredHash(record.worktreeId, "worktreeId"), metadataRef: opaque(record.metadataRef), entries, lastUsedAt: Date.now() });
+    this.prune();
+    return { manifestHash, entries };
+  }
+
+  getManifest(manifestHash) {
+    return this.getFresh(this.manifests, manifestHash, withoutLastUsed);
+  }
+  putPrivacyPlan(record) {
+    const spans = normalizePrivacySpans(record.spans);
+    const editPlan = normalizeEditPlan(record.editPlan);
+    const contentHash = requiredHash(record.contentHash, "contentHash");
+    const policyFingerprint = requiredHash(record.policyFingerprint, "policyFingerprint");
+    const planHash = record.planHash ? requiredHash(record.planHash, "planHash") : verificationFingerprint({ spans, editPlan });
+    this.privacyPlans.set(compoundKey(contentHash, policyFingerprint), { planHash, contentHash, policyFingerprint, spans, editPlan, lastUsedAt: Date.now() });
+    this.prune();
+    return { planHash, spans, editPlan };
+  }
+
+  getPrivacyPlan(contentHash, policyFingerprint) {
+    return this.getFresh(this.privacyPlans, compoundKey(contentHash, policyFingerprint), withoutLastUsed);
+  }
+
+  stageFileMutation(record) {
+    const mutationId = requiredHash(record.mutationId, "mutationId");
+    const value = { mutationId, worktreeId: requiredHash(record.worktreeId, "worktreeId"), pathHash: requiredHash(record.pathHash, "pathHash"), expectedContentHash: requiredHash(record.expectedContentHash, "expectedContentHash"), nextContentHash: requiredHash(record.nextContentHash, "nextContentHash"), manifestHash: record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : null, opaqueReference: requiredOpaqueReference(record.opaqueReference, "opaqueReference"), committedReference: null, status: "pending", lastUsedAt: Date.now() };
+    this.fileMutations.set(mutationId, value);
+    this.prune();
+    return withoutLastUsed(value);
+  }
+
+  getFileMutation(mutationId) {
+    return this.getFresh(this.fileMutations, mutationId, withoutLastUsed);
+  }
+
+  commitFileMutation(mutationId, actualContentHash, committedReference) {
+    const value = this.fileMutations.get(mutationId);
+    if (!value || value.status !== "pending") return { status: value?.status || "missing" };
+    if (value.nextContentHash !== requiredHash(actualContentHash, "actualContentHash")) return { status: "mismatch", expectedContentHash: value.nextContentHash };
+    value.status = "committed";
+    value.committedReference = committedReference == null ? null : requiredOpaqueReference(committedReference, "committedReference");
+    return this.getFileMutation(mutationId);
+  }
+
+  rollbackFileMutation(mutationId) {
+    const value = this.fileMutations.get(mutationId);
+    if (value?.status === "pending") value.status = "rolled_back";
+    return this.getFileMutation(mutationId);
+  }
+
+  getFresh(map, key, project = value => structuredClone(value)) {
+    const value = map.get(key);
+    if (!value || this.isExpired(value)) return undefined;
+    value.lastUsedAt = Date.now();
+    return structuredClone(project(value));
+  }
+
+  isExpired(value) {
+    return Number(value.lastUsedAt || 0) < Date.now() - this.maxAgeMs;
+  }
 
   prune() {
     const cutoff = Date.now() - this.maxAgeMs;
@@ -520,16 +628,32 @@ class MemoryContextVerificationStore {
       this.deleteVerification(cacheKey);
     });
     trimMapByTimestamp(this.threads, this.maxThreads, "updatedAt");
-    for (const map of [this.repositories, this.worktrees, this.contentIdentities, this.gitBlobAliases, this.fileMetadata, this.fileVersions, this.manifests, this.privacyPlans, this.fileMutations]) {
+    for (const map of [this.repositories, this.contentIdentities, this.manifests, this.privacyPlans, this.fileMutations]) {
       for (const [key, value] of map) if (this.isExpired(value)) map.delete(key);
       trimMapByTimestamp(map, this.maxLedgerItems, "lastUsedAt");
     }
+    this.cascadeLedgerChildren();
   }
 
   deleteVerification(cacheKey) {
     this.verifications.delete(cacheKey);
     for (const [itemKey, item] of this.threadItems) {
       if (item.cacheKey === cacheKey) this.threadItems.delete(itemKey);
+    }
+  }
+
+  cascadeLedgerChildren() {
+    for (const [key, worktree] of this.worktrees) {
+      if (!this.repositories.has(worktree.repositoryId)) this.worktrees.delete(key);
+    }
+    for (const [key, alias] of this.gitBlobAliases) {
+      if (!this.contentIdentities.has(alias.contentHash) || (alias.repositoryId && !this.repositories.has(alias.repositoryId))) this.gitBlobAliases.delete(key);
+    }
+    for (const [key, metadata] of this.fileMetadata) {
+      if (!this.worktrees.has(metadata.worktreeId) || !this.contentIdentities.has(metadata.contentHash)) this.fileMetadata.delete(key);
+    }
+    for (const [key, version] of this.fileVersions) {
+      if (!this.fileMetadata.has(compoundKey(version.worktreeId, version.pathHash)) || !this.contentIdentities.has(version.contentHash)) this.fileVersions.delete(key);
     }
   }
 
@@ -650,10 +774,24 @@ function initializeSchema(database) {
     CREATE INDEX IF NOT EXISTS ledger_manifest_entries_lru_idx ON ledger_manifest_entries(last_used_at);
     CREATE TABLE IF NOT EXISTS ledger_privacy_plans (
       plan_hash TEXT PRIMARY KEY, content_hash TEXT NOT NULL REFERENCES ledger_content_identities(content_hash) ON DELETE CASCADE,
-      policy_fingerprint TEXT NOT NULL, spans_json TEXT NOT NULL, edit_plan_json TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
+      policy_fingerprint TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS ledger_privacy_plans_lookup_idx ON ledger_privacy_plans(content_hash, policy_fingerprint);
     CREATE INDEX IF NOT EXISTS ledger_privacy_plans_lru_idx ON ledger_privacy_plans(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_privacy_plan_spans (
+      plan_hash TEXT NOT NULL REFERENCES ledger_privacy_plans(plan_hash) ON DELETE CASCADE,
+      start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL,
+      classification TEXT NOT NULL, opaque_reference TEXT NOT NULL,
+      PRIMARY KEY(plan_hash, start_offset, end_offset, classification, opaque_reference),
+      CHECK(start_offset <= end_offset)
+    );
+    CREATE TABLE IF NOT EXISTS ledger_privacy_plan_edits (
+      plan_hash TEXT NOT NULL REFERENCES ledger_privacy_plans(plan_hash) ON DELETE CASCADE,
+      start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL,
+      classification TEXT NOT NULL, opaque_reference TEXT NOT NULL,
+      PRIMARY KEY(plan_hash, start_offset, end_offset, classification, opaque_reference),
+      CHECK(start_offset <= end_offset)
+    );
     CREATE TABLE IF NOT EXISTS ledger_file_mutations (
       mutation_id TEXT PRIMARY KEY, worktree_id TEXT NOT NULL REFERENCES ledger_worktrees(worktree_id) ON DELETE CASCADE, path_hash TEXT NOT NULL,
       expected_content_hash TEXT NOT NULL, next_content_hash TEXT NOT NULL, manifest_hash TEXT REFERENCES ledger_manifests(manifest_hash) ON DELETE SET NULL,
@@ -757,8 +895,14 @@ function prepareStatements(database) {
     getManifest: database.prepare("SELECT manifest_hash,worktree_id,metadata_ref,last_used_at FROM ledger_manifests WHERE manifest_hash=?"),
     getManifestEntries: database.prepare("SELECT path_hash,content_hash,git_blob_hash,mode FROM ledger_manifest_entries WHERE manifest_hash=? ORDER BY path_hash"),
     touchManifest: database.prepare("UPDATE ledger_manifests SET last_used_at=? WHERE manifest_hash=?"),
-    putPrivacyPlan: database.prepare("INSERT INTO ledger_privacy_plans(plan_hash,content_hash,policy_fingerprint,spans_json,edit_plan_json,created_at,last_used_at) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(plan_hash) DO UPDATE SET content_hash=excluded.content_hash,policy_fingerprint=excluded.policy_fingerprint,spans_json=excluded.spans_json,edit_plan_json=excluded.edit_plan_json,last_used_at=excluded.last_used_at"),
-    getPrivacyPlan: database.prepare("SELECT plan_hash,content_hash,policy_fingerprint,spans_json,edit_plan_json,last_used_at FROM ledger_privacy_plans WHERE content_hash=? AND policy_fingerprint=?"),
+    putPrivacyPlan: database.prepare("INSERT INTO ledger_privacy_plans(plan_hash,content_hash,policy_fingerprint,created_at,last_used_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT(plan_hash) DO UPDATE SET content_hash=excluded.content_hash,policy_fingerprint=excluded.policy_fingerprint,last_used_at=excluded.last_used_at"),
+    deletePrivacyPlanSpans: database.prepare("DELETE FROM ledger_privacy_plan_spans WHERE plan_hash=?"),
+    deletePrivacyPlanEdits: database.prepare("DELETE FROM ledger_privacy_plan_edits WHERE plan_hash=?"),
+    putPrivacyPlanSpan: database.prepare("INSERT INTO ledger_privacy_plan_spans(plan_hash,start_offset,end_offset,classification,opaque_reference) VALUES(?, ?, ?, ?, ?)"),
+    putPrivacyPlanEdit: database.prepare("INSERT INTO ledger_privacy_plan_edits(plan_hash,start_offset,end_offset,classification,opaque_reference) VALUES(?, ?, ?, ?, ?)"),
+    getPrivacyPlan: database.prepare("SELECT plan_hash,content_hash,policy_fingerprint,last_used_at FROM ledger_privacy_plans WHERE content_hash=? AND policy_fingerprint=?"),
+    getPrivacyPlanSpans: database.prepare("SELECT start_offset,end_offset,classification,opaque_reference FROM ledger_privacy_plan_spans WHERE plan_hash=? ORDER BY start_offset,end_offset,classification,opaque_reference"),
+    getPrivacyPlanEdits: database.prepare("SELECT start_offset,end_offset,classification,opaque_reference FROM ledger_privacy_plan_edits WHERE plan_hash=? ORDER BY start_offset,end_offset,classification,opaque_reference"),
     touchPrivacyPlan: database.prepare("UPDATE ledger_privacy_plans SET last_used_at=? WHERE plan_hash=?"),
     stageFileMutation: database.prepare("INSERT INTO ledger_file_mutations(mutation_id,worktree_id,path_hash,expected_content_hash,next_content_hash,manifest_hash,status,opaque_reference,created_at,last_used_at) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT(mutation_id) DO UPDATE SET worktree_id=excluded.worktree_id,path_hash=excluded.path_hash,expected_content_hash=excluded.expected_content_hash,next_content_hash=excluded.next_content_hash,manifest_hash=excluded.manifest_hash,status='pending',opaque_reference=excluded.opaque_reference,committed_reference=NULL,last_used_at=excluded.last_used_at"),
     getFileMutation: database.prepare("SELECT mutation_id,worktree_id,path_hash,expected_content_hash,next_content_hash,manifest_hash,status,opaque_reference,committed_reference,last_used_at FROM ledger_file_mutations WHERE mutation_id=?"),
@@ -820,6 +964,13 @@ function requiredHash(value, name) {
   return value;
 }
 
+function requiredOpaqueReference(value, name) {
+  if (typeof value !== "string" || !/^sha(?:256|512):[^\s]{1,256}$/.test(value)) {
+    throw new TypeError(`${name} must be an opaque hash reference.`);
+  }
+  return value;
+}
+
 function optionalInteger(value) {
   if (value == null) return null;
   const normalized = Number(value);
@@ -844,7 +995,7 @@ function normalizePrivacySpans(value) {
   return value.map(span => {
     const start = optionalInteger(span?.start), end = optionalInteger(span?.end);
     if (end < start || typeof span?.classification !== "string" || !span.classification) throw new TypeError("privacy spans require range and classification.");
-    return { start, end, classification: span.classification, reference: opaque(span.reference) };
+    return { start, end, classification: span.classification, reference: requiredOpaqueReference(span.reference, "span reference") };
   }).sort((a, b) => a.start - b.start || a.end - b.end || a.classification.localeCompare(b.classification));
 }
 
@@ -853,14 +1004,19 @@ function normalizeEditPlan(value) {
   return value.map(edit => {
     const start = optionalInteger(edit?.start), end = optionalInteger(edit?.end);
     if (end < start) throw new TypeError("privacy edit plan requires valid ranges.");
-    return { start, end, classification: opaque(edit.classification), reference: opaque(edit.reference) };
+    if (typeof edit?.classification !== "string" || !edit.classification) throw new TypeError("privacy edit plan requires a classification.");
+    return { start, end, classification: edit.classification, reference: requiredOpaqueReference(edit.reference, "edit reference") };
   }).sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
 function contentIdentityRow(row) { return { contentHash: row.content_hash, byteLength: row.byte_length, kind: row.kind }; }
 function fileMetadataRow(row) { return { worktreeId: row.worktree_id, pathHash: row.path_hash, contentHash: row.content_hash, byteLength: row.byte_length, mode: row.mode, metadataRef: row.metadata_ref }; }
 function manifestEntryRow(row) { return { pathHash: row.path_hash, contentHash: row.content_hash, gitBlobHash: row.git_blob_hash, mode: row.mode }; }
+function privacySpanRow(row) { return { start: row.start_offset, end: row.end_offset, classification: row.classification, reference: row.opaque_reference }; }
+function privacyEditRow(row) { return { start: row.start_offset, end: row.end_offset, classification: row.classification, reference: row.opaque_reference }; }
 function fileMutationRow(row) { return { mutationId: row.mutation_id, worktreeId: row.worktree_id, pathHash: row.path_hash, expectedContentHash: row.expected_content_hash, nextContentHash: row.next_content_hash, manifestHash: row.manifest_hash, status: row.status, opaqueReference: row.opaque_reference, committedReference: row.committed_reference }; }
+function compoundKey(...parts) { return parts.join("\0"); }
+function withoutLastUsed(value) { const { lastUsedAt: _lastUsedAt, ...record } = value; return record; }
 function writeError(action, cause) { return contextStoreError("PRIVACYAI_CONTEXT_DB_WRITE_FAILED", `PrivacyAI could not ${action} in its local cache ledger.`, cause); }
 
 function positiveInteger(value, fallback, name) {

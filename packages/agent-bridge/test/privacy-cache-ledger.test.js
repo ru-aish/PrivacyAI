@@ -58,6 +58,22 @@ test("manifests, privacy plans, and mutation state transitions are deterministic
   assert.equal(value.rollbackFileMutation(id("rollback")).status, "rolled_back");
 });
 
+test("privacy ranges are relational and accept opaque references only", async t => {
+  const value = await store(t); seed(value);
+  assert.throws(() => value.putPrivacyPlan({
+    contentHash: id("content"), policyFingerprint: id("policy"),
+    spans: [{ start: 0, end: 1, classification: "token", reference: "raw-private-value" }], editPlan: []
+  }), /opaque hash/);
+  value.putPrivacyPlan({
+    contentHash: id("content"), policyFingerprint: id("policy"),
+    spans: [{ start: 0, end: 1, classification: "token", reference: id("span-ref") }],
+    editPlan: [{ start: 0, end: 1, classification: "replace", reference: id("edit-ref") }]
+  });
+  const columns = value.database.prepare("PRAGMA table_info(ledger_privacy_plans)").all().map(column => column.name);
+  assert.equal(columns.includes("spans_json") || columns.includes("edit_plan_json"), false);
+  assert.deepEqual(value.getPrivacyPlan(id("content"), id("policy")).spans, [{ start: 0, end: 1, classification: "token", reference: id("span-ref") }]);
+});
+
 test("ledger pruning, failures, WAL opens, and memory fallback are bounded", async t => {
   const value = await store(t, { maxLedgerItems: 1, verificationMaxAgeMs: 5 }); seed(value);
   value.putContentIdentity({ contentHash: id("content-2"), kind: "text" });
@@ -67,6 +83,18 @@ test("ledger pruning, failures, WAL opens, and memory fallback are bounded", asy
   const memory = new MemoryContextVerificationStore({ maxLedgerItems: 1 }); seed(memory); memory.putContentIdentity({ contentHash: id("memory-2"), kind: "text" }); assert.equal(memory.contentIdentities.size, 1);
   const second = await openContextVerificationStore({ verificationDbPath: value.path }); t.after(() => second.close());
   second.registerRepository({ repositoryId: id("repo-2"), rootRef: id("root-2") });
+  assert.equal(second.database.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
+});
+
+test("pruning ownership roots cascades worktree children without incomplete manifests", async t => {
+  const value = await store(t, { maxLedgerItems: 1 });
+  seed(value);
+  value.putManifest({ worktreeId: id("worktree"), metadataRef: id("manifest"), entries: [{ pathHash: id("path"), contentHash: id("content") }] });
+  value.registerRepository({ repositoryId: id("repo-2"), rootRef: id("root-2") });
+  value.prune();
+  assert.equal(value.getWorktree(id("worktree")), undefined);
+  const manifests = value.database.prepare("SELECT COUNT(*) AS count FROM ledger_manifest_entries WHERE manifest_hash NOT IN (SELECT manifest_hash FROM ledger_manifests)").get();
+  assert.equal(manifests.count, 0);
 });
 
 test("SQLite thread pruning applies both LRU bounds and age", async t => {
@@ -84,7 +112,8 @@ test("SQLite thread pruning applies both LRU bounds and age", async t => {
 test("new ledger rows and database bytes never contain plaintext fixture secrets", async t => {
   const value = await store(t); seed(value);
   const secret = "ledger-secret-fixture-DO-NOT-PERSIST";
-  value.putPrivacyPlan({ contentHash: id("content"), policyFingerprint: id("policy"), spans: [{ start: 0, end: 1, classification: "token", reference: id("span-ref") }], editPlan: [{ start: 0, end: 1, reference: id("edit-ref") }] });
+  value.putPrivacyPlan({ contentHash: id("content"), policyFingerprint: id("policy"), spans: [{ start: 0, end: 1, classification: "token", reference: id("span-ref") }], editPlan: [{ start: 0, end: 1, classification: "replace", reference: id("edit-ref") }] });
+  assert.throws(() => value.stageFileMutation({ mutationId: id("rejected-secret"), worktreeId: id("worktree"), pathHash: id("path"), expectedContentHash: id("content"), nextContentHash: id("next"), opaqueReference: secret }), /opaque hash reference/);
   value.stageFileMutation({ mutationId: id("secret-mutation"), worktreeId: id("worktree"), pathHash: id("path"), expectedContentHash: id("content"), nextContentHash: id("next"), opaqueReference: id("pending-ref") });
   value.close();
   assert.equal((await readFile(value.path)).includes(Buffer.from(secret)), false);
