@@ -1693,7 +1693,7 @@ test("Codex leak verification ignores protocol booleans while protecting matchin
   assert.equal(result.body.input[0].content[0].text.includes("[PRIVATE_VALUE_1]"), true);
 });
 
-test("oversized Codex artifacts are sanitized in bounded batches and reconstructed", async () => {
+test("large Codex artifacts are safely chunked, batched, and reconstructed", async () => {
   const secret = "boundary.secret@example.test";
   const body = {
     model: "gpt-5.4-mini",
@@ -1717,6 +1717,7 @@ test("oversized Codex artifacts are sanitized in bounded batches and reconstruct
 
   assert.equal(batchSizes.length > 1, true);
   assert.equal(batchSizes.every(size => size <= 1400), true);
+  assert.equal(result.metrics.modelCallCount, batchSizes.length);
   assert.equal(result.body.instructions.includes(secret), false);
   assert.equal(result.body.instructions.includes("[EMAIL_1]"), true);
   assert.deepEqual(result.sessionMapAdditions, { "[EMAIL_1]": secret });

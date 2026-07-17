@@ -32,7 +32,12 @@ export async function sanitizeStructuredValue(value, options = {}) {
   const slots = [];
   const template = describeValue(value, slots);
   if (slots.length === 0) {
-    return { value, sessionMapAdditions: {}, changed: false };
+    return {
+      value,
+      sessionMapAdditions: {},
+      changed: false,
+      metrics: { modelCallCount: 0, batchCount: 0, unitCount: 0, packedChars: 0 }
+    };
   }
   if (typeof options.sanitizer !== "function") {
     throw new TypeError("Structured privacy sanitization requires a sanitizer function.");
@@ -45,6 +50,7 @@ export async function sanitizeStructuredValue(value, options = {}) {
   };
   const units = buildUnits(slots, maxContextChars, maxContextTokens, countTokens);
   const batches = buildBatches(units, maxContextChars, maxContextTokens);
+  let packedChars = 0;
 
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
     throwIfAborted(options.signal);
@@ -54,6 +60,7 @@ export async function sanitizeStructuredValue(value, options = {}) {
     if (rawBatchText.length > maxContextChars || inputTokens > maxContextTokens) {
       throw contextWindowError(maxContextChars, maxContextTokens);
     }
+    packedChars += rawBatchText.length;
     const knownSafeText = sanitizeKnownText(rawBatchText, state.completeMap);
     const shield = shieldKnownPlaceholders(knownSafeText, Object.keys(state.completeMap));
     const result = await options.sanitizer(shield.text, {
@@ -100,7 +107,13 @@ export async function sanitizeStructuredValue(value, options = {}) {
   return {
     value: sanitizedValue,
     sessionMapAdditions: state.additions,
-    changed: !valuesEqual(value, sanitizedValue)
+    changed: !valuesEqual(value, sanitizedValue),
+    metrics: {
+      modelCallCount: batches.length,
+      batchCount: batches.length,
+      unitCount: units.length,
+      packedChars
+    }
   };
 }
 

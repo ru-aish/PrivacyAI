@@ -41,8 +41,11 @@ test("duplicate and cached artifacts avoid repeat classification while preservin
   assert.equal(mock.calls.length, 1);
   assert.deepEqual(second.values, [first.values[0], first.values[1]]);
   assert.equal(first.metrics.uniqueUncachedCount, 2);
+  assert.equal(first.metrics.uncachedSlotCount, 3);
   assert.equal(first.metrics.deduplicatedCount, 1);
   assert.equal(second.metrics.modelCallCount, 0);
+  assert.equal(second.metrics.cacheHitCount, 2);
+  assert.equal(second.metrics.deduplicatedCount, 0);
 });
 
 test("packing is deterministic, preserves adjacent items, and safely chunks large artifacts", async () => {
@@ -97,4 +100,30 @@ test("the AGY request path receives the same dense batching behavior", async () 
   assert.equal(mock.calls.length, 1);
   assert.equal(result.metrics.modelCallCount, 1);
   assert.equal(result.body.request.contents.every(content => content.parts[0].text.includes("[PRIVATE_")), true);
+});
+
+test("identical uncached content is classified once across artifact types", async () => {
+  const mock = sanitizerCalls();
+  const result = await sanitizeModelVisibleArtifacts([
+    {
+      value: "SECRET1",
+      slotKey: "message/0",
+      artifactKey: "message/0",
+      artifactType: "message"
+    },
+    {
+      value: "SECRET1",
+      slotKey: "tool/0",
+      artifactKey: "tool/0",
+      artifactType: "tool_definition"
+    }
+  ], { sanitizer: mock.sanitizer });
+
+  assert.equal(mock.calls.length, 1);
+  assert.equal(result.metrics.uniqueUncachedCount, 1);
+  assert.equal(result.metrics.uncachedSlotCount, 2);
+  assert.equal(result.metrics.deduplicatedCount, 1);
+  assert.equal(result.cacheWrites.length, 2);
+  assert.equal(new Set(result.cacheWrites.map(([key]) => key)).size, 2);
+  assert.deepEqual(result.values, ["[PRIVATE_1]", "[PRIVATE_1]"]);
 });

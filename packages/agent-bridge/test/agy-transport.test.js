@@ -191,6 +191,7 @@ test("AGY request cache reuses unchanged history and tools after session-map gro
   for (const [key, record] of first.cacheWrites) cache.set(key, record);
   const firstCalls = calls;
   assert.equal(firstCalls, 1, "uncached artifacts should share one bounded classifier batch");
+  assert.equal(first.metrics.modelCallCount, 1);
 
   const second = await sanitizeAgyRequestBody(sampleRequest(), {
     sanitizer,

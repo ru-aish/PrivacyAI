@@ -7,13 +7,12 @@ import {
   sanitizeKnownValue,
   sanitizeStructuredValue
 } from "@privacy-ai/sdk";
-import { packUncachedArtifactEntries } from "./artifact-packing.js";
 
 /**
  * Sanitize a protocol adapter's model-visible slots while reusing persistent
  * verification records. Protocol modules own slot discovery and application;
- * this module owns only classification, stable mappings, batching, and cache
- * metadata.
+ * this module owns classification, stable mappings, deduplication, and cache
+ * metadata. The SDK performs the actual dense, overlapped context packing.
  */
 export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
   if (!Array.isArray(slots)) {
@@ -36,9 +35,15 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
 
   for (let index = 0; index < normalized.length; index += 1) {
     const entry = normalized[index];
-    const contentHash = contentHashFor(entry.value);
-    const cacheKey = verificationKey(entry.value, entry.artifactType, policyFingerprint);
+    const serialized = JSON.stringify(entry.value);
+    const contentHash = contentHashForSerialized(serialized);
+    const cacheKey = verificationKeyFromSerialized(
+      serialized,
+      entry.artifactType,
+      policyFingerprint
+    );
     const cached = options.cache?.get?.(cacheKey, policyFingerprint);
+    const candidate = { ...entry, index, cacheKey, contentHash };
 
     itemRecords.push({
       slotKey: entry.slotKey,
@@ -54,79 +59,72 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
     }
 
     uncachedSlotCount += 1;
-    const candidate = { ...entry, index, cacheKey, contentHash };
     const existing = uniqueByContent.get(contentHash);
     if (existing) {
       existing.destinations.push(candidate);
     } else {
-      uniqueByContent.set(contentHash, { ...candidate, destinations: [candidate] });
+      uniqueByContent.set(contentHash, {
+        value: entry.value,
+        contentHash,
+        destinations: [candidate]
+      });
     }
   }
 
-  const uncached = [...uniqueByContent.values()];
-  const groups = packUncachedArtifactEntries(uncached, {
-    maxContextChars: options.maxContextChars,
-    maxContextTokens: options.maxContextTokens,
-    tokenCounter: options.tokenCounter
-  });
-  const originalArtifactCount = groups.reduce((count, pack) => count + pack.artifacts.length, 0);
+  const uniqueUncached = [...uniqueByContent.values()];
   let modelCallCount = 0;
   let packedChars = 0;
-  for (let artifactIndex = 0; artifactIndex < groups.length; artifactIndex += 1) {
-    throwIfAborted(options.signal);
-    const artifact = groups[artifactIndex];
-    const rawResult = await sanitizeStructuredValue(
-      artifact.entries.map(entry => entry.value),
-      {
-        sanitizer: options.sanitizer,
-        sessionMap: completeMap,
-        maxContextChars: options.maxContextChars,
-        maxContextTokens: options.maxContextTokens,
-        tokenCounter: options.tokenCounter,
-        artifactType: `${options.artifactTypePrefix || "model"}_${artifact.artifactType}`,
-        signal: options.signal,
-        onBatchComplete: async details => {
-          modelCallCount += 1;
-          packedChars += Number(details.inputChars || 0);
-          if (typeof options.onBatchComplete === "function") {
+  if (uniqueUncached.length > 0) {
+    let cumulativePackedChars = 0;
+    const sourceValues = uniqueUncached.map(entry => entry.value);
+    const rawResult = await sanitizeStructuredValue(sourceValues, {
+      sanitizer: options.sanitizer,
+      sessionMap: completeMap,
+      maxContextChars: options.maxContextChars,
+      maxContextTokens: options.maxContextTokens,
+      tokenCounter: options.tokenCounter,
+      artifactType: `${options.artifactTypePrefix || "model"}_visible_batch`,
+      signal: options.signal,
+      onBatchComplete: typeof options.onBatchComplete === "function"
+        ? async details => {
+            cumulativePackedChars += details.inputChars;
             await options.onBatchComplete({
               ...details,
-              artifactIndex,
-              artifactCount: groups.length,
-              artifactKey: artifact.artifactKey,
-              artifactType: artifact.artifactType,
-              uniqueUncachedCount: uncached.length,
+              artifactIndex: details.batchIndex,
+              artifactCount: details.batchCount,
+              artifactKey: `batch/${details.batchIndex}`,
+              artifactType: "batched",
+              uniqueUncachedCount: uniqueUncached.length,
               uncachedSlotCount,
               cacheHitCount,
-              deduplicatedCount: uncachedSlotCount - uncached.length,
-              modelCallCount,
-              packedChars
+              deduplicatedCount: uncachedSlotCount - uniqueUncached.length,
+              modelCallCount: details.batchIndex + 1,
+              packedChars: cumulativePackedChars
             });
           }
-        }
-      }
-    );
+        : undefined
+    });
     const result = typeof options.normalizeArtifactResult === "function"
       ? await options.normalizeArtifactResult({
           value: rawResult.value,
           sessionMapAdditions: rawResult.sessionMapAdditions || {},
-          sourceValues: artifact.entries.map(entry => entry.value),
+          sourceValues,
           existingSessionMap: { ...completeMap },
-          artifactKey: artifact.artifactKey,
-          artifactType: artifact.artifactType
+          artifactKey: "batched",
+          artifactType: "batched"
         })
       : rawResult;
 
-    if (!result || !Array.isArray(result.value) || result.value.length !== artifact.entries.length) {
+    if (!result || !Array.isArray(result.value) || result.value.length !== uniqueUncached.length) {
       throw invalidShapeError(options);
     }
 
     const discoveredMap = { ...completeMap, ...(result.sessionMapAdditions || {}) };
-    for (const entry of artifact.entries) {
-      const verificationMap = relevantMappings(entry.value, discoveredMap);
+    for (const unique of uniqueUncached) {
+      const verificationMap = relevantMappings(unique.value, discoveredMap);
       mergeMappings(completeMap, sessionMapAdditions, verificationMap);
       const writtenKeys = new Set();
-      for (const destination of entry.destinations) {
+      for (const destination of unique.destinations) {
         if (writtenKeys.has(destination.cacheKey)) continue;
         writtenKeys.add(destination.cacheKey);
         cacheWrites.push([destination.cacheKey, {
@@ -139,25 +137,22 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
       }
     }
 
+    modelCallCount = Number(rawResult.metrics?.modelCallCount || 0);
+    packedChars = Number(rawResult.metrics?.packedChars || 0);
     if (typeof options.onArtifactComplete === "function") {
-      for (const originalArtifact of artifact.artifacts) {
-        await options.onArtifactComplete({
-          artifactIndex: originalArtifact.artifactIndex,
-          artifactCount: originalArtifactCount,
-          artifactKey: originalArtifact.artifactKey,
-          artifactType: originalArtifact.artifactType,
-          slotCount: originalArtifact.entries.reduce(
-            (count, entry) => count + entry.destinations.length,
-            0
-          ),
-          uniqueUncachedCount: uncached.length,
-          uncachedSlotCount,
-          cacheHitCount,
-          deduplicatedCount: uncachedSlotCount - uncached.length,
-          modelCallCount,
-          packedChars
-        });
-      }
+      await options.onArtifactComplete({
+        artifactIndex: 0,
+        artifactCount: 1,
+        artifactKey: "batched",
+        artifactType: "batched",
+        slotCount: uncachedSlotCount,
+        uniqueUncachedCount: uniqueUncached.length,
+        uncachedSlotCount,
+        cacheHitCount,
+        deduplicatedCount: uncachedSlotCount - uniqueUncached.length,
+        modelCallCount,
+        packedChars
+      });
     }
   }
 
@@ -177,10 +172,10 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
     itemRecords,
     policyFingerprint,
     metrics: {
-      uniqueUncachedCount: uncached.length,
+      uniqueUncachedCount: uniqueUncached.length,
       uncachedSlotCount,
       cacheHitCount,
-      deduplicatedCount: uncachedSlotCount - uncached.length,
+      deduplicatedCount: uncachedSlotCount - uniqueUncached.length,
       modelCallCount,
       packedChars
     }
@@ -209,18 +204,18 @@ function requiredLabel(value, label) {
   return normalized;
 }
 
-function verificationKey(value, artifactType, policyFingerprint) {
+function verificationKeyFromSerialized(serialized, artifactType, policyFingerprint) {
   return createHash("sha256")
     .update(String(policyFingerprint))
     .update("\0")
     .update(String(artifactType))
     .update("\0")
-    .update(JSON.stringify(value))
+    .update(serialized)
     .digest("hex");
 }
 
-function contentHashFor(value) {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function contentHashForSerialized(serialized) {
+  return createHash("sha256").update(serialized).digest("hex");
 }
 
 function mergeMappings(completeMap, aggregateAdditions, additions) {
