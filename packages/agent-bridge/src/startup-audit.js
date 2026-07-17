@@ -8,6 +8,7 @@ import { localSanitize } from "@privacy-ai/sdk";
 
 import { assertNoProtectedOriginals, sanitizeModelVisibleValue } from "./context-gateway.js";
 import { buildCodexRequestVerificationSeed } from "./codex-request-transform.js";
+import { resolveStartupFileManifest, sanitizeStartupFiles } from "./startup-cache.js";
 
 const DEFAULT_CAPTURE_LIMIT = 2 * 1024 * 1024;
 const DEFAULT_CAPTURE_TIMEOUT_MS = 90000;
@@ -69,26 +70,26 @@ export async function auditCodexStaticStartupContext(options = {}) {
   }
 
   const roots = await codexStaticRoots(options.cwd, options);
-  const files = await collectCodexStaticStartupContext(options.cwd, { ...options, roots });
-  if (files.length === 0) {
-    return { fileCount: 0, serializedBytes: 0, sessionMapAdditions: {} };
-  }
-
-  const payload = files.map(file => ({
-    path: displayStaticPath(file.path, roots),
-    content: file.content
-  }));
-  const serialized = JSON.stringify(payload);
-  const staticResult = await staticSanitizer(serialized);
-  const sessionMapAdditions = staticResult?.sessionMap || {};
+  const manifest = await collectCodexStaticStartupContext(options.cwd, { ...options, roots });
+  if (manifest.records.length === 0) return { fileCount: 0, serializedBytes: 0, sessionMapAdditions: {}, manifestHash: manifest.manifestHash, counters: manifest.counters };
+  const staticResult = await sanitizeStartupFiles(manifest, {
+    verificationStore: options.verificationStore,
+    policyFingerprint: String(options.policyFingerprint || "startup-context-v1"),
+    sanitizer: staticSanitizer
+  });
+  const sessionMapAdditions = staticResult.sessionMapAdditions;
   if (options.blockHighRisk !== false) {
     throwIfHighRiskStartupValues(sessionMapAdditions, "Codex");
   }
 
   return {
-    fileCount: files.length,
-    serializedBytes: Buffer.byteLength(serialized),
-    sessionMapAdditions
+    fileCount: manifest.records.length,
+    serializedBytes: manifest.records.reduce((total, file) => total + file.metadata.size, 0),
+    sessionMapAdditions,
+    manifestHash: manifest.manifestHash,
+    repositoryId: manifest.repositoryId,
+    worktreeId: manifest.worktreeId,
+    counters: { ...manifest.counters, sanitizerCalls: staticResult.sanitizerCalls }
   };
 }
 
@@ -97,6 +98,16 @@ export async function auditCodexStartupContext(options = {}) {
   if (!options.cwd) throw new TypeError("Codex startup audit requires cwd.");
   if (typeof options.sanitizer !== "function") {
     throw new TypeError("Codex startup audit requires a local sanitizer.");
+  }
+
+  // A rendered fingerprint is only supplied by the launcher after it has
+  // identified every local startup input and the executable.  It is a proof
+  // cache, not a heuristic: any relevant change selects a new key.
+  if (options.renderedFingerprint && options.verificationStore) {
+    const cached = options.verificationStore.getVerification(options.renderedFingerprint, String(options.policyFingerprint || "startup-context-v1"));
+    if (cached) {
+      return { itemCount: cached.itemCount || 0, serializedBytes: cached.serializedBytes || 0, primedItemCount: 0, sessionMapAdditions: cached.sessionMapAdditions || {}, cache: { hit: true, reason: "rendered-startup-fingerprint" } };
+    }
   }
 
   const canaryOriginal = options.canaryOriginal || `privacyai-provider-canary-${randomUUID()}`;
@@ -151,13 +162,26 @@ export async function auditCodexStartupContext(options = {}) {
     });
   }
 
-  return {
+  const output = {
     itemCount: Array.isArray(payload) ? payload.length : 1,
     serializedBytes: Buffer.byteLength(serialized),
     canaryPlaceholder,
     primedItemCount,
-    sessionMapAdditions: inspection.sessionMapAdditions
+    sessionMapAdditions: inspection.sessionMapAdditions,
+    cache: { hit: false, reason: options.renderedFingerprint ? "rendered-startup-fingerprint-miss" : "no-rendered-fingerprint" }
   };
+  if (options.renderedFingerprint && options.verificationStore) {
+    options.verificationStore.putVerification({
+      cacheKey: options.renderedFingerprint,
+      contentHash: options.renderedFingerprint,
+      artifactType: "rendered_startup",
+      policyFingerprint: String(options.policyFingerprint || "startup-context-v1"),
+      sessionMapAdditions: inspection.sessionMapAdditions,
+      itemCount: output.itemCount,
+      serializedBytes: output.serializedBytes
+    });
+  }
+  return output;
 }
 
 export async function auditClaudeStartupContext(options = {}) {
@@ -453,7 +477,6 @@ async function collectCodexStaticStartupContext(cwd, options) {
   const seen = new Set();
   const maxFiles = Number(options.maxFiles || DEFAULT_CODEX_STATIC_FILES);
   const maxBytes = Number(options.maxBytes || DEFAULT_CODEX_STATIC_LIMIT);
-  let totalBytes = 0;
 
   for (const name of CODEX_HOME_FILES) await addFile(join(roots.codexHome, name));
   for (const name of CODEX_HOME_DIRECTORIES) await addDirectory(join(roots.codexHome, name));
@@ -461,7 +484,10 @@ async function collectCodexStaticStartupContext(cwd, options) {
     for (const name of CODEX_PROJECT_FILES) await addFile(join(directory, name));
     for (const name of CODEX_PROJECT_DIRECTORIES) await addDirectory(join(directory, name));
   }
-  return files;
+  const manifest = await resolveStartupFileManifest(files, { cwd, verificationStore: options.verificationStore });
+  const totalBytes = manifest.records.reduce((total, file) => total + file.metadata.size, 0);
+  if (manifest.records.length > maxFiles || totalBytes > maxBytes) throw staticContextTooLargeError();
+  return manifest;
 
   async function addDirectory(path) {
     let entries;
@@ -490,13 +516,11 @@ async function collectCodexStaticStartupContext(cwd, options) {
       throw error;
     }
     if (!metadata.isFile() || metadata.isSymbolicLink()) return;
-    if (metadata.size > maxBytes || totalBytes + metadata.size > maxBytes) {
+    if (metadata.size > maxBytes) {
       throw staticContextTooLargeError();
     }
-    const content = await readFile(path, "utf8");
-    totalBytes += Buffer.byteLength(content);
     seen.add(path);
-    files.push({ path, content });
+    files.push(path);
   }
 }
 

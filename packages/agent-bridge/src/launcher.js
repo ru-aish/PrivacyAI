@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,6 +42,7 @@ import {
   auditCodexStartupContext,
   auditCodexStaticStartupContext
 } from "./startup-audit.js";
+import { renderedStartupFingerprint } from "./startup-cache.js";
 
 const PTY_HELPER = fileURLToPath(new URL("../bin/privacyai-pty.py", import.meta.url));
 
@@ -85,7 +86,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
 
   let cwd = options.cwd || process.cwd();
   if (flavor === "codex") cwd = resolve(codexEffectiveCwd(forwardedArgs, cwd));
-  await (options.verifyNativeExecutable || verifyNativeExecutable)(flavor, binary, {
+  const executableProbe = await (options.verifyNativeExecutable || verifyNativeExecutable)(flavor, binary, {
     cwd,
     env: { ...process.env, ...options.env },
     timeoutMs: options.executableProbeTimeoutMs,
@@ -183,6 +184,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         verificationStore,
         policyFingerprint,
+        renderedFingerprint: await startupRenderFingerprint({ binary, executableProbe, cwd, staticAudit, policyFingerprint, args: protectedArgs, config: loaded.config }),
         blockHighRisk: false,
         primeRequestCache: true
       });
@@ -238,7 +240,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       childArgs = ["--settings", settingsPath, ...isolation.args, ...forwardedArgs];
     } else {
       await reportLaunchProgress(options, "static-scan", "Sanitizing local Codex startup files before launch");
-      await (options.auditCodexStaticStartupContext || auditCodexStaticStartupContext)({
+      const staticAudit = await (options.auditCodexStaticStartupContext || auditCodexStaticStartupContext)({
         cwd,
         env,
         sanitizer,
@@ -274,6 +276,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         verificationStore,
         policyFingerprint,
+        renderedFingerprint: await startupRenderFingerprint({ binary, executableProbe, cwd, staticAudit, policyFingerprint, args: privacyArgs, config: loaded.config }),
         blockHighRisk: true
       });
       childArgs = [...privacyArgs, ...forwardedArgs];
@@ -383,6 +386,28 @@ function launchPolicyFingerprint(sanitizer, options, boundary) {
     // preflight and gateway caches consistent inside this launch, but force a
     // miss on the next launch unless the caller supplies policyFingerprint.
     ephemeralSanitizerNonce: randomBytes(32).toString("hex")
+  });
+}
+
+async function startupRenderFingerprint({ binary, executableProbe, cwd, staticAudit, policyFingerprint, args, config }) {
+  let stat = null;
+  try {
+    const value = await lstat(binary, { bigint: true });
+    stat = { size: Number(value.size), mtimeNs: value.mtimeNs.toString(), ctimeNs: value.ctimeNs.toString(), dev: value.dev.toString(), ino: value.ino.toString(), mode: Number(value.mode) };
+  } catch {
+    // Test doubles and PATH-resolved commands can lack a filesystem entry;
+    // their resolved identity/version remains part of the proof key.
+  }
+  return renderedStartupFingerprint({
+    manifestHash: staticAudit?.manifestHash || "no-manifest",
+    policyFingerprint,
+    protectedArgs: args,
+    config,
+    cwd,
+    repositoryId: staticAudit?.repositoryId || "unknown-repository",
+    worktreeId: staticAudit?.worktreeId || "unknown-worktree",
+    executable: { path: binary, stat, version: executableProbe?.version || executableProbe || null },
+    renderContractVersion: 1
   });
 }
 

@@ -56,6 +56,12 @@ export {
   captureCodexPromptInput,
   resolveCodexCaptureTimeoutMs
 } from "./startup-audit.js";
+export {
+  identifyGitWorktree,
+  renderedStartupFingerprint,
+  resolveStartupFileManifest,
+  sanitizeStartupFiles
+} from "./startup-cache.js";
 export { processHookEvent } from "./hook-adapter.js";
 export {
   launchNativeTui,
