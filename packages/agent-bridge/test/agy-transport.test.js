@@ -194,8 +194,8 @@ test("AGY session controllers atomically merge concurrent mappings", async t => 
     verificationStore: new MemoryContextVerificationStore()
   });
   t.after(async () => {
-    first.close();
-    second.close();
+    await first.close();
+    await second.close();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -211,16 +211,226 @@ test("AGY session controllers atomically merge concurrent mappings", async t => 
   });
 });
 
-test("AGY request transformation rejects unsupported media and future envelope fields", async () => {
-  const media = sampleRequest();
-  media.request.contents[0].parts = [{ inlineData: { mimeType: "image/png", data: "AA==" } }];
+test("AGY controller keeps image dependencies lazy and closes owned image workers", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-image-lifecycle-"));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let loads = 0;
+  let sanitizations = 0;
+  let closes = 0;
+  const imageSanitizerOptions = {
+    async loadImageModule() {
+      loads += 1;
+      return {
+        createImageSanitizer() {
+          return {
+            async sanitize(dataUrl) {
+              sanitizations += 1;
+              return { dataUrl, changed: false, sessionMapAdditions: {} };
+            },
+            async close() {
+              closes += 1;
+            }
+          };
+        }
+      };
+    }
+  };
+
+  const textOnly = await createAgySessionController({
+    sanitizer: deterministicSanitizer,
+    baseDir: join(root, "text"),
+    verificationStore: new MemoryContextVerificationStore(),
+    imageSanitizerOptions
+  });
+  await textOnly.transform(minimalRequest("public text", "text-session", "text-request"));
+  await textOnly.close();
+  assert.equal(loads, 0);
+  assert.equal(closes, 0);
+
+  const withImage = await createAgySessionController({
+    sanitizer: deterministicSanitizer,
+    baseDir: join(root, "image"),
+    verificationStore: new MemoryContextVerificationStore(),
+    imageSanitizerOptions
+  });
+  await withImage.transform(minimalImageRequest("image-session", "image-request"));
+  assert.equal(loads, 1);
+  assert.equal(sanitizations, 1);
+  await withImage.close();
+  await withImage.close();
+  assert.equal(closes, 1);
+});
+
+test("AGY images in prompts and tool results share mappings with text", async () => {
+  const body = sampleRequest();
+  body.request.contents[0].parts.push({
+    inlineData: { mimeType: "image/png", data: "AAAA" }
+  });
+  body.request.contents[1].parts[0].functionResponse.parts = [{
+    inlineData: { mimeType: "image/webp", data: "CCCC" }
+  }];
+
+  const imageCalls = [];
+  const artifacts = [];
+  const result = await sanitizeAgyRequestBody(body, {
+    sanitizer: deterministicSanitizer,
+    imageSanitizer: {
+      async sanitize(inlineData, context) {
+        imageCalls.push({ inlineData, sessionMap: { ...context.sessionMap } });
+        if (imageCalls.length === 1) {
+          return {
+            inlineData: { mimeType: "image/png", data: "BBBB" },
+            sessionMapAdditions: { "[EMAIL_1]": PRIVATE_EMAIL },
+            changed: true
+          };
+        }
+        assert.equal(context.sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
+        return {
+          inlineData: { mimeType: "image/png", data: "DDDD" },
+          sessionMapAdditions: {},
+          changed: true
+        };
+      }
+    },
+    onArtifactComplete(details) {
+      artifacts.push(details);
+    }
+  });
+
+  assert.equal(imageCalls.length, 2);
+  assert.deepEqual(imageCalls[0].sessionMap, {});
+  assert.equal(imageCalls[1].sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.deepEqual(result.body.request.contents[0].parts[1].inlineData, {
+    mimeType: "image/png",
+    data: "BBBB"
+  });
+  assert.deepEqual(
+    result.body.request.contents[1].parts[0].functionResponse.parts[0].inlineData,
+    { mimeType: "image/png", data: "DDDD" }
+  );
+  assert.match(result.body.request.contents[0].parts[0].text, /\[EMAIL_1\]/);
+  assert.equal(result.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.equal(result.itemRecords.some(record => record.artifactType === "image"), false);
+  assert.equal(artifacts.filter(item => item.artifactType === "image").length, 2);
+});
+
+test("AGY permits a text placeholder and provider-safe tool alias for one private value", async () => {
+  const nativeToolName = "private-mcp/read_secret_image";
+  const body = sampleRequest();
+  body.request.tools[0].functionDeclarations[0].name = nativeToolName;
+  body.request.contents[1].parts[0].functionResponse.name = nativeToolName;
+  body.request.contents[0].parts.push({
+    inlineData: { mimeType: "image/png", data: "AAAA" }
+  });
+
+  const result = await sanitizeAgyRequestBody(body, {
+    sanitizer: deterministicSanitizer,
+    imageSanitizer: {
+      async sanitize() {
+        return {
+          inlineData: { mimeType: "image/png", data: "BBBB" },
+          sessionMapAdditions: { "[PRIVATE_IDENTIFIER_1]": nativeToolName },
+          changed: true
+        };
+      }
+    }
+  });
+
+  const providerAlias = result.body.request.tools[0].functionDeclarations[0].name;
+  assert.match(providerAlias, /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/);
+  assert.notEqual(providerAlias, nativeToolName);
+  assert.equal(result.body.request.contents[1].parts[0].functionResponse.name, providerAlias);
+  assert.equal(result.sessionMapAdditions["[PRIVATE_IDENTIFIER_1]"], nativeToolName);
+  assert.equal(result.sessionMapAdditions[providerAlias], nativeToolName);
+});
+
+test("AGY image validation and limits fail closed before provider forwarding", async () => {
+  const required = sampleRequest();
+  required.request.contents[0].parts.push({
+    inlineData: { mimeType: "image/png", data: "AAAA" }
+  });
   await assert.rejects(
-    sanitizeAgyRequestBody(media, { sanitizer: deterministicSanitizer }),
-    error => error?.code === "PRIVACYAI_AGY_UNSUPPORTED_FIELD"
+    sanitizeAgyRequestBody(required, { sanitizer: deterministicSanitizer }),
+    error => error?.code === "PRIVACYAI_AGY_IMAGE_SANITIZER_REQUIRED"
+  );
+
+  let calls = 0;
+  const tooMany = sampleRequest();
+  tooMany.request.contents[0].parts.push(
+    { inlineData: { mimeType: "image/png", data: "AAAA" } },
+    { inlineData: { mimeType: "image/png", data: "BBBB" } }
+  );
+  await assert.rejects(
+    sanitizeAgyRequestBody(tooMany, {
+      sanitizer: deterministicSanitizer,
+      maxImagesPerRequest: 1,
+      imageSanitizer: { async sanitize() { calls += 1; } }
+    }),
+    error => error?.code === "PRIVACYAI_AGY_TOO_MANY_IMAGES"
+  );
+  assert.equal(calls, 0);
+
+  for (const part of [
+    { fileData: { mimeType: "image/png", fileUri: "https://example.test/image.png" } },
+    { inlineData: { mimeType: "application/pdf", data: "AAAA" } },
+    { inlineData: { mimeType: "image/png", data: "" } },
+    { inlineData: { mimeType: "image/png", data: "AAAA", future: true } }
+  ]) {
+    const malformed = sampleRequest();
+    malformed.request.contents[0].parts = [part];
+    await assert.rejects(
+      sanitizeAgyRequestBody(malformed, {
+        sanitizer: deterministicSanitizer,
+        imageSanitizer: { async sanitize() { throw new Error("must not run"); } }
+      }),
+      error => [
+        "PRIVACYAI_AGY_UNSUPPORTED_IMAGE_URL",
+        "PRIVACYAI_AGY_UNSUPPORTED_MEDIA_TYPE",
+        "PRIVACYAI_AGY_INVALID_IMAGE",
+        "PRIVACYAI_AGY_UNSUPPORTED_FIELD"
+      ].includes(error?.code)
+    );
+  }
+
+  const nestedRemote = sampleRequest();
+  nestedRemote.request.contents[1].parts[0].functionResponse.parts = [{
+    fileData: { mimeType: "image/png", fileUri: "gs://private/image.png" }
+  }];
+  await assert.rejects(
+    sanitizeAgyRequestBody(nestedRemote, {
+      sanitizer: deterministicSanitizer,
+      imageSanitizer: { async sanitize() {} }
+    }),
+    error => error?.code === "PRIVACYAI_AGY_UNSUPPORTED_IMAGE_URL"
+  );
+});
+
+test("AGY image and text sanitizer failures preserve fail-closed error boundaries", async () => {
+  const imageBody = sampleRequest();
+  imageBody.request.contents[0].parts.push({
+    inlineData: { mimeType: "image/png", data: "AAAA" }
+  });
+  await assert.rejects(
+    sanitizeAgyRequestBody(imageBody, {
+      sanitizer: deterministicSanitizer,
+      imageSanitizer: { async sanitize() { throw new Error("image provider failed"); } }
+    }),
+    error => error?.code === "PRIVACYAI_AGY_IMAGE_SANITIZER_FAILURE" &&
+      error.cause?.message === "image provider failed"
+  );
+  await assert.rejects(
+    sanitizeAgyRequestBody(imageBody, {
+      sanitizer: deterministicSanitizer,
+      imageSanitizer: { async sanitize() { return { inlineData: null }; } }
+    }),
+    error => error?.code === "PRIVACYAI_AGY_INVALID_SANITIZED_IMAGE"
   );
 
   const future = sampleRequest();
-  future.request.futureContext = { private: PRIVATE_EMAIL };
+  future.request.futureContext = { value: PRIVATE_EMAIL };
   await assert.rejects(
     sanitizeAgyRequestBody(future, { sanitizer: deterministicSanitizer }),
     error => error?.code === "PRIVACYAI_AGY_UNSUPPORTED_FIELD"
@@ -230,7 +440,8 @@ test("AGY request transformation rejects unsupported media and future envelope f
     sanitizeAgyRequestBody(sampleRequest(), {
       sanitizer: async () => { throw new Error("local provider failed"); }
     }),
-    error => error?.code === "PRIVACYAI_AGY_SANITIZER_FAILURE" && error.cause?.message === "local provider failed"
+    error => error?.code === "PRIVACYAI_AGY_SANITIZER_FAILURE" &&
+      error.cause?.message === "local provider failed"
   );
 });
 
@@ -267,9 +478,29 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   requestBody.request.tools[0].functionDeclarations[0].name = nativeToolName;
   requestBody.request.contents[1].parts[0].functionResponse.name = nativeToolName;
   requestBody.request.contents[1].parts[0].thought = true;
+  requestBody.request.contents[0].parts.push({
+    inlineData: { mimeType: "image/png", data: "AAAA" }
+  });
+  requestBody.request.contents[1].parts[0].functionResponse.parts = [{
+    inlineData: { mimeType: "image/webp", data: "CCCC" }
+  }];
   const observed = [];
+  const imageCalls = [];
   const runtime = await startAgyTransportRuntime({
     sanitizer: deterministicSanitizer,
+    imageSanitizer: {
+      async sanitize(inlineData, context) {
+        imageCalls.push({ inlineData, sessionMap: { ...context.sessionMap } });
+        const first = inlineData.data === "AAAA";
+        return {
+          inlineData: first
+            ? { mimeType: "image/png", data: "BBBB" }
+            : { mimeType: "image/png", data: "DDDD" },
+          sessionMapAdditions: first ? { "[EMAIL_1]": PRIVATE_EMAIL } : {},
+          changed: true
+        };
+      }
+    },
     baseEnv: {},
     baseDir: join(root, "vault"),
     tmpDir: root,
@@ -279,6 +510,16 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
       observed.push(parsed);
       assert.equal(JSON.stringify(parsed).includes(PRIVATE_EMAIL), false);
       assert.match(parsed.request.contents[0].parts[0].text, /\[EMAIL_1\]/);
+      assert.deepEqual(parsed.request.contents[0].parts[1].inlineData, {
+        mimeType: "image/png",
+        data: "BBBB"
+      });
+      assert.deepEqual(
+        parsed.request.contents[1].parts[0].functionResponse.parts[0].inlineData,
+        { mimeType: "image/png", data: "DDDD" }
+      );
+      assert.equal(JSON.stringify(parsed).includes('"data":"AAAA"'), false);
+      assert.equal(JSON.stringify(parsed).includes('"data":"CCCC"'), false);
       const toolAlias = parsed.request.tools[0].functionDeclarations[0].name;
       assert.match(toolAlias, /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/);
       assert.doesNotMatch(toolAlias, /\//);
@@ -322,11 +563,17 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
     .filter(value => typeof value === "string")
     .join("");
   assert.equal(text, `result for ${PRIVATE_EMAIL}`);
+  assert.equal(imageCalls.length, 2);
+  assert.deepEqual(imageCalls[0].sessionMap, {});
+  assert.equal(imageCalls[1].sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
 
   const unexpected = await proxyHttpRequest(runtime, requestBody);
   assert.match(unexpected.statusLine, /^HTTP\/1\.1 502/);
   assert.match(unexpected.body, /PRIVACYAI_AGY_UNSUPPORTED_SUCCESS_RESPONSE/);
   assert.equal(observed.length, 2);
+  assert.equal(imageCalls.length, 4);
+  assert.equal(imageCalls[2].sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.equal(imageCalls[3].sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
   assert.equal(
     observed[0].request.tools[0].functionDeclarations[0].name,
     observed[1].request.tools[0].functionDeclarations[0].name
@@ -661,6 +908,14 @@ function minimalRequest(text, sessionId, requestId) {
       contents: [{ role: "user", parts: [{ text }] }]
     }
   };
+}
+
+function minimalImageRequest(sessionId, requestId) {
+  const body = minimalRequest("placeholder", sessionId, requestId);
+  body.request.contents[0].parts = [{
+    inlineData: { mimeType: "image/png", data: "AAAA" }
+  }];
+  return body;
 }
 
 function sampleRequest() {

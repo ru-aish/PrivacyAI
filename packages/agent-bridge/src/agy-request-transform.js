@@ -27,12 +27,23 @@ const PART_FIELDS = new Set([
   "text",
   "functionCall",
   "functionResponse",
+  "inlineData",
+  "fileData",
   "thought",
   "thoughtSignature"
 ]);
 
 const FUNCTION_CALL_FIELDS = new Set(["id", "name", "args"]);
-const FUNCTION_RESPONSE_FIELDS = new Set(["id", "name", "response"]);
+const FUNCTION_RESPONSE_FIELDS = new Set(["id", "name", "response", "parts"]);
+const INLINE_DATA_FIELDS = new Set(["mimeType", "data"]);
+const FILE_DATA_FIELDS = new Set(["mimeType", "fileUri"]);
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp"
+]);
+const DEFAULT_MAX_IMAGES_PER_REQUEST = 8;
+const MAX_ALIASES_PER_ORIGINAL = 8;
 const FUNCTION_DECLARATION_FIELDS = new Set([
   "name",
   "description",
@@ -49,6 +60,74 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
   }
 
   const transformed = structuredClone(body);
+  const imageSlots = collectAgyImageSlots(transformed);
+  const maxImages = Number(options.maxImagesPerRequest ?? DEFAULT_MAX_IMAGES_PER_REQUEST);
+  if (!Number.isSafeInteger(maxImages) || maxImages <= 0) {
+    throw new TypeError("maxImagesPerRequest must be a positive safe integer.");
+  }
+  if (imageSlots.length > maxImages) {
+    throw agyError(
+      "PRIVACYAI_AGY_TOO_MANY_IMAGES",
+      `PrivacyAI blocked an AGY request with more than ${maxImages} images.`
+    );
+  }
+
+  const completeSessionMap = normalizeSessionMap(options.sessionMap);
+  const sessionMapAdditions = {};
+  if (imageSlots.length > 0) {
+    const sanitizeImage = typeof options.imageSanitizer === "function"
+      ? options.imageSanitizer
+      : options.imageSanitizer?.sanitize?.bind(options.imageSanitizer);
+    if (typeof sanitizeImage !== "function") {
+      throw agyError(
+        "PRIVACYAI_AGY_IMAGE_SANITIZER_REQUIRED",
+        "PrivacyAI blocked AGY image content because no local image sanitizer is available."
+      );
+    }
+
+    try {
+      for (let imageIndex = 0; imageIndex < imageSlots.length; imageIndex += 1) {
+        throwIfAborted(options.signal);
+        const entry = imageSlots[imageIndex];
+        const result = await sanitizeImage(entry.value, {
+          sanitizer: options.sanitizer,
+          sessionMap: completeSessionMap,
+          maxContextChars: options.maxContextChars,
+          signal: options.signal,
+          onBatchComplete: options.onBatchComplete
+        });
+        if (!result || !isInlineImage(result.inlineData)) {
+          throw agyError(
+            "PRIVACYAI_AGY_INVALID_SANITIZED_IMAGE",
+            "PrivacyAI blocked the AGY request because image sanitization returned an invalid result."
+          );
+        }
+        mergeAgySessionAdditions(
+          completeSessionMap,
+          sessionMapAdditions,
+          result.sessionMapAdditions
+        );
+        setAtPath(transformed, entry.path, result.inlineData);
+        if (typeof options.onArtifactComplete === "function") {
+          await options.onArtifactComplete({
+            artifactIndex: imageIndex,
+            artifactCount: imageSlots.length,
+            artifactKey: entry.slotKey,
+            artifactType: "image",
+            slotCount: 1
+          });
+        }
+      }
+    } catch (error) {
+      if (error?.code || error?.name === "AbortError") throw error;
+      throw agyError(
+        "PRIVACYAI_AGY_IMAGE_SANITIZER_FAILURE",
+        "PrivacyAI's local image sanitizer failed while inspecting AGY context.",
+        error
+      );
+    }
+  }
+
   const slots = collectAgyArtifacts(transformed);
   let artifactResult;
   try {
@@ -61,7 +140,7 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
       })),
       {
         sanitizer: options.sanitizer,
-        sessionMap: options.sessionMap,
+        sessionMap: completeSessionMap,
         cache: options.cache,
         policyFingerprint: options.policyFingerprint,
         maxContextChars: options.maxContextChars,
@@ -69,7 +148,6 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
         signal: options.signal,
         onBatchComplete: options.onBatchComplete,
         onArtifactComplete: options.onArtifactComplete,
-        normalizeArtifactResult: normalizeAgyArtifactResult,
         invalidShapeError: () => agyError(
           "PRIVACYAI_AGY_INVALID_SANITIZED_REQUEST",
           "PrivacyAI blocked the AGY request because sanitization changed its model-visible shape."
@@ -85,13 +163,38 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
     );
   }
 
-  artifactResult.values.forEach((value, index) => setAtPath(transformed, slots[index].path, value));
+  mergeAgySessionAdditions(
+    completeSessionMap,
+    sessionMapAdditions,
+    artifactResult.sessionMapAdditions
+  );
+  const protectedToolOriginals = removeLegacyAgyToolMappings(
+    slots,
+    completeSessionMap,
+    sessionMapAdditions
+  );
+  const providerToolNames = resolveAgyProviderToolNames(
+    slots,
+    completeSessionMap,
+    protectedToolOriginals
+  );
+  mergeAgySessionAdditions(
+    completeSessionMap,
+    sessionMapAdditions,
+    providerToolNames.sessionMapAdditions
+  );
+  artifactResult.values.forEach((value, index) => {
+    const resolved = slots[index].artifactType === "tool_name"
+      ? providerToolNames.values.get(slots[index].value)
+      : value;
+    setAtPath(transformed, slots[index].path, resolved);
+  });
   validateAgyRequestBody(transformed, { functionNameMode: "provider" });
 
   return {
     body: transformed,
     sessionKey: agySessionKey(body, options.fallbackSessionId),
-    sessionMapAdditions: artifactResult.sessionMapAdditions,
+    sessionMapAdditions,
     cacheWrites: artifactResult.cacheWrites,
     itemRecords: artifactResult.itemRecords,
     policyFingerprint: artifactResult.policyFingerprint
@@ -135,6 +238,33 @@ export function validateAgyRequestBody(body, options = {}) {
   if (request.generationConfig != null) validateJsonControl(request.generationConfig, "request.generationConfig");
   if (request.safetySettings != null) validateJsonControl(request.safetySettings, "request.safetySettings");
   return body;
+}
+
+function collectAgyImageSlots(body) {
+  const slots = [];
+  body.request.contents.forEach((content, contentIndex) => {
+    content.parts.forEach((part, partIndex) => {
+      const partPath = ["request", "contents", contentIndex, "parts", partIndex];
+      const slotPrefix = `contents/${contentIndex}/parts/${partIndex}`;
+      if (part.inlineData != null) {
+        slots.push({
+          path: [...partPath, "inlineData"],
+          value: part.inlineData,
+          slotKey: `${slotPrefix}/inlineData`
+        });
+      }
+      for (let nestedIndex = 0; nestedIndex < (part.functionResponse?.parts?.length || 0); nestedIndex += 1) {
+        const nested = part.functionResponse.parts[nestedIndex];
+        if (nested.inlineData == null) continue;
+        slots.push({
+          path: [...partPath, "functionResponse", "parts", nestedIndex, "inlineData"],
+          value: nested.inlineData,
+          slotKey: `${slotPrefix}/functionResponse/parts/${nestedIndex}/inlineData`
+        });
+      }
+    });
+  });
+  return slots;
 }
 
 function collectAgyArtifacts(body) {
@@ -191,6 +321,8 @@ function collectContentArtifacts(content, basePath, artifactKey, slots, textArti
       });
       return;
     }
+
+    if (part.inlineData != null || part.fileData != null) return;
 
     if (part.functionCall != null) {
       slots.push({
@@ -273,61 +405,80 @@ export function normalizeAgySessionMap(body, sessionMap = {}) {
   if (toolNames.size === 0) return normalized;
 
   const output = {};
-  const occupied = new Set(toolNames);
-  const toolMappings = [];
+  const occupied = new Set([...toolNames, ...Object.keys(normalized)]);
+  const legacyToolMappings = [];
   for (const [placeholder, original] of Object.entries(normalized)) {
-    if (toolNames.has(original)) {
-      toolMappings.push([placeholder, original]);
+    if (toolNames.has(original) && isLegacyToolPlaceholder(placeholder)) {
+      legacyToolMappings.push([placeholder, original]);
       continue;
     }
+    // A single original may intentionally have both a text/image placeholder
+    // and a provider-safe function alias. Preserve both; only old TOOL-style
+    // bracket placeholders are migrated because Google cannot accept them as
+    // function names.
     output[placeholder] = original;
-    occupied.add(placeholder);
   }
 
-  for (const [placeholder, original] of toolMappings) {
-    const alias = isProviderFunctionName(placeholder) && !occupied.has(placeholder)
-      ? placeholder
-      : allocateAgyToolAlias(original, occupied);
+  for (const [, original] of legacyToolMappings) {
+    const existingAlias = Object.entries(output)
+      .find(([alias, mappedOriginal]) =>
+        mappedOriginal === original && isProviderFunctionName(alias)
+      )?.[0];
+    if (existingAlias) continue;
+    const alias = allocateAgyToolAlias(original, occupied);
     output[alias] = original;
     occupied.add(alias);
   }
   return output;
 }
 
-function normalizeAgyArtifactResult(result) {
-  if (result.artifactType !== "tool_name") {
-    return {
-      value: result.value,
-      sessionMapAdditions: result.sessionMapAdditions
-    };
+function removeLegacyAgyToolMappings(slots, completeMap, aggregateAdditions) {
+  const toolOriginals = new Set(
+    slots.filter(slot => slot.artifactType === "tool_name").map(slot => slot.value)
+  );
+  const protectedOriginals = new Set();
+  for (const [placeholder, original] of Object.entries(completeMap || {})) {
+    if (!toolOriginals.has(original) || !isLegacyToolPlaceholder(placeholder)) continue;
+    protectedOriginals.add(original);
+    delete completeMap[placeholder];
+    delete aggregateAdditions[placeholder];
+  }
+  return protectedOriginals;
+}
+
+function resolveAgyProviderToolNames(slots, sessionMap, additionallyProtected = new Set()) {
+  const originals = [...new Set(
+    slots.filter(slot => slot.artifactType === "tool_name").map(slot => slot.value)
+  )];
+  const occupied = new Set([
+    ...originals,
+    ...Object.keys(sessionMap || {})
+  ]);
+  const protectedOriginals = new Set([
+    ...Object.values(sessionMap || {}),
+    ...additionallyProtected
+  ]);
+  const values = new Map();
+  const sessionMapAdditions = {};
+
+  for (const original of originals) {
+    if (isProviderFunctionName(original) && !protectedOriginals.has(original)) {
+      values.set(original, original);
+      continue;
+    }
+    const existingAlias = Object.entries(sessionMap || {})
+      .find(([candidate, mappedOriginal]) =>
+        mappedOriginal === original &&
+        isProviderFunctionName(candidate) &&
+        !originals.includes(candidate)
+      )?.[0];
+    const alias = existingAlias || allocateAgyToolAlias(original, occupied);
+    values.set(original, alias);
+    occupied.add(alias);
+    if (!Object.hasOwn(sessionMap || {}, alias)) sessionMapAdditions[alias] = original;
   }
 
-  const sourceNames = new Set(result.sourceValues);
-  const occupied = new Set([
-    ...sourceNames,
-    ...Object.keys(result.existingSessionMap || {})
-  ]);
-  const aliasesByOriginal = new Map();
-  const additions = {};
-  const value = result.value.map((sanitizedName, index) => {
-    const original = result.sourceValues[index];
-    if (sanitizedName === original && isProviderFunctionName(original)) return original;
-
-    let alias = aliasesByOriginal.get(original);
-    if (!alias) {
-      const existingAlias = Object.entries(result.existingSessionMap || {})
-        .find(([, mappedOriginal]) => mappedOriginal === original)?.[0];
-      alias = isProviderFunctionName(existingAlias) && !sourceNames.has(existingAlias)
-        ? existingAlias
-        : allocateAgyToolAlias(original, occupied);
-      aliasesByOriginal.set(original, alias);
-      occupied.add(alias);
-      additions[alias] = original;
-    }
-    return alias;
-  });
-
-  return { value, sessionMapAdditions: additions };
+  return { values, sessionMapAdditions };
 }
 
 function collectAgyToolNames(body) {
@@ -356,6 +507,10 @@ function allocateAgyToolAlias(original, occupied) {
     "PRIVACYAI_AGY_TOOL_ALIAS_COLLISION",
     "PrivacyAI could not allocate a unique private AGY tool alias."
   );
+}
+
+function isLegacyToolPlaceholder(value) {
+  return typeof value === "string" && /^\[(?:TOOL|TOOL_NAME|FUNCTION|FUNCTION_NAME)_\d+\]$/i.test(value);
 }
 
 function isProviderFunctionName(value) {
@@ -399,7 +554,8 @@ function validateContent(content, label, options = {}) {
 function validatePart(part, label, options = {}) {
   assertPlainObject(part, label);
   assertOnlyKeys(part, PART_FIELDS, label);
-  const payloads = ["text", "functionCall", "functionResponse"].filter(key => part[key] != null);
+  const payloads = ["text", "functionCall", "functionResponse", "inlineData", "fileData"]
+    .filter(key => part[key] != null);
   if (payloads.length !== 1) {
     throw agyError(
       "PRIVACYAI_AGY_INVALID_PART",
@@ -424,8 +580,45 @@ function validatePart(part, label, options = {}) {
       "PrivacyAI supports only text parts in AGY system instructions."
     );
   }
+  if (part.inlineData != null) {
+    validateInlineImage(part.inlineData, `${label}.inlineData`);
+    return;
+  }
+  if (part.fileData != null) {
+    rejectRemoteImage(part.fileData, `${label}.fileData`);
+    return;
+  }
   if (part.functionCall != null) validateFunctionCall(part.functionCall, `${label}.functionCall`, options);
   if (part.functionResponse != null) validateFunctionResponse(part.functionResponse, `${label}.functionResponse`, options);
+}
+
+function validateInlineImage(value, label) {
+  assertPlainObject(value, label);
+  assertOnlyKeys(value, INLINE_DATA_FIELDS, label);
+  if (!SUPPORTED_IMAGE_MIME_TYPES.has(value.mimeType)) {
+    throw agyError(
+      "PRIVACYAI_AGY_UNSUPPORTED_MEDIA_TYPE",
+      `${label}.mimeType must be PNG, JPEG, or WebP.`
+    );
+  }
+  if (typeof value.data !== "string" || value.data.length === 0) {
+    throw agyError(
+      "PRIVACYAI_AGY_INVALID_IMAGE",
+      `${label}.data must be non-empty base64 image data.`
+    );
+  }
+}
+
+function rejectRemoteImage(value, label) {
+  assertPlainObject(value, label);
+  assertOnlyKeys(value, FILE_DATA_FIELDS, label);
+  if (typeof value.mimeType !== "string" || typeof value.fileUri !== "string") {
+    throw agyError("PRIVACYAI_AGY_INVALID_IMAGE", `${label} must contain MIME and URI strings.`);
+  }
+  throw agyError(
+    "PRIVACYAI_AGY_UNSUPPORTED_IMAGE_URL",
+    "PrivacyAI accepts only local inline AGY images; remote file URIs are blocked."
+  );
 }
 
 function validateFunctionCall(value, label, options = {}) {
@@ -443,6 +636,25 @@ function validateFunctionResponse(value, label, options = {}) {
   assertAgyFunctionName(value.name, `${label}.name`, options);
   if (value.response == null || typeof value.response !== "object") {
     throw agyError("PRIVACYAI_AGY_INVALID_FUNCTION_RESPONSE", `${label}.response must be structured data.`);
+  }
+  if (value.parts != null) {
+    if (!Array.isArray(value.parts) || value.parts.length === 0) {
+      throw agyError("PRIVACYAI_AGY_INVALID_IMAGE", `${label}.parts must be a non-empty image-parts array.`);
+    }
+    value.parts.forEach((part, index) => {
+      const partLabel = `${label}.parts[${index}]`;
+      assertPlainObject(part, partLabel);
+      assertOnlyKeys(part, new Set(["inlineData", "fileData"]), partLabel);
+      const payloads = ["inlineData", "fileData"].filter(key => part[key] != null);
+      if (payloads.length !== 1) {
+        throw agyError(
+          "PRIVACYAI_AGY_INVALID_IMAGE",
+          `${partLabel} must contain exactly one supported image payload.`
+        );
+      }
+      if (part.inlineData != null) validateInlineImage(part.inlineData, `${partLabel}.inlineData`);
+      else rejectRemoteImage(part.fileData, `${partLabel}.fileData`);
+    });
   }
 }
 
@@ -505,6 +717,57 @@ function validateJsonControl(value, label, depth = 0) {
 function setAtPath(root, path, value) {
   const parent = path.slice(0, -1).reduce((current, key) => current[key], root);
   parent[path.at(-1)] = value;
+}
+
+function mergeAgySessionAdditions(completeMap, aggregateAdditions, additions) {
+  const normalized = normalizeSessionMap(additions);
+  const aliasCounts = new Map();
+  for (const original of Object.values(completeMap)) {
+    aliasCounts.set(original, (aliasCounts.get(original) || 0) + 1);
+  }
+
+  for (const [placeholder, original] of Object.entries(normalized)) {
+    if (Object.hasOwn(completeMap, placeholder)) {
+      if (completeMap[placeholder] !== original) {
+        throw agyError(
+          "PRIVACYAI_AGY_SESSION_MAP_COLLISION",
+          "PrivacyAI blocked an ambiguous AGY placeholder mapping."
+        );
+      }
+      continue;
+    }
+    const aliasCount = aliasCounts.get(original) || 0;
+    if (aliasCount >= MAX_ALIASES_PER_ORIGINAL) {
+      throw agyError(
+        "PRIVACYAI_AGY_SESSION_MAP_COLLISION",
+        "PrivacyAI blocked excessive AGY aliases for one private value."
+      );
+    }
+    completeMap[placeholder] = original;
+    aggregateAdditions[placeholder] = original;
+    aliasCounts.set(original, aliasCount + 1);
+  }
+}
+
+function isInlineImage(value) {
+  return Boolean(
+    value &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    SUPPORTED_IMAGE_MIME_TYPES.has(value.mimeType) &&
+    typeof value.data === "string" &&
+    value.data.length > 0 &&
+    Object.keys(value).every(key => INLINE_DATA_FIELDS.has(key))
+  );
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  if (signal.reason instanceof Error) throw signal.reason;
+  const error = new Error("PrivacyAI stopped the AGY request because the client disconnected.");
+  error.name = "AbortError";
+  error.code = "PRIVACYAI_AGY_REQUEST_ABORTED";
+  throw error;
 }
 
 function assertPlainObject(value, label) {

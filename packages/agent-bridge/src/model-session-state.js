@@ -81,18 +81,21 @@ export function commitVerificationWrites(
 
 export function mergeSessionMaps(current, inherited, options = {}) {
   const merged = { ...(current || {}) };
-  const originals = new Map(Object.entries(merged).map(([placeholder, original]) => [original, placeholder]));
+  const maxAliasesPerOriginal = positiveInteger(options.maxAliasesPerOriginal, 1);
+  const aliasCounts = new Map();
+  for (const original of Object.values(merged)) {
+    aliasCounts.set(original, (aliasCounts.get(original) || 0) + 1);
+  }
 
   for (const [placeholder, original] of Object.entries(inherited || {})) {
-    if (Object.hasOwn(merged, placeholder) && merged[placeholder] !== original) {
-      throw collisionError(options, "placeholder");
+    if (Object.hasOwn(merged, placeholder)) {
+      if (merged[placeholder] !== original) throw collisionError(options, "placeholder");
+      continue;
     }
-    const existingPlaceholder = originals.get(original);
-    if (existingPlaceholder && existingPlaceholder !== placeholder) {
-      throw collisionError(options, "original");
-    }
+    const aliasCount = aliasCounts.get(original) || 0;
+    if (aliasCount >= maxAliasesPerOriginal) throw collisionError(options, "original");
     merged[placeholder] = original;
-    originals.set(original, placeholder);
+    aliasCounts.set(original, aliasCount + 1);
   }
   return merged;
 }

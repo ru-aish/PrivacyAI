@@ -5,6 +5,7 @@ export {
   parseAgyArguments,
   parseAgyPrivacyMode
 } from "./agy.js";
+export { createAgyImageSanitizer, toAgyImageError } from "./agy-image-adapter.js";
 export { agySessionKey, sanitizeAgyRequestBody, validateAgyRequestBody } from "./agy-request-transform.js";
 export { AgySseRestorer, restoreAgySseEvent } from "./agy-sse-transform.js";
 export { createAgySessionController } from "./agy-session-controller.js";

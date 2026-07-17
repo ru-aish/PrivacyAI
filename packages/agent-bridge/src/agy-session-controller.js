@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 
+import { createAgyImageSanitizer } from "./agy-image-adapter.js";
 import {
   agySessionKey,
   normalizeAgySessionMap,
@@ -24,12 +25,14 @@ export async function createAgySessionController(options = {}) {
   }
 
   const vault = options.vault || new SessionVault(options);
+  const imageSanitizer = options.imageSanitizer || createAgyImageSanitizer(options.imageSanitizerOptions);
+  const ownsImageSanitizer = !options.imageSanitizer;
   const verificationStore = await openContextVerificationStore(options);
   const ownsVerificationStore = !options.verificationStore;
   const sanitizerFingerprint = options.policyFingerprint || options.sanitizer.identity?.fingerprint;
   const policyFingerprint = verificationFingerprint({
     boundary: "agy-transport",
-    version: 2,
+    version: 3,
     sanitizerFingerprint: sanitizerFingerprint || null,
     ephemeralSanitizerNonce: sanitizerFingerprint
       ? null
@@ -40,6 +43,7 @@ export async function createAgySessionController(options = {}) {
   const context = {
     ...options,
     vault,
+    imageSanitizer,
     verificationStore,
     policyFingerprint,
     serial,
@@ -70,10 +74,12 @@ export async function createAgySessionController(options = {}) {
         const cache = sessionVerificationCache(context, sessionKey);
         const result = await sanitizeAgyRequestBody(body, {
           sanitizer: context.sanitizer,
+          imageSanitizer: context.imageSanitizer,
           sessionMap,
           cache,
           policyFingerprint: context.policyFingerprint,
           maxContextChars: context.maxContextChars,
+          maxImagesPerRequest: context.maxImagesPerRequest,
           fallbackSessionId: requestOptions.fallbackSessionId,
           signal: requestOptions.signal,
           onBatchComplete: context.onSanitizerBatchComplete,
@@ -117,17 +123,38 @@ export async function createAgySessionController(options = {}) {
       ]);
       return mergeAgySessionMaps(vaultRecord.sessionMap, threadRecord.sessionMap);
     },
-    close() {
+    async close() {
       if (closed) return;
       closed = true;
       sessionCaches.clear();
-      if (ownsVerificationStore) verificationStore.close();
+      const errors = [];
+      if (ownsImageSanitizer && typeof imageSanitizer.close === "function") {
+        try {
+          await imageSanitizer.close();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (ownsVerificationStore) {
+        try {
+          verificationStore.close();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(errors, "PrivacyAI could not fully close the AGY session controller.", {
+          cause: errors[0]
+        });
+      }
     }
   };
 }
 
 function mergeAgySessionMaps(current, inherited) {
   return mergeSessionMaps(current, inherited, {
+    maxAliasesPerOriginal: 8,
     collisionError: kind => controllerError(
       "PRIVACYAI_AGY_SESSION_MAP_COLLISION",
       kind === "placeholder"
