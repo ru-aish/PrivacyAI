@@ -76,10 +76,13 @@ export function regionsForStrategy(regions, strategy) {
 
 export function verifyPrivateTextRemoved(lines, regions) {
   const text = (lines || []).map(line => line.text).join("\n");
+  const foldedText = foldCase(text);
   const compact = normalizeOcrText(text);
   const leaked = [...new Set(regions.map(region => region.original))].find(original => {
+    const foldedOriginal = foldCase(original);
     const normalized = normalizeOcrText(original);
-    return text.includes(original) || (normalized.length >= 4 && compact.includes(normalized));
+    return foldedText.includes(foldedOriginal) ||
+      ([...normalized].length >= 4 && compact.includes(normalized));
   });
   if (leaked) {
     throw createImageError(
@@ -108,6 +111,10 @@ function dedupeRegions(regions) {
   return kept;
 }
 
+function foldCase(value) {
+  return String(value).normalize("NFKC").toLocaleLowerCase("und");
+}
+
 function normalizeOcrText(value) {
-  return String(value).toLocaleLowerCase("en-US").replace(/[^a-z0-9]/g, "");
+  return foldCase(value).replace(/[^\p{L}\p{N}]/gu, "");
 }

@@ -7,7 +7,8 @@ import {
   createImageSanitizer,
   createTesseractOcrEngine,
   decodeImageDataUrl,
-  locatePrivateRegions
+  locatePrivateRegions,
+  verifyPrivateTextRemoved
 } from "../src/image/index.js";
 import { unionBoxes } from "../src/image/geometry.js";
 
@@ -129,6 +130,23 @@ test("private region mapping matches OCR case drift without shifting offsets", (
   );
   assert.deepEqual(regions.map(region => region.placeholder), [PLACEHOLDER, PLACEHOLDER]);
   assert.deepEqual(regions.map(region => region.original), [PRIVATE, PRIVATE]);
+});
+
+test("post-mask verification catches case drift in short and non-Latin secrets", () => {
+  const region = original => ({ original });
+  const line = text => ({ text });
+
+  assert.throws(
+    () => verifyPrivateTextRemoved([line("AB")], [region("Ab")]),
+    error => error?.code === "PRIVACYAI_IMAGE_VERIFICATION_FAILED"
+  );
+  assert.throws(
+    () => verifyPrivateTextRemoved([line("АЛИСА")], [region("Алиса")]),
+    error => error?.code === "PRIVACYAI_IMAGE_VERIFICATION_FAILED"
+  );
+  assert.doesNotThrow(
+    () => verifyPrivateTextRemoved([line("masked content")], [region("Алиса")])
+  );
 });
 
 test("image sanitizer masks duplicate regions and verifies opaque PNG output", async () => {
