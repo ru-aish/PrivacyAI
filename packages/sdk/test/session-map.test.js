@@ -252,6 +252,35 @@ test("normalizeSessionMap removes malformed and identity mappings", () => {
   );
 });
 
+test("normalizeSessionMap rejects ambiguous case-insensitive aliases", () => {
+  for (const ambiguous of [
+    { "[EMAIL_1]": "first", "[email_1]": "second" },
+    { "[EMAIL_1]": "Alice", "[PERSON_1]": "alice" },
+    { "[EMAIL_1]": "first", "[TOKEN_1]": "[email_1]" }
+  ]) {
+    assert.throws(
+      () => normalizeSessionMap(ambiguous),
+      error =>
+        error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP" &&
+        !error.message.includes("first") &&
+        !error.message.includes("Alice")
+    );
+  }
+});
+
+test("normalizeSessionMap permits multiple aliases for the exact same original", () => {
+  assert.deepEqual(
+    normalizeSessionMap({
+      "[EMAIL_1]": "owner@example.test",
+      "contact1@example.com": "owner@example.test"
+    }),
+    {
+      "[EMAIL_1]": "owner@example.test",
+      "contact1@example.com": "owner@example.test"
+    }
+  );
+});
+
 
 test("ordinary long numeric IDs are not mistaken for generated placeholders", () => {
   assert.deepEqual(

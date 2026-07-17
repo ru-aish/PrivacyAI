@@ -8,16 +8,53 @@ const DEFAULT_PLACEHOLDER_PATTERN = new RegExp(
 
 export function normalizeSessionMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value).filter(
-      ([placeholder, original]) =>
-        typeof placeholder === "string" &&
-        typeof original === "string" &&
-        placeholder.length > 0 &&
-        original.length > 0 &&
-        placeholder !== original
-    )
+  const entries = Object.entries(value).filter(
+    ([placeholder, original]) =>
+      typeof placeholder === "string" &&
+      typeof original === "string" &&
+      placeholder.length > 0 &&
+      original.length > 0 &&
+      placeholder !== original
   );
+  assertUnambiguousSessionMap(entries);
+  return Object.fromEntries(entries);
+}
+
+function assertUnambiguousSessionMap(entries) {
+  const placeholders = new Map();
+  const originals = new Map();
+
+  for (const [placeholder, original] of entries) {
+    const placeholderKey = foldSessionMapValue(placeholder);
+    const originalKey = foldSessionMapValue(original);
+    const existingPlaceholder = placeholders.get(placeholderKey);
+    if (existingPlaceholder && existingPlaceholder !== placeholder) {
+      throw ambiguousSessionMapError();
+    }
+    placeholders.set(placeholderKey, placeholder);
+
+    const existingOriginal = originals.get(originalKey);
+    if (existingOriginal && existingOriginal !== original) {
+      throw ambiguousSessionMapError();
+    }
+    originals.set(originalKey, original);
+  }
+
+  for (const placeholderKey of placeholders.keys()) {
+    if (originals.has(placeholderKey)) throw ambiguousSessionMapError();
+  }
+}
+
+function foldSessionMapValue(value) {
+  return value.toLocaleLowerCase("en-US");
+}
+
+function ambiguousSessionMapError() {
+  const error = new Error(
+    "PrivacyAI blocked a session map with ambiguous case-insensitive aliases."
+  );
+  error.code = "PRIVACYAI_AMBIGUOUS_SESSION_MAP";
+  return error;
 }
 
 export function rebaseSessionAdditions(sanitizedText, additions = {}, existing = {}) {
@@ -63,13 +100,19 @@ export function sanitizeKnownText(text, sessionMap = {}) {
   // Replace against the original input in one pass. This prevents a later
   // mapping from matching inside a placeholder inserted by an earlier one.
   const candidates = replacementCandidates(replacements);
+  const candidatesByValue = new Map(
+    candidates.map(candidate => [foldSessionMapValue(candidate.value), candidate])
+  );
   const pattern = new RegExp(
     candidates.map(candidate => escapeRegExp(candidate.value)).join("|"),
     "gi"
   );
 
   return text.replace(pattern, match => {
-    const candidate = matchingCandidate(match, candidates);
+    const candidate = candidatesByValue.get(foldSessionMapValue(match));
+    if (!candidate) {
+      throw new Error("PrivacyAI could not resolve a known-value replacement.");
+    }
     return candidate.kind === "placeholder" ? match : candidate.placeholder;
   });
 }
@@ -97,17 +140,6 @@ function replacementCandidates(replacements) {
   );
 }
 
-function matchingCandidate(match, candidates) {
-  const normalized = match.toLocaleLowerCase("en-US");
-  const candidate = candidates.find(entry =>
-    entry.value.toLocaleLowerCase("en-US") === normalized ||
-    new RegExp(`^(?:${escapeRegExp(entry.value)})$`, "i").test(match)
-  );
-  if (!candidate) {
-    throw new Error("PrivacyAI could not resolve a known-value replacement.");
-  }
-  return candidate;
-}
 export function transformValue(value, transformText) {
   if (typeof transformText !== "function") {
     throw new TypeError("transformValue requires a text transformation function.");
