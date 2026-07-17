@@ -26,6 +26,7 @@ export {
   GENERATED_DUMMY_PATTERN_SOURCE
 } from "./dummy-data.js";
 export { localSanitize } from "./local-sanitizer.js";
+export { RegexDetector } from "./detectors/regex.js";
 export { PrivacyGuardianError, ProviderError } from "./errors.js";
 export {
   assertNoProtectedOriginals,

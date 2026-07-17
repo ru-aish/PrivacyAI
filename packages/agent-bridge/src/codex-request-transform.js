@@ -8,6 +8,10 @@ import {
   sanitizeStructuredValue
 } from "@privacy-ai/sdk";
 import { gatewayError } from "./gateway-error.js";
+import {
+  collectCodexJsonSchema,
+  finalizeCodexJsonSchemaTrace
+} from "./codex-json-schema-policy.js";
 
 const ALLOWED_TOP_LEVEL_FIELDS = new Set([
   "model",
@@ -98,7 +102,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     transformed.prompt_cache_key = hashCacheKey(transformed.prompt_cache_key);
   }
 
-  const slots = collectModelVisibleSlots(transformed);
+  const { slots, schemaTraces } = collectModelVisibleSlots(transformed, options.sessionMap || {});
   const imageSlots = collectImageSlots(transformed.input, ["input"]);
   const maxImages = Number(options.maxImagesPerRequest ?? DEFAULT_MAX_IMAGES_PER_REQUEST);
   if (!Number.isSafeInteger(maxImages) || maxImages <= 0) {
@@ -173,6 +177,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
       artifactType
     });
     if (cached?.sessionMapAdditions && typeof cached.sessionMapAdditions === "object") {
+      entry.cacheHit = true;
       mergeDetectedMappings(completeMap, sessionMapAdditions, cached.sessionMapAdditions);
     } else {
       uncached.push({
@@ -264,6 +269,15 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     .sort((left, right) => right.parentPath.length - left.parentPath.length)
     .forEach(entry => renameKeyAtPath(transformed, entry.parentPath, entry.oldKey, entry.value));
 
+  const finalizedSchemaTraces = schemaTraces.map(trace => finalizeCodexJsonSchemaTrace(
+    getAtPath(transformed, trace.path),
+    trace,
+    resolved.map((value, index) => ({ entry: slots[index], value }))
+  ));
+  if (typeof options.onSchemaTrace === "function") {
+    for (const trace of finalizedSchemaTraces) await options.onSchemaTrace(trace);
+  }
+
   assertNoProtectedOriginalsInValue(resolved, completeMap);
 
   return {
@@ -271,6 +285,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     sessionMapAdditions,
     cacheWrites,
     itemRecords,
+    schemaTraces: finalizedSchemaTraces,
     policyFingerprint,
     sessionKey: codexSessionKey(body, options.fallbackSessionId, options.headers)
   };
@@ -292,8 +307,8 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
   }
 
   const transformed = deepClone(body);
-  const slots = collectModelVisibleSlots(transformed);
   const completeMap = { ...(sessionMap || {}) };
+  const { slots } = collectModelVisibleSlots(transformed, completeMap);
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
   const cacheWrites = [];
   const itemRecords = [];
@@ -354,19 +369,19 @@ function collectImageOutputPayload(outputValue, path, output) {
   }
 }
 
-function collectModelVisibleSlots(transformed) {
+function collectModelVisibleSlots(transformed, sessionMap = {}) {
   const slots = [];
+  const schemaTraces = [];
   if (typeof transformed.instructions === "string") {
     slots.push(slot(transformed, ["instructions"]));
   }
-  collectResponseItems(transformed.input, slots, ["input"]);
-  if (transformed.tools != null) collectToolDefinitions(transformed.tools, slots, ["tools"]);
+  collectResponseItems(transformed.input, slots, ["input"], { sessionMap, schemaTraces });
+  if (transformed.tools != null) collectToolDefinitions(transformed.tools, slots, ["tools"], { sessionMap, schemaTraces });
   if (transformed.text?.format?.schema != null) {
     const schemaPath = ["text", "format", "schema"];
-    collectAllStringValues(transformed.text.format.schema, slots, schemaPath);
-    collectJsonSchemaKeys(transformed.text.format.schema, slots, schemaPath);
+    collectSchemaSlots(transformed.text.format.schema, slots, schemaPath, sessionMap, schemaTraces);
   }
-  return slots;
+  return { slots, schemaTraces };
 }
 
 export function codexSessionContext(body, fallbackSessionId, headers = {}) {
@@ -712,11 +727,11 @@ function validateTextControl(value) {
   }
 }
 
-function collectResponseItems(items, slots, basePath) {
-  items.forEach((item, index) => collectResponseItem(item, slots, [...basePath, index]));
+function collectResponseItems(items, slots, basePath, context = {}) {
+  items.forEach((item, index) => collectResponseItem(item, slots, [...basePath, index], context));
 }
 
-function collectResponseItem(item, slots, path) {
+function collectResponseItem(item, slots, path, context = {}) {
   if (!item || typeof item !== "object" || Array.isArray(item) || typeof item.type !== "string") {
     throw gatewayError("PRIVACYAI_CODEX_UNSUPPORTED_INPUT", "PrivacyAI blocked an invalid Codex response item.");
   }
@@ -828,14 +843,14 @@ function collectResponseItem(item, slots, path) {
       if (item.execution !== "client") {
         throw gatewayError("PRIVACYAI_CODEX_UNSUPPORTED_INPUT", "PrivacyAI blocked non-client Codex tool-search output.");
       }
-      collectToolDefinitions(item.tools, slots, [...path, "tools"]);
+      collectToolDefinitions(item.tools, slots, [...path, "tools"], context);
       return;
     case "additional_tools":
       validateResponseItemShape(item, new Set(["type", "id", "role", "tools"]), "additional_tools");
       if (!new Set(["assistant", "developer", "user"]).has(item.role)) {
         throw gatewayError("PRIVACYAI_CODEX_UNSUPPORTED_INPUT", "PrivacyAI blocked unsupported additional-tools role.");
       }
-      collectToolDefinitions(item.tools, slots, [...path, "tools"]);
+      collectToolDefinitions(item.tools, slots, [...path, "tools"], context);
       return;
     case "web_search_call":
     case "image_generation_call":
@@ -1055,7 +1070,7 @@ function collectOutputPayload(output, slots, path) {
   throw gatewayError("PRIVACYAI_CODEX_UNSUPPORTED_INPUT", "PrivacyAI blocked an invalid tool output payload.");
 }
 
-function collectToolDefinitions(value, slots, path) {
+function collectToolDefinitions(value, slots, path, context = {}) {
   if (value == null) return;
   if (!Array.isArray(value)) {
     throw gatewayError(
@@ -1063,7 +1078,7 @@ function collectToolDefinitions(value, slots, path) {
       "PrivacyAI blocked a non-array Codex tool definition list."
     );
   }
-  value.forEach((tool, index) => collectToolDefinition(tool, slots, [...path, index]));
+  value.forEach((tool, index) => collectToolDefinition(tool, slots, [...path, index], { ...context }));
 }
 
 function collectToolDefinition(tool, slots, path, options = {}) {
@@ -1096,7 +1111,7 @@ function collectToolDefinition(tool, slots, path, options = {}) {
           "PrivacyAI blocked a function tool with invalid defer_loading."
         );
       }
-      collectJsonSchema(tool.parameters, slots, [...path, "parameters"]);
+      collectSchemaSlots(tool.parameters, slots, [...path, "parameters"], options.sessionMap, options.schemaTraces);
       return;
     case "namespace":
       if (options.nested) {
@@ -1121,7 +1136,7 @@ function collectToolDefinition(tool, slots, path, options = {}) {
             "PrivacyAI supports only function tools inside Codex namespaces."
           );
         }
-        collectToolDefinition(child, slots, [...path, "tools", index], { nested: true });
+        collectToolDefinition(child, slots, [...path, "tools", index], { ...options, nested: true });
       });
       return;
     case "tool_search":
@@ -1143,7 +1158,7 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         );
       }
       collectRequiredString(tool, "description", slots, path);
-      collectJsonSchema(tool.parameters, slots, [...path, "parameters"]);
+      collectSchemaSlots(tool.parameters, slots, [...path, "parameters"], options.sessionMap, options.schemaTraces);
       return;
     case "custom":
       if (options.nested) {
@@ -1178,67 +1193,11 @@ function collectToolDefinition(tool, slots, path, options = {}) {
   }
 }
 
-function collectJsonSchema(value, slots, path) {
-  if (!(
-    typeof value === "boolean" ||
-    (value && typeof value === "object" && !Array.isArray(value))
-  )) {
-    throw gatewayError(
-      "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION",
-      "PrivacyAI blocked an invalid Codex JSON Schema."
-    );
-  }
-  collectAllStringValues(value, slots, path);
-  collectJsonSchemaKeys(value, slots, path);
-}
-
-function collectJsonSchemaKeys(value, slots, path) {
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) => collectJsonSchemaKeys(entry, slots, [...path, index]));
-    return;
-  }
-  if (!value || typeof value !== "object") return;
-
-  const userKeyMaps = new Set([
-    "properties",
-    "patternProperties",
-    "$defs",
-    "definitions",
-    "dependentSchemas",
-    "dependentRequired"
-  ]);
-  for (const [key, entry] of Object.entries(value)) {
-    const entryPath = [...path, key];
-    if (userKeyMaps.has(key) && entry && typeof entry === "object" && !Array.isArray(entry)) {
-      for (const [userKey, child] of Object.entries(entry)) {
-        slots.push({
-          keyRename: true,
-          parentPath: entryPath,
-          oldKey: userKey,
-          value: userKey
-        });
-        collectJsonSchemaKeys(child, slots, [...entryPath, userKey]);
-      }
-      continue;
-    }
-    collectJsonSchemaKeys(entry, slots, entryPath);
-  }
-}
-
-function collectAllStringValues(value, slots, path, excludedKeys = new Set()) {
-  if (typeof value === "string") {
-    slots.push({ path, value });
-    return;
-  }
-  if (Array.isArray(value)) {
-    value.forEach((entry, index) => collectAllStringValues(entry, slots, [...path, index], excludedKeys));
-    return;
-  }
-  if (!value || typeof value !== "object") return;
-  for (const [key, entry] of Object.entries(value)) {
-    if (excludedKeys.has(key)) continue;
-    collectAllStringValues(entry, slots, [...path, key], excludedKeys);
-  }
+function collectSchemaSlots(value, slots, path, sessionMap, schemaTraces) {
+  const collected = collectCodexJsonSchema(value, path, sessionMap);
+  collected.trace.path = path;
+  slots.push(...collected.slots);
+  schemaTraces?.push(collected.trace);
 }
 
 function sanitizeClientMetadata(metadata) {

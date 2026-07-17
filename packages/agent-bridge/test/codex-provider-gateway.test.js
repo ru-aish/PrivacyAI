@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { restoreValue } from "@privacy-ai/sdk";
+
 import {
   CodexSseRestorer,
   buildCodexProviderArgs,
@@ -490,42 +492,96 @@ test("provider-safe tool aliases avoid collisions with real tool names", async (
   assert.equal(call.name, privateToolName);
 });
 
-test("tool JSON Schema private keys are sanitized consistently and restored in function arguments", async () => {
+test("Codex JSON Schema policy preserves protocol fields and only sanitizes prose annotations", async () => {
   const body = sampleRequest();
+  const sanitizerCalls = [];
+  const emailField = "owner_email";
+  const credentialField = "credential_hint";
   body.tools[0].parameters = {
+    $id: "urn:privacyai:tool",
+    $schema: "https://json-schema.org/draft/2020-12/schema",
+    $anchor: "tool-root",
+    $dynamicAnchor: "dynamic-tool-root",
     type: "object",
     properties: {
-      [PRIVATE_EMAIL]: {
+      [emailField]: {
         type: "string",
-        description: `value for ${PRIVATE_EMAIL}`
+        description: `value for ${PRIVATE_EMAIL}`,
+        title: `Title ${PRIVATE_KEY}`
       },
       nested: {
         type: "object",
         properties: {
-          [PRIVATE_KEY]: { type: "string" }
+          [credentialField]: { type: "string", $comment: `Comment ${PRIVATE_EMAIL}` }
         },
-        required: [PRIVATE_KEY]
+        required: [credentialField]
       }
     },
-    required: [PRIVATE_EMAIL]
+    patternProperties: { "^private_[0-9]+$": { type: "string" } },
+    dependentSchemas: { dependent: { const: credentialField } },
+    required: [emailField],
+    $defs: { ScreenshotOutputFormat: { enum: ["image", "text"] } },
+    definitions: { LegacyOutput: { type: "boolean" } },
+    allOf: [{ $ref: "#/$defs/ScreenshotOutputFormat" }],
+    default: { description: "DEFAULT_DESCRIPTION_SENTINEL" },
+    const: { title: "CONST_TITLE_SENTINEL" },
+    examples: [{ $comment: "EXAMPLE_COMMENT_SENTINEL" }],
+    "x-provider-metadata": { description: "EXTENSION_DESCRIPTION_SENTINEL" }
   };
 
-  const result = await sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer });
+  const traces = [];
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: async text => {
+      sanitizerCalls.push(text);
+      return deterministicSanitizer(text);
+    },
+    onSchemaTrace: trace => traces.push(trace)
+  });
   const schema = result.body.tools[0].parameters;
-  assert.equal(Object.hasOwn(schema.properties, "[EMAIL_1]"), true);
-  assert.deepEqual(schema.required, ["[EMAIL_1]"]);
-  assert.equal(Object.hasOwn(schema.properties.nested.properties, "[API_KEY_1]"), true);
-  assert.deepEqual(schema.properties.nested.required, ["[API_KEY_1]"]);
-  assert.equal(JSON.stringify(schema).includes(PRIVATE_EMAIL), false);
-  assert.equal(JSON.stringify(schema).includes(PRIVATE_KEY), false);
+  assert.equal(Object.hasOwn(schema.properties, emailField), true);
+  assert.deepEqual(schema.required, [emailField]);
+  assert.equal(Object.hasOwn(schema.properties.nested.properties, credentialField), true);
+  assert.deepEqual(schema.properties.nested.required, [credentialField]);
+  assert.equal(schema.allOf[0].$ref, "#/$defs/ScreenshotOutputFormat");
+  assert.deepEqual(schema.$defs.ScreenshotOutputFormat.enum, ["image", "text"]);
+  assert.equal(schema.dependentSchemas.dependent.const, credentialField);
+  assert.deepEqual(schema.default, { description: "DEFAULT_DESCRIPTION_SENTINEL" });
+  assert.deepEqual(schema.const, { title: "CONST_TITLE_SENTINEL" });
+  assert.deepEqual(schema.examples, [{ $comment: "EXAMPLE_COMMENT_SENTINEL" }]);
+  assert.deepEqual(schema["x-provider-metadata"], {
+    description: "EXTENSION_DESCRIPTION_SENTINEL"
+  });
+  assert.equal(schema.properties[emailField].description, "value for [EMAIL_1]");
+  assert.equal(schema.properties[emailField].title, "Title [API_KEY_1]");
+  assert.equal(schema.properties.nested.properties[credentialField].$comment, "Comment [EMAIL_1]");
+  assert.equal(sanitizerCalls.some(value => value.includes("#/$defs/ScreenshotOutputFormat")), false);
+  assert.equal(sanitizerCalls.some(value => value === PRIVATE_EMAIL || value === PRIVATE_KEY), false);
+  const serializedSanitizerCalls = JSON.stringify(sanitizerCalls);
+  for (const sentinel of [
+    "DEFAULT_DESCRIPTION_SENTINEL",
+    "CONST_TITLE_SENTINEL",
+    "EXAMPLE_COMMENT_SENTINEL",
+    "EXTENSION_DESCRIPTION_SENTINEL"
+  ]) {
+    assert.equal(serializedSanitizerCalls.includes(sentinel), false);
+  }
+  assert.deepEqual(restoreValue(schema, sessionMap), body.tools[0].parameters);
+  assert.equal(traces.length, 1);
+  assert.equal(traces[0].structurePreserved, true);
+  assert.equal(traces[0].sanitizedAnnotationCount, 3);
+  assert.equal(traces[0].schemaKind, "tool_parameters");
+  const serializedTrace = JSON.stringify(traces);
+  assert.equal(serializedTrace.includes(PRIVATE_EMAIL), false);
+  assert.equal(serializedTrace.includes(PRIVATE_KEY), false);
+  assert.equal(serializedTrace.includes("ScreenshotOutputFormat"), false);
 
   const call = {
     type: "function_call",
     call_id: "schema-call",
     name: "shell_command",
     arguments: JSON.stringify({
-      "[EMAIL_1]": "visible",
-      nested: { "[API_KEY_1]": "value" }
+      [PRIVATE_EMAIL]: "visible",
+      nested: { [PRIVATE_KEY]: "value" }
     })
   };
   restoreResponseItem(call, sessionMap);
@@ -535,19 +591,84 @@ test("tool JSON Schema private keys are sanitized consistently and restored in f
   });
 });
 
-test("tool JSON Schema key collisions fail closed", async () => {
+test("Codex text.format schema uses the same immutable policy, including boolean schemas", async () => {
+  const body = sampleRequest();
+  body.text = { format: {
+    type: "json_schema",
+    strict: true,
+    name: "codex_output_schema",
+    schema: {
+      $defs: { ScreenshotOutputFormat: { type: "string" } },
+      $ref: "#/$defs/ScreenshotOutputFormat",
+      description: `Output for ${PRIVATE_EMAIL}`,
+      properties: {},
+      required: ["__proto__"]
+    }
+  } };
+  Object.defineProperty(body.text.format.schema.properties, "__proto__", {
+    value: { title: `Owner ${PRIVATE_KEY}`, type: "string" },
+    enumerable: true,
+    configurable: true,
+    writable: true
+  });
+  const calls = [];
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: async value => {
+      calls.push(value);
+      return deterministicSanitizer(value);
+    }
+  });
+  const schema = result.body.text.format.schema;
+  assert.equal(schema.$ref, "#/$defs/ScreenshotOutputFormat");
+  assert.equal(Object.hasOwn(schema.properties, "__proto__"), true);
+  assert.deepEqual(schema.required, ["__proto__"]);
+  assert.equal(schema.description, "Output for [EMAIL_1]");
+  assert.equal(schema.properties.__proto__.title, "Owner [API_KEY_1]");
+  assert.equal(calls.some(value => value.includes("ScreenshotOutputFormat")), false);
+  assert.equal(result.schemaTraces.find(trace => trace.schemaKind === "text_format")?.structurePreserved, true);
+
+  body.text.format.schema = true;
+  const booleanResult = await sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer });
+  assert.equal(booleanResult.body.text.format.schema, true);
+});
+
+test("Codex schema policy fails closed for detectable or known protected immutable identifiers and malformed schemas", async () => {
   const body = sampleRequest();
   body.tools[0].parameters = {
     type: "object",
-    properties: {
-      [PRIVATE_EMAIL]: { type: "string" },
-      "[EMAIL_1]": { type: "string" }
-    }
+    $defs: { [PRIVATE_EMAIL]: { type: "string" } }
   };
   await assert.rejects(
     sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
-    error => error?.code === "PRIVACYAI_TRANSFORM_KEY_COLLISION"
+    error => error?.code === "PRIVACYAI_CODEX_SCHEMA_IMMUTABLE_PROTECTED_VALUE" && !error.message.includes(PRIVATE_EMAIL)
   );
+
+  const knownPrivateIdentifier = "internal-customer-field";
+  body.tools[0].parameters = {
+    type: "object",
+    properties: { [knownPrivateIdentifier]: { type: "string" } }
+  };
+  await assert.rejects(
+    sanitizeCodexRequestBody(body, {
+      sanitizer: deterministicSanitizer,
+      sessionMap: { "[PRIVATE_VALUE_99]": knownPrivateIdentifier }
+    }),
+    error => error?.code === "PRIVACYAI_CODEX_SCHEMA_IMMUTABLE_PROTECTED_VALUE" &&
+      !error.message.includes(knownPrivateIdentifier)
+  );
+  for (const malformedSchema of [
+    [],
+    { type: "object", properties: [] },
+    { type: "object", allOf: {} },
+    { type: "object", required: [7] },
+    { type: "invalid-type" }
+  ]) {
+    body.tools[0].parameters = malformedSchema;
+    await assert.rejects(
+      sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
+      error => error?.code === "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION"
+    );
+  }
 });
 
 test("restoreResponseItem rejects unknown and provider-hosted response items", () => {

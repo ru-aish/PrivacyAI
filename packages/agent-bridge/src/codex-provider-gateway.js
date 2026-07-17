@@ -223,7 +223,8 @@ async function handleRequestCore(request, response, context) {
       headers: request.headers,
       signal: context.requestSignal,
       onBatchComplete: context.onSanitizerBatchComplete,
-      onArtifactComplete: context.onSanitizerArtifactComplete
+      onArtifactComplete: context.onSanitizerArtifactComplete,
+      onSchemaTrace: context.onSchemaTrace
     });
     throwIfAborted(context.requestSignal);
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
