@@ -13,6 +13,7 @@ export {
   parseCodexPrivacyMode
 } from "./codex-provider-config.js";
 export { startCodexProviderGateway } from "./codex-provider-gateway.js";
+export { createCodexImageSanitizer, toCodexImageError } from "./codex-image-adapter.js";
 export {
   MemoryContextVerificationStore,
   SqliteContextVerificationStore,

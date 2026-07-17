@@ -1,88 +1,143 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PrivacyAI Demo</title>
-    <link rel="stylesheet" href="/css/style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PrivacyAI Boundary Playground</title>
+  <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>PrivacyAI Demo</h1>
-            <p>Try the SDK in your browser — private data is redacted before it reaches the model.</p>
-        </header>
+  <main class="shell">
+    <header class="masthead">
+      <div>
+        <p class="eyebrow">Local privacy boundary</p>
+        <h1>See what Codex actually receives.</h1>
+        <p class="lede">Preview the exact prompt and screenshot produced by PrivacyAI before anything leaves your machine.</p>
+      </div>
+      <div class="status-card" aria-live="polite">
+        <span class="status-dot" id="statusDot"></span>
+        <div>
+          <strong id="statusText">Checking Ollama…</strong>
+          <span id="providerBadge">Local model loading</span>
+        </div>
+      </div>
+    </header>
 
-        <div class="status-bar">
-            <div class="status-indicator" id="statusIndicator">
-                <span class="status-dot"></span>
-                <span id="statusText">Checking status...</span>
+    <section class="workbench" aria-label="Privacy playground">
+      <div class="mode-switch" role="tablist" aria-label="Playground mode">
+        <button class="mode-button is-active" id="textModeButton" type="button" role="tab" aria-selected="true" aria-controls="textModePanel">Text</button>
+        <button class="mode-button" id="imageModeButton" type="button" role="tab" aria-selected="false" aria-controls="imageModePanel">Prompt + image</button>
+      </div>
+
+      <section id="textModePanel" class="mode-panel" role="tabpanel" aria-labelledby="textModeButton">
+        <div class="field-grid">
+          <label class="field">
+            <span>System prompt <small>optional</small></span>
+            <textarea id="systemPrompt" rows="3" placeholder="Instructions for the local task model"></textarea>
+          </label>
+          <label class="field field-primary">
+            <span>Your message</span>
+            <textarea id="userMessage" rows="6" placeholder="Paste a normal developer prompt containing the private values you want to inspect."></textarea>
+          </label>
+        </div>
+        <div class="actions">
+          <button class="button button-primary" id="sendButton" type="button">Send through PrivacyAI</button>
+          <button class="button button-secondary" id="sanitizeOnlyButton" type="button">Preview sanitization</button>
+          <button class="button button-quiet" id="testConnectionButton" type="button">Test Ollama</button>
+        </div>
+      </section>
+
+      <section id="imageModePanel" class="mode-panel" role="tabpanel" aria-labelledby="imageModeButton" hidden>
+        <div class="image-input-grid">
+          <label class="field field-primary">
+            <span>Prompt sent with the image</span>
+            <textarea id="imagePrompt" rows="6" placeholder="Example: Find the problem in this deployment form and use the visible owner details."></textarea>
+          </label>
+
+          <div class="upload-column">
+            <input id="imageFile" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+            <label class="drop-zone" id="dropZone" for="imageFile" tabindex="0">
+              <span class="drop-icon" aria-hidden="true">↥</span>
+              <strong>Choose or drop a screenshot</strong>
+              <span>PNG, JPEG, or WebP · up to 8 MB</span>
+            </label>
+            <div class="selected-file" id="selectedFile" hidden>
+              <img id="selectedImageThumb" alt="Selected screenshot preview">
+              <div>
+                <strong id="selectedFileName"></strong>
+                <span id="selectedFileMeta"></span>
+              </div>
+              <button class="icon-button" id="clearImageButton" type="button" aria-label="Remove selected image">×</button>
             </div>
-            <div class="provider-badge" id="providerBadge">Provider: loading...</div>
+          </div>
+        </div>
+        <div class="actions image-actions">
+          <button class="button button-primary" id="sanitizeImageButton" type="button">Show provider-bound version</button>
+          <p class="action-note">Runs the same strict Ollama prompt and OCR masking pipeline used by <code>privacyai codex</code>.</p>
+        </div>
+      </section>
+
+      <section class="text-results" id="textResults" hidden aria-live="polite">
+        <div class="section-heading">
+          <div><p class="eyebrow">Text boundary</p><h2>Result</h2></div>
+        </div>
+        <div class="text-result-grid">
+          <article class="result-card"><span class="result-label">Local original</span><pre id="originalMessage"></pre></article>
+          <article class="result-card result-card-safe"><span class="result-label">Provider-bound prompt</span><pre id="sanitizedMessage"></pre><div class="tag-list" id="privacyItems"></div></article>
+          <article class="result-card" id="aiResponseBox" hidden><span class="result-label">Model response with stand-ins</span><pre id="aiResponse"></pre></article>
+          <article class="result-card" id="finalResponseBox" hidden><span class="result-label">Locally restored response</span><pre id="finalResponse"></pre></article>
+        </div>
+      </section>
+
+      <section class="image-results" id="imageResults" hidden aria-live="polite">
+        <div class="section-heading">
+          <div><p class="eyebrow">Image boundary</p><h2>Before and provider-bound output</h2></div>
+          <div class="result-statuses" id="imageResultStatuses"></div>
         </div>
 
-        <div class="main-interface">
-            <div class="input-section">
-                <div class="input-group">
-                    <label for="systemPrompt">System Prompt (Optional):</label>
-                    <textarea id="systemPrompt" placeholder="Enter system instructions for the AI..."></textarea>
-                </div>
+        <div class="boundary-grid">
+          <article class="preview-card">
+            <div class="preview-heading"><span class="step-marker">Local only</span><strong>Original input</strong></div>
+            <div class="image-stage"><img id="originalImagePreview" alt="Original uploaded screenshot"></div>
+            <div class="prompt-preview"><span>Prompt</span><pre id="originalImagePrompt"></pre></div>
+          </article>
 
-                <div class="input-group">
-                    <label for="userMessage">Your Message:</label>
-                    <textarea id="userMessage" placeholder="Enter your message here. Emails, phone numbers, and names are protected automatically."></textarea>
-                </div>
+          <div class="boundary-rail" aria-hidden="true">
+            <span>PrivacyAI</span><i></i><b>→</b>
+          </div>
 
-                <div class="button-group">
-                    <button id="sendButton" onclick="processMessage()">
-                        <span class="button-text">Send Message</span>
-                        <span class="loading-spinner" style="display: none;">...</span>
-                    </button>
-                    <button id="sanitizeOnlyButton" onclick="sanitizeOnly()">
-                        Preview Sanitization
-                    </button>
-                    <button id="testConnectionButton" onclick="testConnection()">
-                        Test AI Connection
-                    </button>
-                </div>
+          <article class="preview-card preview-card-safe">
+            <div class="preview-heading"><span class="step-marker safe">Leaves device</span><strong>What Codex receives</strong></div>
+            <div class="image-stage"><img id="sanitizedImagePreview" alt="Sanitized screenshot sent to Codex"></div>
+            <div class="prompt-preview"><span>Sanitized prompt</span><pre id="sanitizedImagePrompt"></pre></div>
+            <div class="preview-actions">
+              <button class="button button-quiet" id="copyPromptButton" type="button">Copy safe prompt</button>
+              <a class="button button-secondary" id="downloadImageLink" download="privacyai-sanitized.png">Save safe image</a>
             </div>
-
-            <div class="results-section" id="resultsSection" style="display: none;">
-                <h3>Results</h3>
-
-                <div class="result-box">
-                    <h4>Your Original Message</h4>
-                    <div class="result-content" id="originalMessage"></div>
-                </div>
-
-                <div class="result-box" id="sanitizedBox" style="display: none;">
-                    <h4>Sanitized Message (Dummy Data Sent to AI)</h4>
-                    <div class="result-content" id="sanitizedMessage"></div>
-                    <div class="privacy-items" id="privacyItems"></div>
-                </div>
-
-                <div class="result-box" id="aiResponseBox" style="display: none;">
-                    <h4>AI Response (With Dummy Stand-ins)</h4>
-                    <div class="result-content" id="aiResponse"></div>
-                </div>
-
-                <div class="result-box" id="finalResponseBox" style="display: none;">
-                    <h4>Final Response (Privacy Restored)</h4>
-                    <div class="result-content" id="finalResponse"></div>
-                </div>
-            </div>
-
-            <div class="error-section" id="errorSection" style="display: none;">
-                <h3>Error</h3>
-                <div class="error-content" id="errorMessage"></div>
-            </div>
+          </article>
         </div>
 
-        <footer>
-            <p>Powered by <code>@privacy-ai/sdk</code></p>
-        </footer>
-    </div>
+        <div class="inspection-strip">
+          <div><span>OCR lines</span><strong id="ocrLineCount">0</strong></div>
+          <div><span>Masked regions</span><strong id="regionCount">0</strong></div>
+          <div><span>Mask strategy</span><strong id="maskStrategy">none</strong></div>
+          <div><span>Verification passes</span><strong id="verificationAttempts">0</strong></div>
+          <div class="inspection-mappings"><span>Safe replacements</span><div class="tag-list" id="imagePrivacyItems"></div></div>
+        </div>
+      </section>
 
-    <script src="/js/app.js"></script>
+      <section class="error-panel" id="errorSection" hidden role="alert">
+        <strong>Preview stopped</strong>
+        <p id="errorMessage"></p>
+      </section>
+    </section>
+
+    <footer>
+      <span>PrivacyAI</span>
+      <p>Raw prompts and screenshots stay on this machine. Only sanitized output is shown as provider-bound.</p>
+    </footer>
+  </main>
+
+  <script type="module" src="/js/app.js"></script>
 </body>
 </html>

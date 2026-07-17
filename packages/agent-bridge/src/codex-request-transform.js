@@ -69,6 +69,7 @@ const RESERVED_METADATA_FIELDS = new Set([
 
 const PROVIDER_IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]+$/;
 const PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH = 64;
+const DEFAULT_MAX_IMAGES_PER_REQUEST = 8;
 
 export async function sanitizeCodexRequestBody(body, options = {}) {
   throwIfAborted(options.signal);
@@ -98,6 +99,17 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   }
 
   const slots = collectModelVisibleSlots(transformed);
+  const imageSlots = collectImageSlots(transformed.input, ["input"]);
+  const maxImages = Number(options.maxImagesPerRequest ?? DEFAULT_MAX_IMAGES_PER_REQUEST);
+  if (!Number.isSafeInteger(maxImages) || maxImages <= 0) {
+    throw new TypeError("maxImagesPerRequest must be a positive safe integer.");
+  }
+  if (imageSlots.length > maxImages) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_TOO_MANY_IMAGES",
+      `PrivacyAI blocked a Codex request with more than ${maxImages} images.`
+    );
+  }
 
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
   const resolved = new Array(slots.length);
@@ -107,6 +119,46 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   const initialSessionMap = { ...(options.sessionMap || {}) };
   const completeMap = { ...(options.sessionMap || {}) };
   const sessionMapAdditions = {};
+
+  if (imageSlots.length > 0) {
+    const sanitizeImage = typeof options.imageSanitizer === "function"
+      ? options.imageSanitizer
+      : options.imageSanitizer?.sanitize?.bind(options.imageSanitizer);
+    if (typeof sanitizeImage !== "function") {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_IMAGE_SANITIZER_REQUIRED",
+        "PrivacyAI blocked image content because no local image sanitizer is available."
+      );
+    }
+    for (let imageIndex = 0; imageIndex < imageSlots.length; imageIndex += 1) {
+      throwIfAborted(options.signal);
+      const entry = imageSlots[imageIndex];
+      const result = await sanitizeImage(entry.value, {
+        sanitizer: options.sanitizer,
+        sessionMap: completeMap,
+        maxContextChars: options.maxContextChars,
+        signal: options.signal,
+        onBatchComplete: options.onBatchComplete
+      });
+      if (!result || typeof result.imageUrl !== "string") {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_SANITIZED_IMAGE",
+          "PrivacyAI blocked the Codex request because image sanitization returned an invalid result."
+        );
+      }
+      mergeDetectedMappings(completeMap, sessionMapAdditions, result.sessionMapAdditions);
+      setAtPath(transformed, entry.path, result.imageUrl);
+      if (typeof options.onArtifactComplete === "function") {
+        await options.onArtifactComplete({
+          artifactIndex: imageIndex,
+          artifactCount: imageSlots.length,
+          artifactKey: slotIdentity(entry),
+          artifactType: "image",
+          slotCount: 1
+        });
+      }
+    }
+  }
 
   for (let index = 0; index < slots.length; index += 1) {
     const entry = slots[index];
@@ -266,6 +318,40 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
   }
 
   return { cacheWrites, itemRecords, policyFingerprint };
+}
+
+function collectImageSlots(items, basePath) {
+  const output = [];
+  items.forEach((item, index) => {
+    const itemPath = [...basePath, index];
+    if (item.type === "message") {
+      collectImageContentItems(item.content, [...itemPath, "content"], output);
+      return;
+    }
+    if (new Set(["function_call_output", "custom_tool_call_output"]).has(item.type)) {
+      collectImageOutputPayload(item.output, [...itemPath, "output"], output);
+    }
+  });
+  return output;
+}
+
+function collectImageContentItems(content, path, output) {
+  if (!Array.isArray(content)) return;
+  content.forEach((entry, index) => {
+    if (entry?.type === "input_image" && typeof entry.image_url === "string") {
+      output.push({ path: [...path, index, "image_url"], value: entry.image_url, media: true });
+    }
+  });
+}
+
+function collectImageOutputPayload(outputValue, path, output) {
+  if (Array.isArray(outputValue)) {
+    collectImageContentItems(outputValue, path, output);
+    return;
+  }
+  if (Array.isArray(outputValue?.content_items)) {
+    collectImageContentItems(outputValue.content_items, [...path, "content_items"], output);
+  }
 }
 
 function collectModelVisibleSlots(transformed) {
@@ -791,10 +877,20 @@ function collectContentItems(content, slots, path) {
   content.forEach((entry, index) => {
     const entryPath = [...path, index];
     assertPlainObject(entry, "message content");
-    if (new Set(["input_image", "output_image", "input_file", "computer_screenshot"]).has(entry.type)) {
+    if (entry.type === "input_image") {
+      assertOnlyKeys(entry, new Set(["type", "image_url", "detail"]), "message image content");
+      if (typeof entry.image_url !== "string") {
+        throw gatewayError("PRIVACYAI_CODEX_INVALID_IMAGE", "PrivacyAI blocked an image without a string data URL.");
+      }
+      if (entry.detail != null && !new Set(["auto", "low", "high"]).has(entry.detail)) {
+        throw gatewayError("PRIVACYAI_CODEX_INVALID_IMAGE", "PrivacyAI blocked an image with unsupported detail.");
+      }
+      return;
+    }
+    if (new Set(["output_image", "input_file", "computer_screenshot"]).has(entry.type)) {
       throw gatewayError(
         "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA",
-        `PrivacyAI does not yet support Codex media content type: ${entry.type}`
+        `PrivacyAI does not support Codex media content type: ${entry.type}`
       );
     }
     if (!new Set(["input_text", "output_text"]).has(entry.type)) {
@@ -917,10 +1013,14 @@ function collectToolOutputContentItems(content, slots, path) {
       return;
     }
     if (entry.type === "input_image") {
-      throw gatewayError(
-        "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA",
-        "PrivacyAI does not yet support image tool output content."
-      );
+      assertOnlyKeys(entry, new Set(["type", "image_url", "detail"]), "tool output image");
+      if (typeof entry.image_url !== "string") {
+        throw gatewayError("PRIVACYAI_CODEX_INVALID_IMAGE", "PrivacyAI blocked a tool image without a string data URL.");
+      }
+      if (entry.detail != null && !new Set(["auto", "low", "high"]).has(entry.detail)) {
+        throw gatewayError("PRIVACYAI_CODEX_INVALID_IMAGE", "PrivacyAI blocked a tool image with unsupported detail.");
+      }
+      return;
     }
     throw gatewayError(
       "PRIVACYAI_CODEX_UNSUPPORTED_CONTENT",
