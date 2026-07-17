@@ -10,15 +10,22 @@ export function locatePrivateRegions(lines, sessionMap) {
       typeof placeholder === "string" && placeholder.length > 0 &&
       typeof original === "string" && original.length > 0 && placeholder !== original
     )
-    .sort((left, right) => right[1].length - left[1].length);
+    .sort((left, right) =>
+      right[1].length - left[1].length ||
+      left[1].localeCompare(right[1]) ||
+      left[0].localeCompare(right[0])
+    );
   const regions = [];
 
   for (const line of lines || []) {
+    const text = String(line.text || "");
+    const lowerText = text.toLocaleLowerCase("en-US");
     const occupied = [];
     for (const [placeholder, original] of candidates) {
+      const lowerOriginal = original.toLocaleLowerCase("en-US");
       let cursor = 0;
-      while (cursor <= line.text.length - original.length) {
-        const start = line.text.indexOf(original, cursor);
+      while (cursor <= text.length - original.length) {
+        const start = lowerText.indexOf(lowerOriginal, cursor);
         if (start === -1) break;
         const end = start + original.length;
         cursor = end;

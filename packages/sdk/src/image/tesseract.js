@@ -42,8 +42,9 @@ export function createTesseractOcrEngine(options = {}) {
       closed = true;
       await queue.catch(() => {});
       if (!workersPromise) return;
-      const workers = await workersPromise;
-      await Promise.all([workers.auto.terminate(), workers.sparse.terminate()]);
+      const workers = await workersPromise.catch(() => null);
+      if (!workers) return;
+      await Promise.allSettled([workers.auto.terminate(), workers.sparse.terminate()]);
     }
   };
 }
@@ -102,12 +103,14 @@ function linesFromBlocks(data, scale, pass) {
 
 function locateWords(text, words, scale) {
   const output = [];
+  const normalizedText = String(text || "").toLocaleLowerCase("en-US");
   let cursor = 0;
   for (const word of words || []) {
     const value = String(word.text || "").trim();
     if (!value) continue;
-    let start = text.indexOf(value, cursor);
-    if (start === -1) start = text.indexOf(value);
+    const normalizedValue = value.toLocaleLowerCase("en-US");
+    let start = normalizedText.indexOf(normalizedValue, cursor);
+    if (start === -1) start = normalizedText.indexOf(normalizedValue);
     if (start === -1) continue;
     output.push({ text: value, start, end: start + value.length, box: scaleBox(word.bbox, scale) });
     cursor = start + value.length;

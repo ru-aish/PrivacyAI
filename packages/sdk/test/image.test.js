@@ -14,9 +14,10 @@ const PRIVATE = "alice.private@example.test";
 const PLACEHOLDER = "[EMAIL_1]";
 
 function sanitizer(text) {
-  const found = text.includes(PRIVATE);
+  const pattern = new RegExp(PRIVATE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig");
+  const found = pattern.test(text);
   return Promise.resolve({
-    sanitizedPrompt: found ? text.replaceAll(PRIVATE, PLACEHOLDER) : text,
+    sanitizedPrompt: found ? text.replace(pattern, PLACEHOLDER) : text,
     sessionMap: found ? { [PLACEHOLDER]: PRIVATE } : {}
   });
 }
@@ -39,6 +40,24 @@ function privateLine() {
     words: [
       { text: PRIVATE, start: first, end: first + PRIVATE.length, box: [62, 10, 260, 42] },
       { text: PRIVATE, start: second, end: second + PRIVATE.length, box: [330, 10, 528, 42] }
+    ]
+  };
+}
+
+function caseDriftLine() {
+  const upper = PRIVATE.toUpperCase();
+  const text = `owner ${upper} backup ${PRIVATE}`;
+  const first = text.indexOf(upper);
+  const second = text.indexOf(PRIVATE, first + upper.length);
+  return {
+    text,
+    confidence: 0.96,
+    box: [10, 10, 590, 42],
+    words: [
+      { text: "owner", start: 0, end: 5, box: [10, 10, 55, 42] },
+      { text: upper, start: first, end: first + upper.length, box: [62, 10, 290, 42] },
+      { text: "backup", start: 32, end: 38, box: [300, 10, 350, 42] },
+      { text: PRIVATE, start: second, end: second + PRIVATE.length, box: [360, 10, 558, 42] }
     ]
   };
 }
@@ -100,6 +119,17 @@ test("private region mapping covers duplicate and fragmented OCR spans", () => {
   );
 });
 
+test("private region mapping matches OCR case drift without shifting offsets", () => {
+  const regions = locatePrivateRegions([caseDriftLine()], { [PLACEHOLDER]: PRIVATE });
+  assert.equal(regions.length, 2);
+  assert.deepEqual(
+    regions.map(region => region.box),
+    [[62, 10, 290, 42], [360, 10, 558, 42]]
+  );
+  assert.deepEqual(regions.map(region => region.placeholder), [PLACEHOLDER, PLACEHOLDER]);
+  assert.deepEqual(regions.map(region => region.original), [PRIVATE, PRIVATE]);
+});
+
 test("image sanitizer masks duplicate regions and verifies opaque PNG output", async () => {
   const source = await imageDataUrl(650, 100);
   let calls = 0;
@@ -122,6 +152,26 @@ test("image sanitizer masks duplicate regions and verifies opaque PNG output", a
   assert.deepEqual(result.sessionMapAdditions, { [PLACEHOLDER]: PRIVATE });
   const output = Buffer.from(result.dataUrl.split(",", 2)[1], "base64");
   assert.equal((await sharp(output).stats()).isOpaque, true);
+});
+
+test("image sanitizer masks a secret despite OCR case drift", async () => {
+  const source = await imageDataUrl(650, 100);
+  let calls = 0;
+  const imageSanitizer = createImageSanitizer({
+    ocr: {
+      async recognize() {
+        calls += 1;
+        return calls === 1
+          ? [caseDriftLine()]
+          : [{ text: `owner ${PLACEHOLDER}`, words: [], box: [10, 10, 200, 42] }];
+      }
+    }
+  });
+
+  const result = await imageSanitizer.sanitize(source, { sanitizer, sessionMap: {} });
+  assert.equal(result.changed, true);
+  assert.equal(result.regionCount, 2);
+  assert.deepEqual(result.sessionMapAdditions, { [PLACEHOLDER]: PRIVATE });
 });
 
 test("verification retries exact, line, then block masks without reclassifying", async () => {
@@ -254,6 +304,48 @@ test("Tesseract engine owns and terminates both lazy workers", async () => {
   await engine.close();
   await engine.close();
   assert.equal(terminated, 2);
+});
+
+test("Tesseract word alignment tolerates OCR case drift", async () => {
+  const worker = () => ({
+    async setParameters() {},
+    async recognize() {
+      return {
+        data: {
+          blocks: [
+            {
+              paragraphs: [
+                {
+                  lines: [
+                    {
+                      text: `owner ${PRIVATE}`,
+                      confidence: 96,
+                      bbox: { x0: 0, y0: 0, x1: 240, y1: 30 },
+                      words: [
+                        {
+                          text: PRIVATE.toUpperCase(),
+                          bbox: { x0: 60, y0: 0, x1: 210, y1: 30 }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      };
+    },
+    async terminate() {}
+  });
+  const engine = createTesseractOcrEngine({ createWorker: async () => worker() });
+  const input = Buffer.from((await imageDataUrl()).split(",", 2)[1], "base64");
+  const [line] = await engine.recognize(input);
+  assert.equal(line.text, `owner ${PRIVATE}`);
+  assert.equal(line.words[0].text, PRIVATE.toUpperCase());
+  assert.equal(line.words[0].start, 6);
+  assert.equal(line.words[0].end, 6 + PRIVATE.length);
+  await engine.close();
 });
 
 test("real CPU OCR removes private text from a generated developer screenshot", { timeout: 60_000 }, async () => {
