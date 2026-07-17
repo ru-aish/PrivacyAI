@@ -57,18 +57,57 @@ export function restoreText(text, sessionMap = {}) {
 
 export function sanitizeKnownText(text, sessionMap = {}) {
   if (typeof text !== "string") return text;
+  const replacements = Object.entries(normalizeSessionMap(sessionMap));
+  if (replacements.length === 0) return text;
 
-  let sanitized = text;
-  const replacements = Object.entries(normalizeSessionMap(sessionMap))
-    .sort((left, right) => right[1].length - left[1].length);
+  // Replace against the original input in one pass. This prevents a later
+  // mapping from matching inside a placeholder inserted by an earlier one.
+  const candidates = replacementCandidates(replacements);
+  const pattern = new RegExp(
+    candidates.map(candidate => escapeRegExp(candidate.value)).join("|"),
+    "gi"
+  );
 
-  for (const [placeholder, original] of replacements) {
-    sanitized = sanitized.replace(new RegExp(escapeRegExp(original), "gi"), () => placeholder);
-  }
-
-  return sanitized;
+  return text.replace(pattern, match => {
+    const candidate = matchingCandidate(match, candidates);
+    return candidate.kind === "placeholder" ? match : candidate.placeholder;
+  });
 }
 
+function replacementCandidates(replacements) {
+  const candidates = [];
+  const occupied = new Set();
+  const add = candidate => {
+    const key = candidate.value.toLocaleLowerCase("en-US");
+    if (occupied.has(key)) return;
+    occupied.add(key);
+    candidates.push(candidate);
+  };
+
+  for (const [placeholder] of replacements) {
+    add({ kind: "placeholder", value: placeholder, placeholder });
+  }
+  for (const [placeholder, original] of replacements) {
+    add({ kind: "original", value: original, placeholder });
+  }
+
+  return candidates.sort((left, right) =>
+    right.value.length - left.value.length ||
+    Number(left.kind !== "placeholder") - Number(right.kind !== "placeholder")
+  );
+}
+
+function matchingCandidate(match, candidates) {
+  const normalized = match.toLocaleLowerCase("en-US");
+  const candidate = candidates.find(entry =>
+    entry.value.toLocaleLowerCase("en-US") === normalized ||
+    new RegExp(`^(?:${escapeRegExp(entry.value)})$`, "i").test(match)
+  );
+  if (!candidate) {
+    throw new Error("PrivacyAI could not resolve a known-value replacement.");
+  }
+  return candidate;
+}
 export function transformValue(value, transformText) {
   if (typeof transformText !== "function") {
     throw new TypeError("transformValue requires a text transformation function.");
