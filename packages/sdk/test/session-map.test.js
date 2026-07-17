@@ -9,6 +9,7 @@ import {
   normalizeSessionMap,
   rebaseSessionAdditions,
   restoreValue,
+  sanitizeKnownText,
   sanitizeKnownValue,
   sanitizeStructuredValue
 } from "../src/index.js";
@@ -87,6 +88,27 @@ test("known sanitization is case-insensitive while restoration is exact", () => 
     { owner: "[EMAIL_1]" }
   );
   assert.equal(restoreValue("[email_1]", map), "[email_1]");
+});
+
+test("known sanitization does not rewrite inside existing or newly inserted placeholders", () => {
+  const overlapping = {
+    "[EMAIL_8]": "owner.address@example.test",
+    "[EMAIL_7]": "EMAIL",
+    "[PRIVATE_VALUE_46]": "8"
+  };
+  assert.equal(
+    sanitizeKnownText("owner.address@example.test and [EMAIL_8]", overlapping),
+    "[EMAIL_8] and [EMAIL_8]"
+  );
+
+  const placeholderInsideOriginal = {
+    "[EMAIL_1]": "email",
+    "[TOKEN_1]": "prefix[EMAIL_1]suffix"
+  };
+  assert.equal(
+    sanitizeKnownText("prefix[EMAIL_1]suffix and [EMAIL_1]", placeholderInsideOriginal),
+    "[TOKEN_1] and [EMAIL_1]"
+  );
 });
 
 test("unresolved placeholder scanning accepts safe custom pattern shapes", () => {
@@ -227,6 +249,35 @@ test("normalizeSessionMap removes malformed and identity mappings", () => {
       "": "value"
     }),
     { good: "private" }
+  );
+});
+
+test("normalizeSessionMap rejects ambiguous case-insensitive aliases", () => {
+  for (const ambiguous of [
+    { "[EMAIL_1]": "first", "[email_1]": "second" },
+    { "[EMAIL_1]": "Alice", "[PERSON_1]": "alice" },
+    { "[EMAIL_1]": "first", "[TOKEN_1]": "[email_1]" }
+  ]) {
+    assert.throws(
+      () => normalizeSessionMap(ambiguous),
+      error =>
+        error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP" &&
+        !error.message.includes("first") &&
+        !error.message.includes("Alice")
+    );
+  }
+});
+
+test("normalizeSessionMap permits multiple aliases for the exact same original", () => {
+  assert.deepEqual(
+    normalizeSessionMap({
+      "[EMAIL_1]": "owner@example.test",
+      "contact1@example.com": "owner@example.test"
+    }),
+    {
+      "[EMAIL_1]": "owner@example.test",
+      "contact1@example.com": "owner@example.test"
+    }
   );
 });
 

@@ -12,7 +12,33 @@ and tests.
 | Claude Code | Prompt/startup isolation plus replaceable tool-result hooks | Supported native file, terminal, and tool paths remain available; unsupported context sources are isolated. |
 | Codex | Bidirectional loopback Responses gateway around stock Codex | Normal `CODEX_HOME`, history, skills, plugins, user MCPs, filesystem, shell, patching, Git, resume, fork, exec, and review remain available. |
 | Codex `--privacy-strict` | Credential-only home plus prompt-only hook isolation | Tool-capable features are denied; retained as a fail-closed fallback. |
-| AGY / Antigravity | Fresh one-shot prompt isolation | Every tool call is denied because the installed AGY hook API cannot safely replace arguments and results. |
+| AGY / Antigravity | Stock AGY through a process-scoped selective HTTPS boundary | Normal files, terminal, browser, MCPs, account, model, and native tool execution remain available for supported text/JSON turns. |
+
+## AGY transport boundary
+
+`privacyai agy` launches the installed stock AGY binary with an ephemeral local
+certificate authority and an authenticated loopback CONNECT proxy. Only the
+current AGY model-generation route is decrypted and transformed. Authentication,
+model discovery, updates, and unrelated child-process traffic remain opaque.
+
+```text
+stock AGY and native tools
+    │ supported model request
+    ▼
+process-scoped PrivacyAI HTTPS boundary
+    ├─ validate the current AGY request schema
+    ├─ classify only uncached model-visible text/JSON locally
+    ├─ preserve the complete rebuilt remote-model context
+    ├─ replace private tool names with provider-valid stable aliases
+    └─ restore streamed text and tool calls before AGY consumes them
+    ▼
+AGY model backend
+```
+
+The CA is trusted only by the launched AGY process and is deleted at shutdown.
+`--privacy-strict` retains the earlier fresh one-shot, tool-denied fallback.
+Unsupported media, route/schema drift, compressed model payloads, Windows, and
+chaining through an existing HTTP/SOCKS proxy currently fail closed.
 
 ## Codex provider gateway
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -460,8 +461,22 @@ test("agent hook executable fails closed before processing events without a sess
   assert.doesNotMatch(result.stderr, /session_id/);
 });
 
-test("agent hook executable restores Claude tool inputs and sanitizes arbitrary outputs", async () => {
+test("agent hook executable restores Claude tool inputs and sanitizes arbitrary outputs", async t => {
   const baseDir = await mkdtemp(join(tmpdir(), "privacyai-all-tool-hook-"));
+  const provider = await startMockOllamaSanitizer();
+  const configPath = join(baseDir, "privacy-config.json");
+  await writeFile(configPath, `${JSON.stringify({
+    provider: "ollama",
+    model: "privacyai-test",
+    baseURL: provider.url,
+    timeoutMs: 5000,
+    numCtx: 4096
+  })}\n`, { mode: 0o600 });
+  t.after(async () => {
+    await provider.close();
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
   const sessionId = "all-tool-executable-session";
   const vault = new SessionVault({ baseDir });
   await vault.save(sessionId, {
@@ -472,6 +487,7 @@ test("agent hook executable restores Claude tool inputs and sanitizes arbitrary 
   const env = {
     ...process.env,
     PRIVACYAI_AGENT_VAULT_DIR: baseDir,
+    PRIVACYAI_CONFIG_FILE: configPath,
     PRIVACYAI_AGENT_FLAVOR: "claude"
   };
   const pre = await runHook(
@@ -511,6 +527,7 @@ test("agent hook executable restores Claude tool inputs and sanitizes arbitrary 
     recipient: "contact1@example.com",
     body: "[PRIVATE_VALUE_1]"
   });
+  assert.equal(provider.requestCount, 1);
 });
 
 test("SessionVault hashes session ids and writes private files", async () => {
@@ -617,4 +634,38 @@ function runHook(event, env) {
     child.on("exit", code => resolve({ code: code ?? 1, stdout, stderr }));
     child.stdin.end(JSON.stringify(event));
   });
+}
+
+async function startMockOllamaSanitizer() {
+  let requestCount = 0;
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    assert.equal(request.method, "POST");
+    assert.equal(request.url, "/api/chat");
+    assert.equal(body.model, "privacyai-test");
+    assert.equal(Array.isArray(body.messages), true);
+    requestCount += 1;
+
+    const payload = JSON.stringify({
+      message: { role: "assistant", content: JSON.stringify({ spans: [] }) },
+      done: true
+    });
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(payload)
+    });
+    response.end(payload);
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    get requestCount() { return requestCount; },
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise(resolve => server.close(resolve))
+  };
 }

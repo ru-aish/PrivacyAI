@@ -18,7 +18,8 @@
     "test:e2e:ministral": "PRIVACYAI_OLLAMA_E2E=1 node --test test/ministral-ollama.e2e.test.js",
     "test:e2e:lmstudio": "PRIVACYAI_LM_STUDIO_E2E=1 node --test test/lmstudio.e2e.test.js",
     "test:e2e:claude": "PRIVACYAI_CLAUDE_NATIVE_E2E=1 node --test test/native-claude.e2e.test.js",
-    "test:e2e:codex-live": "PRIVACYAI_CODEX_LIVE_E2E=1 node --test test/codex-live.e2e.test.js"
+    "test:e2e:codex-live": "PRIVACYAI_CODEX_LIVE_E2E=1 node --test test/codex-live.e2e.test.js",
+    "test:e2e:agy-image-live": "PRIVACYAI_AGY_IMAGE_LIVE_E2E=1 node --test test/agy-image-live.e2e.test.js"
   },
   "dependencies": {
     "@privacy-ai/sdk": "workspace:0.0.2"

@@ -78,7 +78,8 @@ export function printHelp(output = process.stdout) {
   output.write("  privacyai codex fork <id>    Fork through the protected gateway (never use raw codex fork)\n");
   output.write("  Unix-like Codex TUI: /resume [--all|--last|id] or /fork [--all|--last|id]\n");
   output.write("  privacyai codex --privacy-strict [...]  Use prompt-only fallback isolation\n");
-  output.write("  privacyai agy --print \"...\"  Send a protected one-shot Antigravity prompt\n");
+  output.write("  privacyai agy [...]                    Run stock Antigravity through the privacy transport\n");
+  output.write("  privacyai agy --privacy-strict --print \"...\"  Use prompt-only fallback isolation\n");
   output.write("  privacyai doctor        Check local setup\n");
 }
 

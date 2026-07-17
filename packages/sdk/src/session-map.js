@@ -8,16 +8,53 @@ const DEFAULT_PLACEHOLDER_PATTERN = new RegExp(
 
 export function normalizeSessionMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value).filter(
-      ([placeholder, original]) =>
-        typeof placeholder === "string" &&
-        typeof original === "string" &&
-        placeholder.length > 0 &&
-        original.length > 0 &&
-        placeholder !== original
-    )
+  const entries = Object.entries(value).filter(
+    ([placeholder, original]) =>
+      typeof placeholder === "string" &&
+      typeof original === "string" &&
+      placeholder.length > 0 &&
+      original.length > 0 &&
+      placeholder !== original
   );
+  assertUnambiguousSessionMap(entries);
+  return Object.fromEntries(entries);
+}
+
+function assertUnambiguousSessionMap(entries) {
+  const placeholders = new Map();
+  const originals = new Map();
+
+  for (const [placeholder, original] of entries) {
+    const placeholderKey = foldSessionMapValue(placeholder);
+    const originalKey = foldSessionMapValue(original);
+    const existingPlaceholder = placeholders.get(placeholderKey);
+    if (existingPlaceholder && existingPlaceholder !== placeholder) {
+      throw ambiguousSessionMapError();
+    }
+    placeholders.set(placeholderKey, placeholder);
+
+    const existingOriginal = originals.get(originalKey);
+    if (existingOriginal && existingOriginal !== original) {
+      throw ambiguousSessionMapError();
+    }
+    originals.set(originalKey, original);
+  }
+
+  for (const placeholderKey of placeholders.keys()) {
+    if (originals.has(placeholderKey)) throw ambiguousSessionMapError();
+  }
+}
+
+function foldSessionMapValue(value) {
+  return value.toLocaleLowerCase("en-US");
+}
+
+function ambiguousSessionMapError() {
+  const error = new Error(
+    "PrivacyAI blocked a session map with ambiguous case-insensitive aliases."
+  );
+  error.code = "PRIVACYAI_AMBIGUOUS_SESSION_MAP";
+  return error;
 }
 
 export function rebaseSessionAdditions(sanitizedText, additions = {}, existing = {}) {
@@ -57,16 +94,50 @@ export function restoreText(text, sessionMap = {}) {
 
 export function sanitizeKnownText(text, sessionMap = {}) {
   if (typeof text !== "string") return text;
+  const replacements = Object.entries(normalizeSessionMap(sessionMap));
+  if (replacements.length === 0) return text;
 
-  let sanitized = text;
-  const replacements = Object.entries(normalizeSessionMap(sessionMap))
-    .sort((left, right) => right[1].length - left[1].length);
+  // Replace against the original input in one pass. This prevents a later
+  // mapping from matching inside a placeholder inserted by an earlier one.
+  const candidates = replacementCandidates(replacements);
+  const candidatesByValue = new Map(
+    candidates.map(candidate => [foldSessionMapValue(candidate.value), candidate])
+  );
+  const pattern = new RegExp(
+    candidates.map(candidate => escapeRegExp(candidate.value)).join("|"),
+    "gi"
+  );
 
+  return text.replace(pattern, match => {
+    const candidate = candidatesByValue.get(foldSessionMapValue(match));
+    if (!candidate) {
+      throw new Error("PrivacyAI could not resolve a known-value replacement.");
+    }
+    return candidate.kind === "placeholder" ? match : candidate.placeholder;
+  });
+}
+
+function replacementCandidates(replacements) {
+  const candidates = [];
+  const occupied = new Set();
+  const add = candidate => {
+    const key = candidate.value.toLocaleLowerCase("en-US");
+    if (occupied.has(key)) return;
+    occupied.add(key);
+    candidates.push(candidate);
+  };
+
+  for (const [placeholder] of replacements) {
+    add({ kind: "placeholder", value: placeholder, placeholder });
+  }
   for (const [placeholder, original] of replacements) {
-    sanitized = sanitized.replace(new RegExp(escapeRegExp(original), "gi"), () => placeholder);
+    add({ kind: "original", value: original, placeholder });
   }
 
-  return sanitized;
+  return candidates.sort((left, right) =>
+    right.value.length - left.value.length ||
+    Number(left.kind !== "placeholder") - Number(right.kind !== "placeholder")
+  );
 }
 
 export function transformValue(value, transformText) {

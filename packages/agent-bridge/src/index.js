@@ -2,8 +2,16 @@ export {
   buildAgyHookConfig,
   installAgyGlobalHook,
   launchAgy,
-  parseAgyArguments
+  parseAgyArguments,
+  parseAgyPrivacyMode
 } from "./agy.js";
+export { createAgyImageSanitizer, toAgyImageError } from "./agy-image-adapter.js";
+export { agySessionKey, sanitizeAgyRequestBody, validateAgyRequestBody } from "./agy-request-transform.js";
+export { AgySseRestorer, restoreAgySseEvent } from "./agy-sse-transform.js";
+export { createAgySessionController } from "./agy-session-controller.js";
+export { startAgyTransportProxy } from "./agy-transport-proxy.js";
+export { startAgyTransportRuntime } from "./agy-transport-runtime.js";
+export { createEphemeralTlsAuthority } from "./ephemeral-tls-authority.js";
 export { processAgyHookEvent } from "./agy-hook-adapter.js";
 export { assertNoProtectedOriginals, sanitizeModelVisibleValue } from "./context-gateway.js";
 export {
