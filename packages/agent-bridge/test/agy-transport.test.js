@@ -745,6 +745,56 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   assert.equal(imageCalls.length, 4);
 });
 
+test("AGY transport proxy forwards the audited metrics route opaquely", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-metrics-route-"));
+  const observed = {};
+  const runtime = await startAgyTransportRuntime({
+    sanitizer: deterministicSanitizer,
+    baseEnv: {},
+    baseDir: join(root, "vault"),
+    tmpDir: root,
+    verificationStore: new MemoryContextVerificationStore(),
+    requestOpaqueUpstream: (options, onResponse) => {
+      observed.options = options;
+      const upstreamRequest = new PassThrough();
+      const chunks = [];
+      upstreamRequest.on("data", chunk => chunks.push(chunk));
+      upstreamRequest.once("finish", () => {
+        observed.body = Buffer.concat(chunks).toString("utf8");
+        const upstreamResponse = Readable.from([Buffer.from("{}")]);
+        upstreamResponse.statusCode = 200;
+        upstreamResponse.headers = {
+          "content-type": "application/json",
+          "content-encoding": "identity"
+        };
+        onResponse(upstreamResponse);
+      });
+      return upstreamRequest;
+    }
+  });
+  t.after(async () => {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const metrics = {
+    project: "project-123",
+    requestId: "request-123",
+    metadata: {},
+    metrics: []
+  };
+  const response = await proxyHttpRequest(
+    runtime,
+    metrics,
+    "/v1internal:recordCodeAssistMetrics"
+  );
+
+  assert.match(response.statusLine, /^HTTP\/1\.1 200/);
+  assert.equal(observed.options.method, "POST");
+  assert.equal(observed.options.path, "/v1internal:recordCodeAssistMetrics");
+  assert.deepEqual(JSON.parse(observed.body), metrics);
+});
+
 test("AGY opaque forwarding cancels upstream work after downstream disconnect", { timeout: 5000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-agy-opaque-cancel-"));
   let upstreamRequest;

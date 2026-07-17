@@ -18,6 +18,7 @@ const AUDITED_OPAQUE_ROUTES = new Map([
     "/v1internal:fetchUserInfo",
     "/v1internal:listExperiments",
     "/v1internal:loadCodeAssist",
+    "/v1internal:recordCodeAssistMetrics",
     "/v1internal:retrieveUserQuotaSummary",
     "/v1internal:setUserSettings"
   ])]
