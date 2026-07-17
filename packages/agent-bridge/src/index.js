@@ -29,6 +29,14 @@ export {
   verificationFingerprint
 } from "./context-verification-store.js";
 export {
+  commitProvenancedMutation,
+  normalizeFileMutationOperation,
+  propagatePrivacySpans,
+  reconcileExternalFileChange,
+  rollbackProvenancedMutation,
+  stageProvenancedMutation
+} from "./mutation-provenance.js";
+export {
   buildCodexRequestVerificationSeed,
   codexSessionContext,
   codexSessionKey,

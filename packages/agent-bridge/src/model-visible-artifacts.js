@@ -30,7 +30,9 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
   const sessionMapAdditions = {};
   const cacheWrites = [];
   const itemRecords = [];
-  const uncached = [];
+  const uniqueByContent = new Map();
+  let cacheHitCount = 0;
+  let uncachedSlotCount = 0;
 
   for (let index = 0; index < normalized.length; index += 1) {
     const entry = normalized[index];
@@ -47,18 +49,29 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
 
     if (cached?.sessionMapAdditions && typeof cached.sessionMapAdditions === "object") {
       mergeMappings(completeMap, sessionMapAdditions, cached.sessionMapAdditions);
+      cacheHitCount += 1;
       continue;
     }
 
-    uncached.push({ ...entry, index, cacheKey, contentHash });
+    uncachedSlotCount += 1;
+    const candidate = { ...entry, index, cacheKey, contentHash };
+    const existing = uniqueByContent.get(contentHash);
+    if (existing) {
+      existing.destinations.push(candidate);
+    } else {
+      uniqueByContent.set(contentHash, { ...candidate, destinations: [candidate] });
+    }
   }
 
+  const uncached = [...uniqueByContent.values()];
   const groups = packUncachedArtifactEntries(uncached, {
     maxContextChars: options.maxContextChars,
     maxContextTokens: options.maxContextTokens,
     tokenCounter: options.tokenCounter
   });
   const originalArtifactCount = groups.reduce((count, pack) => count + pack.artifacts.length, 0);
+  let modelCallCount = 0;
+  let packedChars = 0;
   for (let artifactIndex = 0; artifactIndex < groups.length; artifactIndex += 1) {
     throwIfAborted(options.signal);
     const artifact = groups[artifactIndex];
@@ -72,15 +85,25 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
         tokenCounter: options.tokenCounter,
         artifactType: `${options.artifactTypePrefix || "model"}_${artifact.artifactType}`,
         signal: options.signal,
-        onBatchComplete: typeof options.onBatchComplete === "function"
-          ? details => options.onBatchComplete({
+        onBatchComplete: async details => {
+          modelCallCount += 1;
+          packedChars += Number(details.inputChars || 0);
+          if (typeof options.onBatchComplete === "function") {
+            await options.onBatchComplete({
               ...details,
               artifactIndex,
               artifactCount: groups.length,
               artifactKey: artifact.artifactKey,
-              artifactType: artifact.artifactType
-            })
-          : undefined
+              artifactType: artifact.artifactType,
+              uniqueUncachedCount: uncached.length,
+              uncachedSlotCount,
+              cacheHitCount,
+              deduplicatedCount: uncachedSlotCount - uncached.length,
+              modelCallCount,
+              packedChars
+            });
+          }
+        }
       }
     );
     const result = typeof options.normalizeArtifactResult === "function"
@@ -102,13 +125,18 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
     for (const entry of artifact.entries) {
       const verificationMap = relevantMappings(entry.value, discoveredMap);
       mergeMappings(completeMap, sessionMapAdditions, verificationMap);
-      cacheWrites.push([entry.cacheKey, {
-        cacheKey: entry.cacheKey,
-        contentHash: entry.contentHash,
-        artifactType: entry.artifactType,
-        policyFingerprint,
-        sessionMapAdditions: verificationMap
-      }]);
+      const writtenKeys = new Set();
+      for (const destination of entry.destinations) {
+        if (writtenKeys.has(destination.cacheKey)) continue;
+        writtenKeys.add(destination.cacheKey);
+        cacheWrites.push([destination.cacheKey, {
+          cacheKey: destination.cacheKey,
+          contentHash: destination.contentHash,
+          artifactType: destination.artifactType,
+          policyFingerprint,
+          sessionMapAdditions: verificationMap
+        }]);
+      }
     }
 
     if (typeof options.onArtifactComplete === "function") {
@@ -118,7 +146,16 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
           artifactCount: originalArtifactCount,
           artifactKey: originalArtifact.artifactKey,
           artifactType: originalArtifact.artifactType,
-          slotCount: originalArtifact.entries.length
+          slotCount: originalArtifact.entries.reduce(
+            (count, entry) => count + entry.destinations.length,
+            0
+          ),
+          uniqueUncachedCount: uncached.length,
+          uncachedSlotCount,
+          cacheHitCount,
+          deduplicatedCount: uncachedSlotCount - uncached.length,
+          modelCallCount,
+          packedChars
         });
       }
     }
@@ -138,7 +175,15 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
     sessionMapAdditions,
     cacheWrites,
     itemRecords,
-    policyFingerprint
+    policyFingerprint,
+    metrics: {
+      uniqueUncachedCount: uncached.length,
+      uncachedSlotCount,
+      cacheHitCount,
+      deduplicatedCount: uncachedSlotCount - uncached.length,
+      modelCallCount,
+      packedChars
+    }
   };
 }
 

@@ -1625,9 +1625,8 @@ test("gateway chooses ChatGPT or API upstream and strips forwarding headers", as
   }
 });
 
-test("Codex sanitization packs uncached model-visible artifacts while retaining separate cache records", async () => {
+test("Codex sanitization batches independent model-visible artifacts", async () => {
   const seen = [];
-  const completedArtifacts = [];
   const body = {
     model: "gpt-5.4-mini",
     instructions: "INSTRUCTIONS_ARTIFACT",
@@ -1652,20 +1651,19 @@ test("Codex sanitization packs uncached model-visible artifacts while retaining 
     sanitizer: async text => {
       seen.push(text);
       return { sanitizedPrompt: text, sessionMap: {} };
-    },
-    onArtifactComplete: details => completedArtifacts.push(details)
+    }
   });
 
   assert.deepEqual(result.body, body);
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].includes("INSTRUCTIONS_ARTIFACT"), true);
-  assert.equal(seen[0].includes("MESSAGE_ARTIFACT"), true);
-  assert.equal(seen[0].includes("TOOL_OUTPUT_ARTIFACT"), true);
+  assert.equal(
+    ["INSTRUCTIONS_ARTIFACT", "MESSAGE_ARTIFACT", "TOOL_OUTPUT_ARTIFACT"]
+      .every(marker => seen[0].includes(marker)),
+    true
+  );
   assert.equal(result.cacheWrites.length, 3);
   assert.equal(new Set(result.cacheWrites.map(([key]) => key)).size, 3);
-  assert.equal(completedArtifacts.length, 3);
-  assert.equal(new Set(completedArtifacts.map(item => item.artifactKey)).size, 3);
-  assert.equal(completedArtifacts.some(item => item.artifactType === "packed_uncached"), false);
+  assert.equal(result.metrics.modelCallCount, 1);
 });
 
 test("Codex leak verification ignores protocol booleans while protecting matching text", async () => {

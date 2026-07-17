@@ -4,15 +4,14 @@ import {
   assertNoProtectedOriginalsInValue,
   rebaseSessionAdditions,
   restoreValue,
-  sanitizeKnownValue,
-  sanitizeStructuredValue
+  sanitizeKnownValue
 } from "@privacy-ai/sdk";
 import { gatewayError } from "./gateway-error.js";
 import {
   collectCodexJsonSchema,
   finalizeCodexJsonSchemaTrace
 } from "./codex-json-schema-policy.js";
-import { packUncachedArtifactEntries } from "./artifact-packing.js";
+import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
 
 const ALLOWED_TOP_LEVEL_FIELDS = new Set([
   "model",
@@ -117,13 +116,9 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   }
 
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
-  const resolved = new Array(slots.length);
-  const uncached = [];
-  const cacheWrites = [];
-  const itemRecords = [];
   const initialSessionMap = { ...(options.sessionMap || {}) };
-  const completeMap = { ...(options.sessionMap || {}) };
-  const sessionMapAdditions = {};
+  const imageSessionMap = { ...initialSessionMap };
+  const imageSessionMapAdditions = {};
 
   if (imageSlots.length > 0) {
     const sanitizeImage = typeof options.imageSanitizer === "function"
@@ -140,7 +135,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
       const entry = imageSlots[imageIndex];
       const result = await sanitizeImage(entry.value, {
         sanitizer: options.sanitizer,
-        sessionMap: completeMap,
+        sessionMap: imageSessionMap,
         maxContextChars: options.maxContextChars,
         maxContextTokens: options.maxContextTokens,
         tokenCounter: options.tokenCounter,
@@ -153,7 +148,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
           "PrivacyAI blocked the Codex request because image sanitization returned an invalid result."
         );
       }
-      mergeDetectedMappings(completeMap, sessionMapAdditions, result.sessionMapAdditions);
+      mergeDetectedMappings(imageSessionMap, imageSessionMapAdditions, result.sessionMapAdditions);
       setAtPath(transformed, entry.path, result.imageUrl);
       if (typeof options.onArtifactComplete === "function") {
         await options.onArtifactComplete({
@@ -167,96 +162,36 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     }
   }
 
-  for (let index = 0; index < slots.length; index += 1) {
-    const entry = slots[index];
-    const artifactType = artifactTypeForSlot(entry);
-    const contentHash = modelVisibleContentHash(entry.value);
-    const cacheKey = modelVisibleCacheKey(entry.value, artifactType, policyFingerprint);
-    const cached = options.cache?.get(cacheKey, policyFingerprint);
-    itemRecords.push({
-      slotKey: slotIdentity(entry),
-      cacheKey,
-      contentHash,
-      artifactType
-    });
-    if (cached?.sessionMapAdditions && typeof cached.sessionMapAdditions === "object") {
-      entry.cacheHit = true;
-      mergeDetectedMappings(completeMap, sessionMapAdditions, cached.sessionMapAdditions);
-    } else {
-      uncached.push({
-        index,
-        cacheKey,
-        contentHash,
-        artifactType,
-        artifactKey: artifactIdentityForSlot(entry),
-        value: entry.value
-      });
-    }
-  }
-
-  if (uncached.length > 0) {
-    const artifacts = packUncachedArtifactEntries(uncached, {
-      maxContextChars: options.maxContextChars,
-      maxContextTokens: options.maxContextTokens,
-      tokenCounter: options.tokenCounter
-    });
-    const originalArtifactCount = artifacts.reduce(
-      (count, pack) => count + pack.artifacts.length,
-      0
-    );
-    for (let artifactIndex = 0; artifactIndex < artifacts.length; artifactIndex += 1) {
-      throwIfAborted(options.signal);
-      const artifact = artifacts[artifactIndex];
-      const result = await sanitizeStructuredValue(artifact.entries.map(entry => entry.value), {
-        sanitizer: options.sanitizer,
-        sessionMap: completeMap,
-        maxContextChars: options.maxContextChars,
-        maxContextTokens: options.maxContextTokens,
-        tokenCounter: options.tokenCounter,
-        artifactType: `codex_${artifact.artifactType}`,
-        signal: options.signal,
-        onBatchComplete: typeof options.onBatchComplete === "function"
-          ? details => options.onBatchComplete({
-              ...details,
-              artifactIndex,
-              artifactCount: artifacts.length,
-              artifactKey: artifact.artifactKey,
-              artifactType: artifact.artifactType
-            })
-          : undefined
-      });
-      if (!Array.isArray(result.value) || result.value.length !== artifact.entries.length) {
-        throw gatewayError(
-          "PRIVACYAI_CODEX_INVALID_SANITIZED_REQUEST",
-          "PrivacyAI blocked the Codex request because sanitization changed its model-visible shape."
-        );
-      }
-
-      const discoveredMap = { ...completeMap, ...result.sessionMapAdditions };
-      for (const entry of artifact.entries) {
-        const verificationMap = relevantSessionMap(entry.value, discoveredMap);
-        mergeDetectedMappings(completeMap, sessionMapAdditions, verificationMap);
-        cacheWrites.push([entry.cacheKey, {
-          cacheKey: entry.cacheKey,
-          contentHash: entry.contentHash,
-          artifactType: entry.artifactType,
-          policyFingerprint,
-          sessionMapAdditions: verificationMap
-        }]);
-      }
-      if (typeof options.onArtifactComplete === "function") {
-        for (const originalArtifact of artifact.artifacts) {
-          await options.onArtifactComplete({
-            artifactIndex: originalArtifact.artifactIndex,
-            artifactCount: originalArtifactCount,
-            artifactKey: originalArtifact.artifactKey,
-            artifactType: originalArtifact.artifactType,
-            slotCount: originalArtifact.entries.length
-          });
-        }
-      }
-    }
-  }
+  const artifactResult = await sanitizeModelVisibleArtifacts(slots.map(entry => ({
+    value: entry.value,
+    slotKey: slotIdentity(entry),
+    artifactType: artifactTypeForSlot(entry),
+    artifactKey: artifactIdentityForSlot(entry),
+    mutable: entry.mutable,
+    label: entry.label
+  })), {
+    sanitizer: options.sanitizer,
+    sessionMap: imageSessionMap,
+    cache: options.cache,
+    policyFingerprint,
+    maxContextChars: options.maxContextChars,
+    maxContextTokens: options.maxContextTokens,
+    tokenCounter: options.tokenCounter,
+    artifactTypePrefix: "codex",
+    signal: options.signal,
+    onBatchComplete: options.onBatchComplete,
+    onArtifactComplete: options.onArtifactComplete,
+    invalidShapeError: () => gatewayError(
+      "PRIVACYAI_CODEX_INVALID_SANITIZED_REQUEST",
+      "PrivacyAI blocked the Codex request because sanitization changed its model-visible shape."
+    )
+  });
+  const completeMap = artifactResult.sessionMap;
+  const sessionMapAdditions = {
+    ...imageSessionMapAdditions,
+    ...artifactResult.sessionMapAdditions
+  };
+  const resolved = artifactResult.values;
 
   const providerIdentifierMappings = buildProviderIdentifierMappings(
     slots,
@@ -298,10 +233,11 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   return {
     body: transformed,
     sessionMapAdditions,
-    cacheWrites,
-    itemRecords,
+    cacheWrites: artifactResult.cacheWrites,
+    itemRecords: artifactResult.itemRecords,
     schemaTraces: finalizedSchemaTraces,
     policyFingerprint,
+    metrics: artifactResult.metrics,
     sessionKey: codexSessionKey(body, options.fallbackSessionId, options.headers)
   };
 }

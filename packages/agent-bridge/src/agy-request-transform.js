@@ -205,7 +205,8 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
     sessionMapAdditions,
     cacheWrites: artifactResult.cacheWrites,
     itemRecords: artifactResult.itemRecords,
-    policyFingerprint: artifactResult.policyFingerprint
+    policyFingerprint: artifactResult.policyFingerprint,
+    metrics: artifactResult.metrics
   };
 }
 
