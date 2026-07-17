@@ -508,17 +508,8 @@ async function collectCodexStaticStartupContext(cwd, options) {
 
   async function addFile(path) {
     if (seen.has(path)) return;
-    let metadata;
-    try {
-      metadata = await lstat(path);
-    } catch (error) {
-      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
-      throw error;
-    }
-    if (!metadata.isFile() || metadata.isSymbolicLink()) return;
-    if (metadata.size > maxBytes) {
-      throw staticContextTooLargeError();
-    }
+    // Existence, type, symlink and size validation happen once in the manifest
+    // resolver. Avoid a duplicate lstat for every startup file.
     seen.add(path);
     files.push(path);
   }

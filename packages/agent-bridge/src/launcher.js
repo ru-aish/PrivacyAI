@@ -276,7 +276,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         verificationStore,
         policyFingerprint,
-        renderedFingerprint: await startupRenderFingerprint({ binary, executableProbe, cwd, staticAudit, policyFingerprint, args: privacyArgs, config: loaded.config }),
+        // Strict mode has no live provider gateway to re-verify dynamic MCP
+        // startup context, so it must render and inspect on every launch.
         blockHighRisk: true
       });
       childArgs = [...privacyArgs, ...forwardedArgs];

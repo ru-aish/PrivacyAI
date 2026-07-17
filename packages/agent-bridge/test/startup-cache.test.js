@@ -42,8 +42,12 @@ test("linked worktrees reuse Git blob identities and non-Git directories work", 
   await execFile("git", ["init", root]); await execFile("git", ["-C", root, "config", "user.email", "test@example.com"]); await execFile("git", ["-C", root, "config", "user.name", "Test"]);
   await writeFile(join(root, "AGENTS.md"), "shared"); await execFile("git", ["-C", root, "add", "AGENTS.md"]); await execFile("git", ["-C", root, "commit", "-m", "init"]);
   const other = join(root, "other"); await execFile("git", ["-C", root, "worktree", "add", other, "-b", "other"]);
-  const store = new MemoryContextVerificationStore(); await resolveStartupFileManifest([join(root, "AGENTS.md")], { cwd: root, verificationStore: store });
-  const reused = await resolveStartupFileManifest([join(other, "AGENTS.md")], { cwd: other, verificationStore: store }); assert.equal(reused.counters.reads, 0); assert.equal(reused.counters.gitBlobReuses, 1);
+  const store = new MemoryContextVerificationStore();
+  const original = await resolveStartupFileManifest([join(root, "AGENTS.md")], { cwd: root, verificationStore: store });
+  const reused = await resolveStartupFileManifest([join(other, "AGENTS.md")], { cwd: other, verificationStore: store });
+  assert.equal(reused.repositoryId, original.repositoryId);
+  assert.equal(reused.counters.reads, 0);
+  assert.equal(reused.counters.gitBlobReuses, 1);
   const nongit = await mkdtemp(join(tmpdir(), "privacyai-startup-nongit-")); t.after(() => rm(nongit, { recursive: true, force: true })); await writeFile(join(nongit, "CLAUDE.md"), "ok");
   assert.equal((await resolveStartupFileManifest([join(nongit, "CLAUDE.md")], { cwd: nongit, verificationStore: store })).repo.isGit, false);
 });
@@ -56,4 +60,49 @@ test("rendered startup proof skips capture and misses on every identity change",
   for (const change of [{ protectedArgs: ["--y"] }, { config: { a: 2 } }, { manifestHash: "sha256:other" }, { renderContractVersion: 2 }, { executable: { version: "2" } }, { policyFingerprint: "sha256:other-policy" }]) {
     const value = { ...base, ...change }; await run(value); assert.equal(captures > 1, true);
   }
+});
+
+test("dirty tracked files never reuse a stale Git index blob", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-dirty-git-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await execFile("git", ["init", root]);
+  await execFile("git", ["-C", root, "config", "user.email", "test@example.com"]);
+  await execFile("git", ["-C", root, "config", "user.name", "Test"]);
+  const file = join(root, "AGENTS.md");
+  await writeFile(file, "committed");
+  await execFile("git", ["-C", root, "add", "AGENTS.md"]);
+  await execFile("git", ["-C", root, "commit", "-m", "init"]);
+
+  const store = new MemoryContextVerificationStore();
+  const committed = await resolveStartupFileManifest([file], { cwd: root, verificationStore: store });
+  await writeFile(file, "dirty-worktree-value");
+  const dirty = await resolveStartupFileManifest([file], { cwd: root, verificationStore: store });
+
+  assert.equal(dirty.counters.gitBlobReuses, 0);
+  assert.equal(dirty.counters.reads, 1);
+  assert.notEqual(dirty.records[0].contentHash, committed.records[0].contentHash);
+});
+
+test("per-file sanitizer mappings are rebased when placeholders collide", async () => {
+  const store = new MemoryContextVerificationStore();
+  let call = 0;
+  const manifest = {
+    records: [
+      { path: "/one", pathHash: "sha256:path-one", contentHash: "sha256:content-one", content: "one" },
+      { path: "/two", pathHash: "sha256:path-two", contentHash: "sha256:content-two", content: "two" }
+    ]
+  };
+  const result = await sanitizeStartupFiles(manifest, {
+    verificationStore: store,
+    policyFingerprint: policy,
+    sanitizer: async () => ({
+      sessionMap: { "[EMAIL_1]": call++ === 0 ? "one@example.test" : "two@example.test" }
+    })
+  });
+
+  assert.deepEqual(Object.values(result.sessionMapAdditions).sort(), [
+    "one@example.test",
+    "two@example.test"
+  ]);
+  assert.equal(new Set(Object.keys(result.sessionMapAdditions)).size, 2);
 });

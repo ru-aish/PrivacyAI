@@ -446,3 +446,43 @@ test("Codex launch distinguishes a missing configured model from a temporary rea
       !/privacyai onboard/.test(error.message)
   );
 });
+
+test("strict Codex launches always render because no live gateway can verify dynamic startup context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-strict-render-"));
+  const configPath = await writeTestConfig(root);
+  const verificationStore = new MemoryContextVerificationStore();
+  let captures = 0;
+  const launch = () => launchNativeTui("codex", ["--privacy-strict"], {
+    configPath,
+    binary: process.execPath,
+    python: process.execPath,
+    cwd: root,
+    env: { CODEX_HOME: join(root, "empty-codex-home") },
+    launchLockDir: join(root, "locks"),
+    healthOptions: { skip: true },
+    policyFingerprint: "sha256:stable-strict-policy",
+    verifyNativeExecutable: async () => ({ version: "test" }),
+    sanitizer: passThroughSanitizer,
+    verificationStore,
+    prepareAgentRuntimeIsolation: async () => ({
+      env: { CODEX_HOME: join(root, "isolated-codex-home") },
+      args: []
+    }),
+    buildCodexHookDeclarationArgs: () => [],
+    discoverCodexHookTrust: async () => ({ stateArgs: [] }),
+    captureCodexPromptInput: async ({ prompt }) => {
+      captures += 1;
+      return [{
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: prompt }]
+      }];
+    },
+    spawnInherited: async () => 0,
+    showLaunchProgress: false
+  });
+
+  await launch();
+  await launch();
+  assert.equal(captures, 2);
+});
