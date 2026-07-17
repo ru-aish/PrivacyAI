@@ -1,3 +1,5 @@
+import { normalizeSessionMap } from "@privacy-ai/sdk";
+
 export class KeyedSerialQueue {
   constructor() {
     this.pending = new Map();
@@ -80,17 +82,30 @@ export function commitVerificationWrites(
 }
 
 export function mergeSessionMaps(current, inherited, options = {}) {
-  const merged = { ...(current || {}) };
+  let merged;
+  let normalizedInherited;
+  try {
+    merged = normalizeSessionMap(current);
+    normalizedInherited = normalizeSessionMap(inherited);
+  } catch {
+    throw collisionError(options, "case");
+  }
+
   const maxAliasesPerOriginal = positiveInteger(options.maxAliasesPerOriginal, 1);
   const aliasCounts = new Map();
   for (const original of Object.values(merged)) {
     aliasCounts.set(original, (aliasCounts.get(original) || 0) + 1);
   }
 
-  for (const [placeholder, original] of Object.entries(inherited || {})) {
+  for (const [placeholder, original] of Object.entries(normalizedInherited)) {
     if (Object.hasOwn(merged, placeholder)) {
       if (merged[placeholder] !== original) throw collisionError(options, "placeholder");
       continue;
+    }
+    try {
+      normalizeSessionMap({ ...merged, [placeholder]: original });
+    } catch {
+      throw collisionError(options, "case");
     }
     const aliasCount = aliasCounts.get(original) || 0;
     if (aliasCount >= maxAliasesPerOriginal) throw collisionError(options, "original");
@@ -111,7 +126,9 @@ function collisionError(options, kind) {
   const error = new Error(
     kind === "placeholder"
       ? "PrivacyAI blocked an ambiguous placeholder mapping."
-      : "PrivacyAI blocked an ambiguous private-value mapping."
+      : kind === "case"
+        ? "PrivacyAI blocked a case-insensitive session-map collision."
+        : "PrivacyAI blocked an ambiguous private-value mapping."
   );
   error.code = "PRIVACYAI_SESSION_MAP_COLLISION";
   return error;

@@ -13,11 +13,12 @@ import {
   sanitizeAgyRequestBody
 } from "../src/agy-request-transform.js";
 import { createAgySessionController } from "../src/agy-session-controller.js";
-import { AgySseRestorer } from "../src/agy-sse-transform.js";
+import { AgySseRestorer, restoreAgySseEvent } from "../src/agy-sse-transform.js";
 import { buildAgyUpstreamHeaders } from "../src/agy-transport-proxy.js";
 import { startAgyTransportRuntime } from "../src/agy-transport-runtime.js";
 import { MemoryContextVerificationStore } from "../src/context-verification-store.js";
 import { createEphemeralTlsAuthority } from "../src/ephemeral-tls-authority.js";
+import { mergeSessionMaps } from "../src/model-session-state.js";
 import { SessionVault } from "../src/session-vault.js";
 
 const PRIVATE_EMAIL = "alice.private@example.test";
@@ -79,6 +80,36 @@ test("AGY session-map migration replaces stale bracket tool placeholders", () =>
   assert.equal(migrated["[EMAIL_1]"], PRIVATE_EMAIL);
 });
 
+test("shared session-map merging rejects case-insensitive aliases from separate maps", () => {
+  assert.throws(
+    () => mergeSessionMaps(
+      { "[EMAIL_1]": "first@example.test" },
+      { "[email_1]": "second@example.test" },
+      { maxAliasesPerOriginal: 8 }
+    ),
+    error => error?.code === "PRIVACYAI_SESSION_MAP_COLLISION"
+  );
+});
+
+test("AGY image additions reject case-insensitive alias collisions", async () => {
+  await assert.rejects(
+    sanitizeAgyRequestBody(minimalImageRequest("case-map-session", "case-map-request"), {
+      sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+      sessionMap: { "[EMAIL_1]": "first@example.test" },
+      imageSanitizer: {
+        async sanitize(inlineData) {
+          return {
+            inlineData,
+            changed: false,
+            sessionMapAdditions: { "[email_1]": "second@example.test" }
+          };
+        }
+      }
+    }),
+    error => error?.code === "PRIVACYAI_AGY_SESSION_MAP_COLLISION"
+  );
+});
+
 test("AGY request transformation leaves protocol identities outside the sanitizer", async () => {
   const body = sampleRequest();
   body.request.contents[1].parts[0].thoughtSignature = "opaque-signature";
@@ -106,6 +137,7 @@ test("AGY request transformation aliases native MCP names before provider valida
   const body = sampleRequest();
   body.request.tools[0].functionDeclarations[0].name = nativeName;
   body.request.contents[1].parts[0].functionResponse.name = nativeName;
+  body.request.toolConfig.functionCallingConfig.allowedFunctionNames = [nativeName, "public_tool"];
 
   const result = await sanitizeAgyRequestBody(body, {
     sanitizer: deterministicSanitizer
@@ -117,6 +149,10 @@ test("AGY request transformation aliases native MCP names before provider valida
   assert.match(declarationName, /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/);
   assert.doesNotMatch(declarationName, /\//);
   assert.equal(result.sessionMapAdditions[declarationName], nativeName);
+  assert.deepEqual(
+    result.body.request.toolConfig.functionCallingConfig.allowedFunctionNames,
+    [declarationName, "public_tool"]
+  );
 });
 
 test("AGY request transformation rejects malformed native function names", async () => {
@@ -264,6 +300,110 @@ test("AGY controller keeps image dependencies lazy and closes owned image worker
   await withImage.close();
   await withImage.close();
   assert.equal(closes, 1);
+});
+
+test("AGY controller drains accepted transformations before closing dependencies", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-controller-drain-"));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let markStarted;
+  const started = new Promise(resolve => { markStarted = resolve; });
+  let releaseSanitizer;
+  const sanitizerGate = new Promise(resolve => { releaseSanitizer = resolve; });
+  let closes = 0;
+  const controller = await createAgySessionController({
+    sanitizer: deterministicSanitizer,
+    baseDir: root,
+    verificationStore: new MemoryContextVerificationStore(),
+    imageSanitizerOptions: {
+      async loadImageModule() {
+        return {
+          createImageSanitizer() {
+            return {
+              async sanitize(dataUrl) {
+                markStarted();
+                await sanitizerGate;
+                return { dataUrl, changed: false, sessionMapAdditions: {} };
+              },
+              async close() {
+                closes += 1;
+              }
+            };
+          }
+        };
+      }
+    }
+  });
+
+  const transformation = controller.transform(
+    minimalImageRequest("drain-session", "drain-request")
+  );
+  await started;
+  const closing = controller.close();
+  let closeSettled = false;
+  closing.then(() => { closeSettled = true; });
+
+  await assert.rejects(
+    controller.transform(minimalRequest("new work", "new-session", "new-request")),
+    error => error?.code === "PRIVACYAI_AGY_CONTROLLER_CLOSED"
+  );
+  await assert.rejects(
+    controller.loadSessionMap("agy:drain-session"),
+    error => error?.code === "PRIVACYAI_AGY_CONTROLLER_CLOSED"
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(closeSettled, false);
+  assert.equal(closes, 0);
+
+  releaseSanitizer();
+  await transformation;
+  await closing;
+  assert.equal(closeSettled, true);
+  assert.equal(closes, 1);
+  await controller.close();
+  assert.equal(closes, 1);
+});
+
+test("AGY controller retries only an owned dependency whose close failed", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-controller-close-retry-"));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let closeCalls = 0;
+  const failure = new Error("image worker close failed");
+  const controller = await createAgySessionController({
+    sanitizer: deterministicSanitizer,
+    baseDir: root,
+    verificationStore: new MemoryContextVerificationStore(),
+    imageSanitizerOptions: {
+      async loadImageModule() {
+        return {
+          createImageSanitizer() {
+            return {
+              async sanitize(dataUrl) {
+                return { dataUrl, changed: false, sessionMapAdditions: {} };
+              },
+              async close() {
+                closeCalls += 1;
+                if (closeCalls === 1) throw failure;
+              }
+            };
+          }
+        };
+      }
+    }
+  });
+
+  await controller.transform(minimalImageRequest("close-retry-session", "close-retry-request"));
+  await assert.rejects(controller.close(), error => error === failure);
+  assert.equal(closeCalls, 1);
+  await controller.close();
+  assert.equal(closeCalls, 2);
+  await controller.close();
+  assert.equal(closeCalls, 2);
 });
 
 test("AGY images in prompts and tool results share mappings with text", async () => {
@@ -593,6 +733,16 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   assert.match(unsupported.body, /PRIVACYAI_AGY_UNSUPPORTED_MODEL_ROUTE/);
   assert.equal(observed.length, 2);
   assert.equal(imageCalls.length, 4);
+
+  const unknownRoute = await proxyHttpRequest(
+    runtime,
+    requestBody,
+    "/v1internal:newGenerateContent?alt=sse"
+  );
+  assert.match(unknownRoute.statusLine, /^HTTP\/1\.1 502/);
+  assert.match(unknownRoute.body, /PRIVACYAI_AGY_UNSUPPORTED_HOST_ROUTE/);
+  assert.equal(observed.length, 2);
+  assert.equal(imageCalls.length, 4);
 });
 
 test("AGY opaque forwarding cancels upstream work after downstream disconnect", { timeout: 5000 }, async t => {
@@ -680,29 +830,94 @@ test("ephemeral AGY authority removes only its owned child directory", async () 
   }
 });
 
-test("AGY transport runtime attempts every owned cleanup after failures", async () => {
+test("ephemeral AGY authority shares failed closes and remains retryable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-authority-retry-"));
+  let removeCalls = 0;
+  let markRemovalStarted;
+  const removalStarted = new Promise(resolve => { markRemovalStarted = resolve; });
+  let releaseRemoval;
+  const removalGate = new Promise(resolve => { releaseRemoval = resolve; });
+  const removalFailure = new Error("temporary removal failure");
+  try {
+    const authority = await createEphemeralTlsAuthority(
+      "daily-cloudcode-pa.googleapis.com",
+      {
+        runtimeDir: root,
+        async removeRuntimeDir(path, options) {
+          removeCalls += 1;
+          if (removeCalls === 1) {
+            markRemovalStarted();
+            await removalGate;
+            throw removalFailure;
+          }
+          return rm(path, options);
+        }
+      }
+    );
+
+    const firstClose = authority.close();
+    await removalStarted;
+    const concurrentClose = authority.close();
+    assert.equal(concurrentClose, firstClose);
+    releaseRemoval();
+    await assert.rejects(firstClose, error => error === removalFailure);
+    await assert.rejects(concurrentClose, error => error === removalFailure);
+    assert.equal(removeCalls, 1);
+    await access(authority.runtimeDir);
+
+    await authority.close();
+    assert.equal(removeCalls, 2);
+    await assert.rejects(access(authority.runtimeDir), error => error?.code === "ENOENT");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ephemeral AGY authority preserves a child-specific CA bundle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-authority-ca-"));
+  const customBundle = join(root, "enterprise-ca.pem");
+  const marker = "CUSTOM-ENTERPRISE-CA-BUNDLE";
+  await writeFile(customBundle, `${marker}\n`);
+  try {
+    const authority = await createEphemeralTlsAuthority(
+      "daily-cloudcode-pa.googleapis.com",
+      { runtimeDir: root, baseEnv: { SSL_CERT_FILE: customBundle } }
+    );
+    const trustBundle = await readFile(authority.trustBundlePath, "utf8");
+    assert.equal(trustBundle.startsWith(`${marker}\n`), true);
+    await authority.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("AGY transport runtime retries only resources whose cleanup failed", async () => {
   const calls = [];
+  let proxyAttempts = 0;
+  let authorityAttempts = 0;
   const runtime = await startAgyTransportRuntime({
     sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
     baseEnv: {},
     createAuthority: async () => ({
       runtimeDir: "/tmp/privacyai-test-authority",
       async close() {
-        calls.push("authority");
-        throw new Error("authority close failed");
+        authorityAttempts += 1;
+        calls.push(`authority-${authorityAttempts}`);
+        if (authorityAttempts === 1) throw new Error("authority close failed");
       }
     }),
     createSessionController: async () => ({
       close() {
-        calls.push("controller");
+        calls.push("controller-1");
       }
     }),
     startProxy: async () => ({
       env: {},
       proxyURL: "http://127.0.0.1:1",
       async close() {
-        calls.push("proxy");
-        throw new Error("proxy close failed");
+        proxyAttempts += 1;
+        calls.push(`proxy-${proxyAttempts}`);
+        if (proxyAttempts === 1) throw new Error("proxy close failed");
       }
     })
   });
@@ -714,9 +929,49 @@ test("AGY transport runtime attempts every owned cleanup after failures", async 
       error.errors.length === 2 &&
       error.cause?.message === "proxy close failed"
   );
-  assert.deepEqual(calls, ["proxy", "controller", "authority"]);
+  assert.deepEqual(calls, ["proxy-1", "controller-1", "authority-1"]);
+
   await runtime.close();
-  assert.deepEqual(calls, ["proxy", "controller", "authority"]);
+  assert.deepEqual(calls, ["proxy-1", "controller-1", "authority-1", "proxy-2", "authority-2"]);
+  await runtime.close();
+  assert.deepEqual(calls, ["proxy-1", "controller-1", "authority-1", "proxy-2", "authority-2"]);
+});
+
+test("AGY transport runtime surfaces partial-start cleanup failures", async () => {
+  const initializationError = new Error("proxy initialization failed");
+  const controllerCleanupError = new Error("controller cleanup failed");
+  const authorityCleanupError = new Error("authority cleanup failed");
+  const calls = [];
+
+  await assert.rejects(
+    startAgyTransportRuntime({
+      sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+      baseEnv: {},
+      createAuthority: async () => ({
+        runtimeDir: "/tmp/privacyai-test-authority",
+        async close() {
+          calls.push("authority");
+          throw authorityCleanupError;
+        }
+      }),
+      createSessionController: async () => ({
+        async close() {
+          calls.push("controller");
+          throw controllerCleanupError;
+        }
+      }),
+      startProxy: async () => {
+        throw initializationError;
+      }
+    }),
+    error =>
+      error instanceof AggregateError &&
+      error.cause === initializationError &&
+      error.errors[0] === initializationError &&
+      error.errors.includes(controllerCleanupError) &&
+      error.errors.includes(authorityCleanupError)
+  );
+  assert.deepEqual(calls.sort(), ["authority", "controller"]);
 });
 
 test("AGY SSE restoration handles placeholders split across text events", () => {
@@ -736,6 +991,60 @@ test("AGY SSE restoration handles placeholders split across text events", () => 
     .join("");
 
   assert.equal(text, `contact ${PRIVATE_EMAIL} now`);
+});
+
+test("AGY SSE processes a finish event's final text chunk before flushing", () => {
+  const restorer = new AgySseRestorer({ "[EMAIL_1]": PRIVATE_EMAIL });
+  const outputs = [];
+  outputs.push(...restorer.write(Buffer.from(sseEvent(textEvent("contact [EMAIL_")))));
+  const final = finishEvent();
+  final.response.candidates[0].content.parts[0].text = "1]";
+  outputs.push(...restorer.write(Buffer.from(sseEvent(final))));
+  outputs.push(...restorer.end());
+
+  const events = outputs.flatMap(parseEvents);
+  const text = events
+    .flatMap(event => event.response?.candidates || [])
+    .flatMap(candidate => candidate.content?.parts || [])
+    .map(part => part.text)
+    .filter(value => typeof value === "string")
+    .join("");
+  assert.equal(text, `contact ${PRIVATE_EMAIL}`);
+  assert.equal(events.at(-1).response.candidates[0].finishReason, "STOP");
+});
+
+test("AGY SSE preserves text order when a finish event ends with a partial placeholder", () => {
+  const restorer = new AgySseRestorer({ "[EMAIL_1]": PRIVATE_EMAIL });
+  const final = finishEvent();
+  final.response.candidates[0].content.parts[0].text = "abc [EMAIL_";
+  const outputs = [
+    ...restorer.write(Buffer.from(sseEvent(final))),
+    ...restorer.end()
+  ];
+
+  const events = outputs.flatMap(parseEvents);
+  const text = events
+    .flatMap(event => event.response?.candidates || [])
+    .flatMap(candidate => candidate.content?.parts || [])
+    .map(part => part.text)
+    .filter(value => typeof value === "string")
+    .join("");
+  assert.equal(text, "abc [EMAIL_");
+  assert.equal(events.at(-1).response.candidates[0].finishReason, "STOP");
+});
+
+test("standalone AGY SSE restoration finalizes buffered placeholder prefixes", () => {
+  const restored = restoreAgySseEvent(
+    textEvent("prefix [EMAIL_"),
+    { "[EMAIL_1]": PRIVATE_EMAIL }
+  );
+  const text = restored
+    .flatMap(event => event.response?.candidates || [])
+    .flatMap(candidate => candidate.content?.parts || [])
+    .map(part => part.text)
+    .filter(value => typeof value === "string")
+    .join("");
+  assert.equal(text, "prefix [EMAIL_");
 });
 
 test("AGY SSE avoids cloning stream templates for every text chunk", () => {

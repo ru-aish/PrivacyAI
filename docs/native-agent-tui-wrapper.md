@@ -5,9 +5,10 @@ on the P0 context-boundary branch, July 2026.
 
 ## Product invariant
 
-> No supported model-visible text or JSON crosses a remote provider boundary
-> before local privacy classification. Values are restored only on the local
-> side of that boundary. Unknown transports and unsupported content fail closed.
+> No supported model-visible text, JSON, or inline image crosses a remote
+> provider boundary before local privacy classification. Values are restored
+> only on the local side of that boundary. Unknown transports and unsupported
+> content fail closed.
 
 The official agent binaries remain installed and controlled by the user. The
 integration boundary differs by host because each host exposes different native
@@ -20,7 +21,7 @@ capabilities.
 | Claude Code | Prompt/startup isolation and supported lifecycle hooks | Supported native file, terminal, and tool paths. |
 | Codex | Stock Codex through a bidirectional localhost Responses gateway | Normal account, model, `CODEX_HOME`, history, skills, plugins, user MCPs, filesystem, shell, patch, Git, resume, fork, exec, and review. |
 | Codex strict fallback | Credential-only temporary home and hook denial | Prompt-only reasoning; tool-capable paths denied. |
-| AGY | Stock AGY through a process-scoped selective HTTPS boundary | Normal account, model, files, terminal, browser, MCPs, and native tools for supported text/JSON turns. |
+| AGY | Stock AGY through a process-scoped selective HTTPS boundary | Normal account, model, files, terminal, browser, MCPs, and native tools for supported text/JSON turns plus inline PNG, JPEG, and WebP images in prompts and function responses. |
 
 ## Codex architecture
 
@@ -207,8 +208,9 @@ private failure/batch path without a shape-preserving replacement stops.
 model, files, terminal, browser, MCPs, and native tool execution. PrivacyAI adds
 an ephemeral process-only CA plus an authenticated loopback CONNECT proxy.
 Connections to unrelated hosts are tunneled unchanged. On the current AGY model
-host, non-generation routes remain opaque while the supported
-`streamGenerateContent` route is validated and transformed.
+host, only explicitly audited non-generation routes remain opaque; the supported
+`streamGenerateContent` route is validated and transformed, and unknown routes
+fail closed.
 
 ```text
 stock AGY
@@ -225,10 +227,11 @@ provider's function-name grammar and are restored locally before execution. The
 local classifier window does not reduce the remote model context: oversized
 artifacts are inspected in bounded chunks and rebuilt before forwarding.
 
-Current fail-closed limitations are unsupported image/media parts, model route or
-schema drift, compressed model-generation payloads, Windows, and environments
-that already require an HTTP/SOCKS proxy. The previous prompt-only boundary is
-retained explicitly as:
+Supported inline PNG, JPEG, and WebP images in prompts and function responses are
+sanitized locally. Remote `fileData`, malformed images, unsupported media types,
+model route or schema drift, compressed model-generation payloads, Windows, and
+environments that already require an HTTP/SOCKS proxy fail closed. The previous
+prompt-only boundary is retained explicitly as:
 
 ```bash
 privacyai agy --privacy-strict --print "fresh one-shot prompt"

@@ -17,6 +17,7 @@ export async function createEphemeralTlsAuthority(hostname, options = {}) {
   await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
   const runtimeDir = await mkdtemp(join(runtimeRoot, "privacyai-agy-tls-"));
   await chmod(runtimeDir, 0o700);
+  const removeRuntimeDir = options.removeRuntimeDir || rm;
 
   const paths = {
     caKey: join(runtimeDir, "ca.key"),
@@ -32,6 +33,7 @@ export async function createEphemeralTlsAuthority(hostname, options = {}) {
 
   const runOpenSsl = options.runOpenSsl || defaultOpenSslRunner(options.opensslPath || "openssl");
   let closed = false;
+  let closePromise = null;
   try {
     await writeFile(paths.caConfig, caConfig(), { mode: 0o600 });
     await writeFile(paths.leafConfig, leafConfig(hostname), { mode: 0o600 });
@@ -97,14 +99,30 @@ export async function createEphemeralTlsAuthority(hostname, options = {}) {
       leafCertificate,
       leafPrivateKey,
       trustBundlePath: paths.trustBundle,
-      async close() {
-        if (closed) return;
-        closed = true;
-        await rm(runtimeDir, { recursive: true, force: true });
+      close() {
+        if (closed) return Promise.resolve();
+        if (closePromise) return closePromise;
+        closePromise = Promise.resolve()
+          .then(() => removeRuntimeDir(runtimeDir, { recursive: true, force: true }))
+          .then(() => {
+            closed = true;
+          })
+          .finally(() => {
+            closePromise = null;
+          });
+        return closePromise;
       }
     };
   } catch (error) {
-    await rm(runtimeDir, { recursive: true, force: true });
+    try {
+      await removeRuntimeDir(runtimeDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "PrivacyAI could not create or fully clean up the temporary AGY transport certificate.",
+        { cause: error }
+      );
+    }
     throw tlsError(
       "PRIVACYAI_AGY_TLS_SETUP_FAILED",
       "PrivacyAI could not create the temporary AGY transport certificate.",
@@ -114,8 +132,13 @@ export async function createEphemeralTlsAuthority(hostname, options = {}) {
 }
 
 async function resolveSystemCaBundle(options) {
-  const explicit = options.systemCaBundle || process.env.PRIVACYAI_SYSTEM_CA_BUNDLE;
-  const candidates = explicit ? [explicit] : [process.env.SSL_CERT_FILE, ...DEFAULT_CA_BUNDLES];
+  const baseEnv = options.baseEnv || {};
+  const explicit = options.systemCaBundle ||
+    baseEnv.PRIVACYAI_SYSTEM_CA_BUNDLE ||
+    process.env.PRIVACYAI_SYSTEM_CA_BUNDLE;
+  const candidates = explicit
+    ? [explicit]
+    : [baseEnv.SSL_CERT_FILE, process.env.SSL_CERT_FILE, ...DEFAULT_CA_BUNDLES];
   for (const candidate of candidates) {
     if (!candidate) continue;
     try {

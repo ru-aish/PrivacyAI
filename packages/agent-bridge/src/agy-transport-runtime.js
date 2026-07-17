@@ -29,43 +29,62 @@ export async function startAgyTransportRuntime(options = {}) {
       baseEnv: options.baseEnv || process.env
     });
   } catch (error) {
-    await Promise.allSettled([
-      proxy?.close?.(),
-      Promise.resolve(controller?.close?.()),
-      authority?.close?.()
-    ]);
-    throw error;
+    const cleanupErrors = await collectCloseErrors([proxy, controller, authority]);
+    if (cleanupErrors.length === 0) throw error;
+    throw new AggregateError(
+      [error, ...cleanupErrors],
+      "PrivacyAI could not start the AGY transport runtime and fully clean up partial resources.",
+      { cause: error }
+    );
   }
 
-  let closed = false;
+  const pendingResources = new Set([proxy, controller, authority].filter(
+    resource => typeof resource?.close === "function"
+  ));
+  let closePromise = null;
   return {
     modelHost,
     runtimeDir: authority.runtimeDir,
     env: proxy.env,
     proxyURL: proxy.proxyURL,
-    async close() {
-      if (closed) return;
-      closed = true;
-      await closeOwnedResources([proxy, controller, authority]);
+    close() {
+      if (pendingResources.size === 0) return Promise.resolve();
+      if (closePromise) return closePromise;
+      closePromise = closePendingResources(pendingResources)
+        .finally(() => {
+          closePromise = null;
+        });
+      return closePromise;
     }
   };
 }
 
-async function closeOwnedResources(resources) {
+async function closePendingResources(pendingResources) {
   const errors = [];
-  for (const resource of resources) {
-    if (typeof resource?.close !== "function") continue;
+  for (const resource of [...pendingResources]) {
     try {
       await resource.close();
+      pendingResources.delete(resource);
     } catch (error) {
       errors.push(error);
     }
   }
+  throwCloseErrors(errors, "PrivacyAI could not fully close the AGY transport runtime.");
+}
+
+async function collectCloseErrors(resources) {
+  const results = await Promise.allSettled(resources.map(async resource => {
+    if (typeof resource?.close === "function") await resource.close();
+  }));
+  return results
+    .filter(result => result.status === "rejected")
+    .map(result => result.reason);
+}
+
+function throwCloseErrors(errors, message) {
   if (errors.length === 0) return;
   if (errors.length === 1) throw errors[0];
-  throw new AggregateError(errors, "PrivacyAI could not fully close the AGY transport runtime.", {
-    cause: errors[0]
-  });
+  throw new AggregateError(errors, message, { cause: errors[0] });
 }
 
 function assertProxyCompatibility(env, options) {

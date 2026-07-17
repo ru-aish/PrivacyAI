@@ -28,7 +28,9 @@ export class AgySseRestorer {
         "AGY model stream ended with an incomplete SSE frame."
       );
     }
-    output.push(...this.#flushTextStreams());
+    output.push(...this.#flushTextStreams().map(value =>
+      serializeFrame({ otherLines: [] }, JSON.stringify(value))
+    ));
     return output;
   }
 
@@ -65,9 +67,20 @@ export class AgySseRestorer {
       );
     }
 
+    const restored = this.#restoreEvent(event);
+    if (!hasFinishReason(event)) {
+      return [serializeFrame(parsed, JSON.stringify(restored))];
+    }
+
+    const flushed = this.#flushTextStreams();
+    if (flushed.length === 0) {
+      return [serializeFrame(parsed, JSON.stringify(restored))];
+    }
+
     const output = [];
-    if (hasFinishReason(event)) output.push(...this.#flushTextStreams());
-    output.push(this.#restoreEvent(event));
+    const contentEvent = withoutFinishReasons(restored);
+    if (hasCandidatePayload(contentEvent)) output.push(contentEvent);
+    output.push(...flushed, finishOnlyEvent(restored));
     return output.map(value => serializeFrame(parsed, JSON.stringify(value)));
   }
 
@@ -163,6 +176,38 @@ export class AgySseRestorer {
   }
 }
 
+function withoutFinishReasons(event) {
+  const output = structuredClone(event);
+  for (const candidate of output.response?.candidates || []) delete candidate.finishReason;
+  return output;
+}
+
+function finishOnlyEvent(event) {
+  const output = structuredClone(event);
+  const candidates = output.response?.candidates;
+  if (!Array.isArray(candidates)) return output;
+  output.response.candidates = candidates
+    .filter(candidate => candidate?.finishReason != null)
+    .map(candidate => ({
+      ...candidate,
+      content: {
+        role: candidate.content?.role || "model",
+        parts: [{ text: "" }]
+      }
+    }));
+  return output;
+}
+
+function hasCandidatePayload(event) {
+  return (event.response?.candidates || []).some(candidate =>
+    (candidate.content?.parts || []).some(part =>
+      typeof part.text === "string"
+        ? part.text.length > 0
+        : part.functionCall != null || part.functionResponse != null
+    )
+  );
+}
+
 function createTextFlushEvent(template, candidateIndex, partIndex, text) {
   const event = structuredClone(template);
   const candidate = event.response?.candidates?.[candidateIndex];
@@ -190,7 +235,10 @@ function createTextFlushEvent(template, candidateIndex, partIndex, text) {
 export function restoreAgySseEvent(event, sessionMap = {}) {
   const restorer = new AgySseRestorer(sessionMap);
   const frame = `data: ${JSON.stringify(event)}\n\n`;
-  return restorer.write(Buffer.from(frame)).map(serialized => {
+  return [
+    ...restorer.write(Buffer.from(frame)),
+    ...restorer.end()
+  ].map(serialized => {
     const parsed = parseFrame(serialized.trimEnd());
     return JSON.parse(parsed.data);
   });

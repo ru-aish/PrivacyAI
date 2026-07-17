@@ -183,6 +183,10 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
     sessionMapAdditions,
     providerToolNames.sessionMapAdditions
   );
+  rewriteAllowedAgyFunctionNames(
+    transformed.request.toolConfig,
+    providerToolNames.values
+  );
   artifactResult.values.forEach((value, index) => {
     const resolved = slots[index].artifactType === "tool_name"
       ? providerToolNames.values.get(slots[index].value)
@@ -481,6 +485,21 @@ function resolveAgyProviderToolNames(slots, sessionMap, additionallyProtected = 
   return { values, sessionMapAdditions };
 }
 
+function rewriteAllowedAgyFunctionNames(toolConfig, providerToolNames) {
+  const functionCallingConfig = toolConfig?.functionCallingConfig;
+  const allowed = functionCallingConfig?.allowedFunctionNames;
+  if (allowed == null) return;
+  if (!Array.isArray(allowed) || allowed.some(name => typeof name !== "string" || name.length === 0)) {
+    throw agyError(
+      "PRIVACYAI_AGY_INVALID_TOOL_CONFIG",
+      "PrivacyAI requires AGY allowed function names to be non-empty strings."
+    );
+  }
+  functionCallingConfig.allowedFunctionNames = allowed.map(name =>
+    providerToolNames.get(name) || name
+  );
+}
+
 function collectAgyToolNames(body) {
   const names = new Set();
   for (const tool of body?.request?.tools || []) {
@@ -735,6 +754,14 @@ function mergeAgySessionAdditions(completeMap, aggregateAdditions, additions) {
         );
       }
       continue;
+    }
+    try {
+      normalizeSessionMap({ ...completeMap, [placeholder]: original });
+    } catch {
+      throw agyError(
+        "PRIVACYAI_AGY_SESSION_MAP_COLLISION",
+        "PrivacyAI blocked an ambiguous AGY session mapping."
+      );
     }
     const aliasCount = aliasCounts.get(original) || 0;
     if (aliasCount >= MAX_ALIASES_PER_ORIGINAL) {

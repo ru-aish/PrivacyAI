@@ -136,31 +136,30 @@ async function launchAgyStrict(userArgs, options) {
     throw new TypeError("PrivacyAI sanitizer did not return sanitizedPrompt for AGY.");
   }
 
-  const runtimeDir = await mkdtemp(join(tmpdir(), "privacyai-agy-"));
-  await chmod(runtimeDir, 0o700);
-  const sessionToken = options.sessionToken || randomUUID();
-  const mapPath = join(runtimeDir, "session-map.json");
-  await writeFile(
-    mapPath,
-    `${JSON.stringify({ sessionToken, sessionMap: result.sessionMap || {} })}
-`,
-    { mode: 0o600 }
-  );
-
-  const childArgs = [...userArgs];
-  replacePrompt(childArgs, parsed, result.sanitizedPrompt);
-  const env = {
-    ...agyBaseEnvironment(options),
-    PRIVACYAI_CONFIG_FILE: options.loaded.path,
-    PRIVACYAI_AGENT_FLAVOR: "agy",
-    PRIVACYAI_AGY_PRIVACY_MODE: "strict",
-    PRIVACYAI_AGY_SESSION_TOKEN: sessionToken,
-    PRIVACYAI_WRAPPER_DIR: runtimeDir
-  };
-
-  const installHook = options.installAgyGlobalHook || installAgyGlobalHook;
+  const runtimeDir = await mkdtemp(join(options.tmpDir || tmpdir(), "privacyai-agy-"));
   let cleanupHook = null;
   try {
+    await chmod(runtimeDir, 0o700);
+    const sessionToken = options.sessionToken || randomUUID();
+    const mapPath = join(runtimeDir, "session-map.json");
+    await writeFile(
+      mapPath,
+      `${JSON.stringify({ sessionToken, sessionMap: result.sessionMap || {} })}\n`,
+      { mode: 0o600 }
+    );
+
+    const childArgs = [...userArgs];
+    replacePrompt(childArgs, parsed, result.sanitizedPrompt);
+    const env = {
+      ...agyBaseEnvironment(options),
+      PRIVACYAI_CONFIG_FILE: options.loaded.path,
+      PRIVACYAI_AGENT_FLAVOR: "agy",
+      PRIVACYAI_AGY_PRIVACY_MODE: "strict",
+      PRIVACYAI_AGY_SESSION_TOKEN: sessionToken,
+      PRIVACYAI_WRAPPER_DIR: runtimeDir
+    };
+    const installHook = options.installAgyGlobalHook || installAgyGlobalHook;
+
     cleanupHook = await installHook({
       ...options,
       mapPath,
@@ -188,7 +187,6 @@ async function launchAgyStrict(userArgs, options) {
     }
   }
 }
-
 export function parseAgyArguments(args) {
   if (!Array.isArray(args)) throw new TypeError("AGY arguments must be an array.");
 

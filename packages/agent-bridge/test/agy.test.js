@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -345,6 +345,41 @@ test("AGY strict launch sanitizes the prompt before spawning and keeps the guard
   assert.equal(observed.options.env.PRIVACYAI_AGY_SESSION_TOKEN, "launch-token");
   assert.match(warning, /strict mode/);
   await assert.rejects(readFile(hooksPath), error => error?.code === "ENOENT");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("AGY strict launch removes its runtime directory when map serialization fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-serialization-failure-"));
+  let hookCalls = 0;
+
+  await assert.rejects(
+    launchAgy(["--privacy-strict", "--print", "private test"], {
+      cwd: root,
+      tmpDir: root,
+      binary: "/test/agy",
+      stderr: new PassThrough(),
+      loadPrivacyConfig: async () => ({
+        configured: true,
+        path: join(root, "privacy-config.json"),
+        config: { provider: "ollama", model: "test", baseURL: "http://127.0.0.1:11434" }
+      }),
+      checkPrivacyModel: async () => ({ ok: true }),
+      sanitizer: async () => {
+        const sessionMap = {};
+        sessionMap["[PRIVATE_VALUE_1]"] = sessionMap;
+        return { sanitizedPrompt: "[PRIVATE_VALUE_1]", sessionMap };
+      },
+      installAgyGlobalHook: async () => {
+        hookCalls += 1;
+        return async () => {};
+      },
+      runChild: async () => 0
+    }),
+    error => error instanceof TypeError && /circular/i.test(error.message)
+  );
+
+  assert.equal(hookCalls, 0);
+  assert.deepEqual(await readdir(root), []);
   await rm(root, { recursive: true, force: true });
 });
 

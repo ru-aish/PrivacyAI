@@ -24,6 +24,7 @@ export function createAgyImageSanitizer(options = {}) {
   let enginePromise;
   const ownsEngine = !engine;
   let closed = false;
+  let closePromise = null;
 
   const resolveEngine = async () => {
     if (closed) {
@@ -64,21 +65,32 @@ export function createAgyImageSanitizer(options = {}) {
       }
     },
 
-    async close() {
-      if (closed) return;
-      closed = true;
-      if (!ownsEngine) return;
-
-      let resolved = engine;
-      if (!resolved && enginePromise) {
-        try {
-          resolved = await enginePromise;
-        } catch {
-          // Initialization already failed at the sanitize boundary. Shutdown
-          // remains best-effort so the rest of the runtime can still clean up.
+    close() {
+      if (closed) return Promise.resolve();
+      if (closePromise) return closePromise;
+      closePromise = (async () => {
+        if (!ownsEngine) {
+          closed = true;
+          return;
         }
-      }
-      if (typeof resolved?.close === "function") await resolved.close();
+
+        let resolved = engine;
+        if (!resolved && enginePromise) {
+          try {
+            resolved = await enginePromise;
+          } catch {
+            // Initialization already failed at the sanitize boundary, so no
+            // worker exists to clean up and the adapter can close normally.
+            closed = true;
+            return;
+          }
+        }
+        if (typeof resolved?.close === "function") await resolved.close();
+        closed = true;
+      })().finally(() => {
+        closePromise = null;
+      });
+      return closePromise;
     }
   };
 }

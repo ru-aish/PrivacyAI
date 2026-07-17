@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   assertNoProtectedOriginalsInValue,
+  normalizeSessionMap,
   rebaseSessionAdditions,
   sanitizeKnownValue,
   sanitizeStructuredValue
@@ -24,7 +25,7 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
 
   const normalized = slots.map((entry, index) => normalizeSlot(entry, index));
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
-  const completeMap = { ...(options.sessionMap || {}) };
+  const completeMap = normalizeSessionMap(options.sessionMap);
   const sessionMapAdditions = {};
   const cacheWrites = [];
   const itemRecords = [];
@@ -199,7 +200,8 @@ function mergeMappings(completeMap, aggregateAdditions, additions) {
     normalized,
     completeMap
   );
-  Object.assign(completeMap, rebased.sessionMap);
+  const candidate = normalizeSessionMap({ ...completeMap, ...rebased.sessionMap });
+  Object.assign(completeMap, candidate);
   Object.assign(aggregateAdditions, rebased.sessionMap);
 }
 

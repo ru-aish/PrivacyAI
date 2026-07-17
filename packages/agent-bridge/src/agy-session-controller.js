@@ -40,6 +40,7 @@ export async function createAgySessionController(options = {}) {
   });
   const serial = new KeyedSerialQueue();
   const sessionCaches = new Map();
+  const activeOperations = new Set();
   const context = {
     ...options,
     vault,
@@ -50,15 +51,31 @@ export async function createAgySessionController(options = {}) {
     sessionCaches,
     requestCount: 0
   };
-  let closed = false;
+  let state = "open";
+  let closePromise = null;
+  let imageSanitizerClosed = !ownsImageSanitizer;
+  let verificationStoreClosed = !ownsVerificationStore;
+
+  const assertOpen = () => {
+    if (state !== "open") {
+      throw controllerError("PRIVACYAI_AGY_CONTROLLER_CLOSED", "AGY session controller is closed.");
+    }
+  };
+  const trackOperation = operation => {
+    activeOperations.add(operation);
+    operation.then(
+      () => activeOperations.delete(operation),
+      () => activeOperations.delete(operation)
+    );
+    return operation;
+  };
 
   return {
     policyFingerprint,
     async transform(body, requestOptions = {}) {
-      if (closed) throw controllerError("PRIVACYAI_AGY_CONTROLLER_CLOSED", "AGY session controller is closed.");
+      assertOpen();
       const sessionKey = agySessionKey(body, requestOptions.fallbackSessionId);
-
-      return context.serial.run(sessionKey, async () => {
+      return trackOperation(context.serial.run(sessionKey, async () => {
         throwIfAborted(requestOptions.signal);
         const [currentVault, currentThread] = await Promise.all([
           context.vault.load(sessionKey),
@@ -113,41 +130,53 @@ export async function createAgySessionController(options = {}) {
           await context.onSanitizedRequest(result.body, { sessionKey });
         }
         return { body: result.body, sessionKey, sessionMap: completeMap };
-      });
+      }));
     },
     async loadSessionMap(sessionKey) {
-      if (closed) throw controllerError("PRIVACYAI_AGY_CONTROLLER_CLOSED", "AGY session controller is closed.");
-      const [vaultRecord, threadRecord] = await Promise.all([
-        vault.load(sessionKey),
-        Promise.resolve(verificationStore.loadThread(sessionKey))
-      ]);
-      return mergeAgySessionMaps(vaultRecord.sessionMap, threadRecord.sessionMap);
+      assertOpen();
+      return trackOperation((async () => {
+        const [vaultRecord, threadRecord] = await Promise.all([
+          vault.load(sessionKey),
+          Promise.resolve(verificationStore.loadThread(sessionKey))
+        ]);
+        return mergeAgySessionMaps(vaultRecord.sessionMap, threadRecord.sessionMap);
+      })());
     },
-    async close() {
-      if (closed) return;
-      closed = true;
-      sessionCaches.clear();
-      const errors = [];
-      if (ownsImageSanitizer && typeof imageSanitizer.close === "function") {
-        try {
-          await imageSanitizer.close();
-        } catch (error) {
-          errors.push(error);
+    close() {
+      if (state === "closed") return Promise.resolve();
+      if (closePromise) return closePromise;
+      state = "closing";
+      closePromise = (async () => {
+        await Promise.allSettled([...activeOperations]);
+        sessionCaches.clear();
+        const errors = [];
+        if (!imageSanitizerClosed && typeof imageSanitizer.close === "function") {
+          try {
+            await imageSanitizer.close();
+            imageSanitizerClosed = true;
+          } catch (error) {
+            errors.push(error);
+          }
         }
-      }
-      if (ownsVerificationStore) {
-        try {
-          verificationStore.close();
-        } catch (error) {
-          errors.push(error);
+        if (!verificationStoreClosed) {
+          try {
+            await Promise.resolve(verificationStore.close());
+            verificationStoreClosed = true;
+          } catch (error) {
+            errors.push(error);
+          }
         }
-      }
-      if (errors.length === 1) throw errors[0];
-      if (errors.length > 1) {
-        throw new AggregateError(errors, "PrivacyAI could not fully close the AGY session controller.", {
-          cause: errors[0]
-        });
-      }
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) {
+          throw new AggregateError(errors, "PrivacyAI could not fully close the AGY session controller.", {
+            cause: errors[0]
+          });
+        }
+        state = "closed";
+      })().finally(() => {
+        closePromise = null;
+      });
+      return closePromise;
     }
   };
 }
@@ -159,7 +188,9 @@ function mergeAgySessionMaps(current, inherited) {
       "PRIVACYAI_AGY_SESSION_MAP_COLLISION",
       kind === "placeholder"
         ? "PrivacyAI blocked an ambiguous AGY placeholder mapping."
-        : "PrivacyAI blocked an ambiguous AGY private-value mapping."
+        : kind === "case"
+          ? "PrivacyAI blocked a case-insensitive AGY session-map collision."
+          : "PrivacyAI blocked an ambiguous AGY private-value mapping."
     )
   });
 }

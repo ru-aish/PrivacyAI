@@ -10,6 +10,18 @@ const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MODEL_HOST = "daily-cloudcode-pa.googleapis.com";
 const DEFAULT_MAX_REQUEST_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
+const AUDITED_OPAQUE_ROUTES = new Map([
+  ["GET", new Set(["/oauth/status"])],
+  ["POST", new Set([
+    "/v1internal:fetchAdminControls",
+    "/v1internal:fetchAvailableModels",
+    "/v1internal:fetchUserInfo",
+    "/v1internal:listExperiments",
+    "/v1internal:loadCodeAssist",
+    "/v1internal:retrieveUserQuotaSummary",
+    "/v1internal:setUserSettings"
+  ])]
+]);
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
   "keep-alive",
@@ -113,6 +125,13 @@ async function handleInterceptedRequest(request, response, context) {
 
   const url = new URL(request.url || "/", `https://${context.modelHost}`);
   if (!isModelPath(url)) {
+    if (!isAuditedOpaqueRoute(request.method, url)) {
+      request.resume();
+      throw proxyError(
+        "PRIVACYAI_AGY_UNSUPPORTED_HOST_ROUTE",
+        `PrivacyAI blocked unaudited AGY model-host route ${String(request.method || "").toUpperCase()} ${url.pathname}.`
+      );
+    }
     return proxyOpaqueRequest(request, response, context, url);
   }
   if (!isSupportedModelRoute(request.method, url)) {
@@ -460,6 +479,10 @@ function normalizeHostHeader(value) {
 
 function isModelPath(url) {
   return url.pathname === "/v1internal:streamGenerateContent";
+}
+
+function isAuditedOpaqueRoute(method, url) {
+  return AUDITED_OPAQUE_ROUTES.get(String(method || "").toUpperCase())?.has(url.pathname) === true;
 }
 
 function isSupportedModelRoute(method, url) {
