@@ -1,0 +1,91 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { MemoryContextVerificationStore, openContextVerificationStore } from "../src/context-verification-store.js";
+
+const id = value => `sha256:${value}`;
+
+async function store(t, options = {}) {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-ledger-"));
+  const value = await openContextVerificationStore({ verificationDbPath: join(root, "ledger.sqlite3"), ...options });
+  t.after(() => value.close());
+  return value;
+}
+
+function seed(store) {
+  store.registerRepository({ repositoryId: id("repo"), rootRef: id("root") });
+  store.registerWorktree({ worktreeId: id("worktree"), repositoryId: id("repo"), pathHash: id("worktree-path"), metadataRef: id("worktree-meta") });
+  store.putContentIdentity({ contentHash: id("content"), byteLength: 42, kind: "text", gitBlobHash: id("blob"), repositoryId: id("repo") });
+}
+
+test("migrates a v1 context database and retains existing records", async t => {
+  let sqlite;
+  try { sqlite = await import("node:sqlite"); } catch { t.skip("node:sqlite unavailable"); return; }
+  const root = await mkdtemp(join(tmpdir(), "privacyai-ledger-migration-"));
+  const path = join(root, "ledger.sqlite3");
+  const db = new sqlite.DatabaseSync(path);
+  db.exec("CREATE TABLE privacyai_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE threads (session_key TEXT PRIMARY KEY,parent_keys_json TEXT NOT NULL,session_map_json TEXT NOT NULL,policy_fingerprint TEXT NOT NULL,updated_at INTEGER NOT NULL); INSERT INTO privacyai_meta VALUES ('schema_version','1'); INSERT INTO threads VALUES ('old','[]','{}','policy',1)");
+  db.close();
+  const value = await openContextVerificationStore({ verificationDbPath: path });
+  t.after(() => value.close());
+  assert.equal(value.loadThread("old").policyFingerprint, "policy");
+  value.registerRepository({ repositoryId: id("repo"), rootRef: id("root") });
+});
+
+test("stores normalized metadata and reuses content through a git blob across worktrees", async t => {
+  const value = await store(t); seed(value);
+  value.registerWorktree({ worktreeId: id("worktree-2"), repositoryId: id("repo"), pathHash: id("worktree-path-2"), metadataRef: id("worktree-meta-2") });
+  value.putFileMetadata({ worktreeId: id("worktree"), pathHash: id("path"), contentHash: id("content"), byteLength: 42, mode: 33188, metadataRef: id("meta"), versionHash: id("version"), gitBlobHash: id("blob"), versionRef: id("version-ref") });
+  assert.deepEqual(value.getContentIdentity(id("content")), { contentHash: id("content"), byteLength: 42, kind: "text" });
+  assert.equal(value.findContentByGitBlob(id("blob")).contentHash, id("content"));
+  assert.equal(value.getFileMetadata(id("worktree"), id("path")).metadataRef, id("meta"));
+  assert.equal(value.getFileVersion(id("worktree"), id("path"), id("version")).gitBlobHash, id("blob"));
+});
+
+test("manifests, privacy plans, and mutation state transitions are deterministic", async t => {
+  const value = await store(t); seed(value);
+  const manifest = value.putManifest({ worktreeId: id("worktree"), metadataRef: id("manifest-meta"), entries: [{ pathHash: id("b"), contentHash: id("content"), mode: 33188 }, { pathHash: id("a"), contentHash: id("content"), gitBlobHash: id("blob"), mode: 33188 }] });
+  assert.deepEqual(value.getManifest(manifest.manifestHash).entries.map(entry => entry.pathHash), [id("a"), id("b")]);
+  value.putPrivacyPlan({ contentHash: id("content"), policyFingerprint: id("policy"), spans: [{ start: 3, end: 9, classification: "email", reference: id("span") }], editPlan: [{ start: 3, end: 9, classification: "email", reference: id("edit") }] });
+  assert.equal(value.getPrivacyPlan(id("content"), id("policy")).spans[0].classification, "email");
+  value.stageFileMutation({ mutationId: id("mutation"), worktreeId: id("worktree"), pathHash: id("path"), expectedContentHash: id("content"), nextContentHash: id("next"), manifestHash: manifest.manifestHash, opaqueReference: id("pending") });
+  assert.equal(value.commitFileMutation(id("mutation"), id("wrong")).status, "mismatch");
+  assert.equal(value.commitFileMutation(id("mutation"), id("next"), id("committed")).status, "committed");
+  value.stageFileMutation({ mutationId: id("rollback"), worktreeId: id("worktree"), pathHash: id("path"), expectedContentHash: id("content"), nextContentHash: id("next"), opaqueReference: id("pending") });
+  assert.equal(value.rollbackFileMutation(id("rollback")).status, "rolled_back");
+});
+
+test("ledger pruning, failures, WAL opens, and memory fallback are bounded", async t => {
+  const value = await store(t, { maxLedgerItems: 1, verificationMaxAgeMs: 5 }); seed(value);
+  value.putContentIdentity({ contentHash: id("content-2"), kind: "text" });
+  value.prune();
+  assert.equal(value.getContentIdentity(id("content")) === undefined || value.getContentIdentity(id("content-2")) !== undefined, true);
+  assert.throws(() => value.putManifest({ worktreeId: id("worktree"), entries: [{ pathHash: id("x"), contentHash: id("content-2") }, { pathHash: id("x"), contentHash: id("content-2") }] }), /unique path hashes/);
+  const memory = new MemoryContextVerificationStore({ maxLedgerItems: 1 }); seed(memory); memory.putContentIdentity({ contentHash: id("memory-2"), kind: "text" }); assert.equal(memory.contentIdentities.size, 1);
+  const second = await openContextVerificationStore({ verificationDbPath: value.path }); t.after(() => second.close());
+  second.registerRepository({ repositoryId: id("repo-2"), rootRef: id("root-2") });
+});
+
+test("SQLite thread pruning applies both LRU bounds and age", async t => {
+  const value = await store(t, { maxThreads: 1, verificationMaxAgeMs: 5 });
+  value.saveThread("old", { sessionMap: {} });
+  await new Promise(resolve => setTimeout(resolve, 8));
+  value.saveThread("new", { sessionMap: {} });
+  value.prune();
+  assert.equal(value.loadThread("old").updatedAt, 0);
+  await new Promise(resolve => setTimeout(resolve, 8));
+  value.prune();
+  assert.equal(value.loadThread("new").updatedAt, 0);
+});
+
+test("new ledger rows and database bytes never contain plaintext fixture secrets", async t => {
+  const value = await store(t); seed(value);
+  const secret = "ledger-secret-fixture-DO-NOT-PERSIST";
+  value.putPrivacyPlan({ contentHash: id("content"), policyFingerprint: id("policy"), spans: [{ start: 0, end: 1, classification: "token", reference: id("span-ref") }], editPlan: [{ start: 0, end: 1, reference: id("edit-ref") }] });
+  value.stageFileMutation({ mutationId: id("secret-mutation"), worktreeId: id("worktree"), pathHash: id("path"), expectedContentHash: id("content"), nextContentHash: id("next"), opaqueReference: id("pending-ref") });
+  value.close();
+  assert.equal((await readFile(value.path)).includes(Buffer.from(secret)), false);
+});

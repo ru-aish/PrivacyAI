@@ -3,11 +3,19 @@ import { chmod, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const DEFAULT_MAX_VERIFIED_ITEMS = 10000;
 const DEFAULT_MAX_THREAD_ITEMS = 50000;
 const DEFAULT_MAX_THREADS = 10000;
 const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_MAX_LEDGER_ITEMS = 100000;
+const LEDGER_TABLES = [
+  // Only prune ownership roots.  Pruning a dependent row by itself can turn a
+  // manifest or plan into a silently incomplete record; foreign-key cascades
+  // remove its children atomically instead.
+  "ledger_repositories", "ledger_content_identities", "ledger_manifests",
+  "ledger_privacy_plans", "ledger_file_mutations"
+];
 
 export async function openContextVerificationStore(options = {}) {
   if (options.verificationStore) return options.verificationStore;
@@ -75,6 +83,8 @@ class SqliteContextVerificationStore {
       "maxThreadItems"
     );
     this.maxAgeMs = positiveInteger(options.verificationMaxAgeMs, DEFAULT_MAX_AGE_MS, "verificationMaxAgeMs");
+    this.maxThreads = positiveInteger(options.maxThreads, DEFAULT_MAX_THREADS, "maxThreads");
+    this.maxLedgerItems = positiveInteger(options.maxLedgerItems, DEFAULT_MAX_LEDGER_ITEMS, "maxLedgerItems");
     this.statements = prepareStatements(database);
     this.closed = false;
   }
@@ -151,6 +161,194 @@ class SqliteContextVerificationStore {
     );
   }
 
+  registerRepository(record) {
+    this.assertOpen();
+    const now = Date.now();
+    const repositoryId = requiredHash(record.repositoryId, "repositoryId");
+    this.statements.putRepository.run(repositoryId, opaque(record.rootRef), now, now);
+    return { repositoryId, rootRef: opaque(record.rootRef) };
+  }
+
+  getRepository(repositoryId) {
+    this.assertOpen();
+    const row = this.statements.getRepository.get(repositoryId);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    this.statements.touchRepository.run(Date.now(), repositoryId);
+    return { repositoryId: row.repository_id, rootRef: row.root_ref };
+  }
+
+  registerWorktree(record) {
+    this.assertOpen();
+    const now = Date.now();
+    const worktreeId = requiredHash(record.worktreeId, "worktreeId");
+    const repositoryId = requiredHash(record.repositoryId, "repositoryId");
+    this.statements.putWorktree.run(worktreeId, repositoryId, requiredHash(record.pathHash, "pathHash"), opaque(record.metadataRef), now, now);
+    return { worktreeId, repositoryId };
+  }
+
+  getWorktree(worktreeId) {
+    this.assertOpen();
+    const row = this.statements.getWorktree.get(worktreeId);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    this.statements.touchWorktree.run(Date.now(), worktreeId);
+    return { worktreeId: row.worktree_id, repositoryId: row.repository_id, pathHash: row.path_hash, metadataRef: row.metadata_ref };
+  }
+
+  putContentIdentity(record) {
+    this.assertOpen();
+    const now = Date.now();
+    const contentHash = requiredHash(record.contentHash, "contentHash");
+    this.statements.putContentIdentity.run(contentHash, optionalInteger(record.byteLength), opaque(record.kind), now, now);
+    if (record.gitBlobHash) this.putGitBlobAlias({ gitBlobHash: record.gitBlobHash, contentHash, repositoryId: record.repositoryId });
+    return { contentHash };
+  }
+
+  putGitBlobAlias(record) {
+    this.assertOpen();
+    const now = Date.now();
+    this.statements.putGitBlobAlias.run(requiredHash(record.gitBlobHash, "gitBlobHash"), requiredHash(record.contentHash, "contentHash"), record.repositoryId ? requiredHash(record.repositoryId, "repositoryId") : null, now, now);
+  }
+
+  getContentIdentity(contentHash) {
+    this.assertOpen();
+    const row = this.statements.getContentIdentity.get(contentHash);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    this.statements.touchContentIdentity.run(Date.now(), contentHash);
+    return contentIdentityRow(row);
+  }
+
+  findContentByGitBlob(gitBlobHash) {
+    this.assertOpen();
+    const row = this.statements.findContentByGitBlob.get(gitBlobHash);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    const now = Date.now();
+    this.statements.touchGitBlobAlias.run(now, gitBlobHash);
+    this.statements.touchContentIdentity.run(now, row.content_hash);
+    return contentIdentityRow(row);
+  }
+
+  putFileMetadata(record) {
+    this.assertOpen();
+    const now = Date.now();
+    const worktreeId = requiredHash(record.worktreeId, "worktreeId");
+    const pathHash = requiredHash(record.pathHash, "pathHash");
+    const contentHash = requiredHash(record.contentHash, "contentHash");
+    this.statements.putFileMetadata.run(worktreeId, pathHash, contentHash, optionalInteger(record.byteLength), optionalInteger(record.mode), opaque(record.metadataRef), now, now);
+    if (record.versionHash) this.statements.putFileVersion.run(worktreeId, pathHash, requiredHash(record.versionHash, "versionHash"), contentHash, record.gitBlobHash ? requiredHash(record.gitBlobHash, "gitBlobHash") : null, opaque(record.versionRef), now, now);
+  }
+
+  getFileMetadata(worktreeId, pathHash) {
+    this.assertOpen();
+    const row = this.statements.getFileMetadata.get(worktreeId, pathHash);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    this.statements.touchFileMetadata.run(Date.now(), worktreeId, pathHash);
+    return fileMetadataRow(row);
+  }
+
+  getFileVersion(worktreeId, pathHash, versionHash) {
+    this.assertOpen();
+    const row = this.statements.getFileVersion.get(worktreeId, pathHash, versionHash);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    this.statements.touchFileVersion.run(Date.now(), worktreeId, pathHash, versionHash);
+    return { worktreeId: row.worktree_id, pathHash: row.path_hash, versionHash: row.version_hash, contentHash: row.content_hash, gitBlobHash: row.git_blob_hash, versionRef: row.version_ref };
+  }
+
+  putManifest(record) {
+    this.assertOpen();
+    const entries = normalizeManifestEntries(record.entries);
+    const manifestHash = record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : verificationFingerprint(entries);
+    const now = Date.now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.statements.putManifest.run(manifestHash, requiredHash(record.worktreeId, "worktreeId"), opaque(record.metadataRef), now, now);
+      this.statements.deleteManifestEntries.run(manifestHash);
+      for (const entry of entries) this.statements.putManifestEntry.run(manifestHash, entry.pathHash, entry.contentHash, entry.gitBlobHash, entry.mode, now);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw writeError("store manifest", error);
+    }
+    return { manifestHash, entries };
+  }
+
+  getManifest(manifestHash) {
+    this.assertOpen();
+    const row = this.statements.getManifest.get(manifestHash);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    this.statements.touchManifest.run(Date.now(), manifestHash);
+    return { manifestHash: row.manifest_hash, worktreeId: row.worktree_id, metadataRef: row.metadata_ref, entries: this.statements.getManifestEntries.all(manifestHash).map(manifestEntryRow) };
+  }
+
+  putPrivacyPlan(record) {
+    this.assertOpen();
+    const spans = normalizePrivacySpans(record.spans);
+    const editPlan = normalizeEditPlan(record.editPlan);
+    const planHash = record.planHash ? requiredHash(record.planHash, "planHash") : verificationFingerprint({ spans, editPlan });
+    const now = Date.now();
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.statements.putPrivacyPlan.run(planHash, requiredHash(record.contentHash, "contentHash"), requiredHash(record.policyFingerprint, "policyFingerprint"), now, now);
+      this.statements.deletePrivacyPlanSpans.run(planHash);
+      this.statements.deletePrivacyPlanEdits.run(planHash);
+      for (const span of spans) this.statements.putPrivacyPlanSpan.run(planHash, span.start, span.end, span.classification, span.reference);
+      for (const edit of editPlan) this.statements.putPrivacyPlanEdit.run(planHash, edit.start, edit.end, edit.classification, edit.reference);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw writeError("store privacy plan", error);
+    }
+    return { planHash, spans, editPlan };
+  }
+
+  getPrivacyPlan(contentHash, policyFingerprint) {
+    this.assertOpen();
+    const row = this.statements.getPrivacyPlan.get(contentHash, policyFingerprint);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    this.statements.touchPrivacyPlan.run(Date.now(), row.plan_hash);
+    return {
+      planHash: row.plan_hash,
+      contentHash: row.content_hash,
+      policyFingerprint: row.policy_fingerprint,
+      spans: this.statements.getPrivacyPlanSpans.all(row.plan_hash).map(privacySpanRow),
+      editPlan: this.statements.getPrivacyPlanEdits.all(row.plan_hash).map(privacyEditRow)
+    };
+  }
+
+  stageFileMutation(record) {
+    this.assertOpen();
+    const now = Date.now();
+    const mutationId = requiredHash(record.mutationId, "mutationId");
+    this.statements.stageFileMutation.run(mutationId, requiredHash(record.worktreeId, "worktreeId"), requiredHash(record.pathHash, "pathHash"), requiredHash(record.expectedContentHash, "expectedContentHash"), requiredHash(record.nextContentHash, "nextContentHash"), record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : null, opaque(record.opaqueReference), now, now);
+    return this.getFileMutation(mutationId);
+  }
+
+  getFileMutation(mutationId) {
+    this.assertOpen();
+    const row = this.statements.getFileMutation.get(mutationId);
+    if (!row || this.expired(row.last_used_at)) return undefined;
+    this.statements.touchFileMutation.run(Date.now(), mutationId);
+    return fileMutationRow(row);
+  }
+
+  commitFileMutation(mutationId, actualContentHash, committedReference) {
+    this.assertOpen();
+    const row = this.statements.getFileMutation.get(mutationId);
+    if (!row || row.status !== "pending") return { status: row?.status || "missing" };
+    if (row.next_content_hash !== actualContentHash) return { status: "mismatch", expectedContentHash: row.next_content_hash };
+    this.statements.commitFileMutation.run(opaque(committedReference), Date.now(), mutationId);
+    return this.getFileMutation(mutationId);
+  }
+
+  rollbackFileMutation(mutationId) {
+    this.assertOpen();
+    this.statements.rollbackFileMutation.run(Date.now(), mutationId);
+    return this.getFileMutation(mutationId);
+  }
+
+  expired(timestamp) {
+    return Number(timestamp || 0) < Date.now() - this.maxAgeMs;
+  }
+
   prune() {
     this.assertOpen();
     const cutoff = Date.now() - this.maxAgeMs;
@@ -158,8 +356,14 @@ class SqliteContextVerificationStore {
     try {
       this.statements.deleteOldThreadItems.run(cutoff);
       this.statements.deleteOldVerifiedItems.run(cutoff);
+      this.statements.deleteOldThreads.run(cutoff);
       this.statements.trimThreadItems.run(this.maxThreadItems);
       this.statements.trimVerifiedItems.run(this.maxVerifiedItems);
+      this.statements.trimThreads.run(this.maxThreads);
+      for (const table of LEDGER_TABLES) {
+        this.statements.deleteOldLedger[table].run(cutoff);
+        this.statements.trimLedger[table].run(this.maxLedgerItems);
+      }
       this.database.exec("COMMIT");
     } catch (error) {
       this.database.exec("ROLLBACK");
@@ -210,9 +414,19 @@ class MemoryContextVerificationStore {
       DEFAULT_MAX_AGE_MS,
       "verificationMaxAgeMs"
     );
+    this.maxLedgerItems = positiveInteger(options.maxLedgerItems, DEFAULT_MAX_LEDGER_ITEMS, "maxLedgerItems");
     this.threads = new Map();
     this.verifications = new Map();
     this.threadItems = new Map();
+    this.repositories = new Map();
+    this.worktrees = new Map();
+    this.contentIdentities = new Map();
+    this.gitBlobAliases = new Map();
+    this.fileMetadata = new Map();
+    this.fileVersions = new Map();
+    this.manifests = new Map();
+    this.privacyPlans = new Map();
+    this.fileMutations = new Map();
   }
 
   loadThread(sessionKey) {
@@ -268,6 +482,27 @@ class MemoryContextVerificationStore {
     this.prune();
   }
 
+  registerRepository(record) { this.repositories.set(requiredHash(record.repositoryId, "repositoryId"), { repositoryId: record.repositoryId, rootRef: opaque(record.rootRef), lastUsedAt: Date.now() }); this.prune(); }
+  getRepository(repositoryId) { const value = this.repositories.get(repositoryId); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
+  registerWorktree(record) { this.worktrees.set(requiredHash(record.worktreeId, "worktreeId"), { ...structuredClone(record), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() }); this.prune(); }
+  getWorktree(worktreeId) { const value = this.worktrees.get(worktreeId); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
+  putContentIdentity(record) { const contentHash = requiredHash(record.contentHash, "contentHash"); this.contentIdentities.set(contentHash, { contentHash, byteLength: optionalInteger(record.byteLength), kind: opaque(record.kind), lastUsedAt: Date.now() }); if (record.gitBlobHash) this.putGitBlobAlias({ ...record, contentHash }); this.prune(); return { contentHash }; }
+  putGitBlobAlias(record) { this.gitBlobAliases.set(requiredHash(record.gitBlobHash, "gitBlobHash"), { ...structuredClone(record), lastUsedAt: Date.now() }); this.prune(); }
+  getContentIdentity(contentHash) { const value = this.contentIdentities.get(contentHash); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
+  findContentByGitBlob(gitBlobHash) { const alias = this.gitBlobAliases.get(gitBlobHash); if (!alias || this.isExpired(alias)) return undefined; alias.lastUsedAt = Date.now(); return this.getContentIdentity(alias.contentHash); }
+  putFileMetadata(record) { const key = `${requiredHash(record.worktreeId, "worktreeId")}\0${requiredHash(record.pathHash, "pathHash")}`; this.fileMetadata.set(key, { ...structuredClone(record), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() }); if (record.versionHash) this.fileVersions.set(`${key}\0${record.versionHash}`, { ...structuredClone(record), versionRef: opaque(record.versionRef), lastUsedAt: Date.now() }); this.prune(); }
+  getFileMetadata(worktreeId, pathHash) { const value = this.fileMetadata.get(`${worktreeId}\0${pathHash}`); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
+  getFileVersion(worktreeId, pathHash, versionHash) { const value = this.fileVersions.get(`${worktreeId}\0${pathHash}\0${versionHash}`); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
+  putManifest(record) { const entries = normalizeManifestEntries(record.entries); const manifestHash = record.manifestHash || verificationFingerprint(entries); this.manifests.set(manifestHash, { manifestHash, worktreeId: record.worktreeId, metadataRef: opaque(record.metadataRef), entries, lastUsedAt: Date.now() }); this.prune(); return { manifestHash, entries }; }
+  getManifest(manifestHash) { const value = this.manifests.get(manifestHash); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
+  putPrivacyPlan(record) { const spans = normalizePrivacySpans(record.spans); const editPlan = normalizeEditPlan(record.editPlan); const planHash = record.planHash || verificationFingerprint({ spans, editPlan }); this.privacyPlans.set(`${record.contentHash}\0${record.policyFingerprint}`, { planHash, contentHash: record.contentHash, policyFingerprint: record.policyFingerprint, spans, editPlan, lastUsedAt: Date.now() }); this.prune(); return { planHash, spans, editPlan }; }
+  getPrivacyPlan(contentHash, policyFingerprint) { const value = this.privacyPlans.get(`${contentHash}\0${policyFingerprint}`); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
+  stageFileMutation(record) { const value = { ...structuredClone(record), opaqueReference: opaque(record.opaqueReference), status: "pending", lastUsedAt: Date.now() }; this.fileMutations.set(requiredHash(record.mutationId, "mutationId"), value); this.prune(); return structuredClone(value); }
+  getFileMutation(mutationId) { const value = this.fileMutations.get(mutationId); if (!value || this.isExpired(value)) return undefined; value.lastUsedAt = Date.now(); return structuredClone(value); }
+  commitFileMutation(mutationId, actualContentHash, committedReference) { const value = this.fileMutations.get(mutationId); if (!value || value.status !== "pending") return { status: value?.status || "missing" }; if (value.nextContentHash !== actualContentHash) return { status: "mismatch", expectedContentHash: value.nextContentHash }; value.status = "committed"; value.committedReference = opaque(committedReference); return this.getFileMutation(mutationId); }
+  rollbackFileMutation(mutationId) { const value = this.fileMutations.get(mutationId); if (value?.status === "pending") value.status = "rolled_back"; return this.getFileMutation(mutationId); }
+  isExpired(value) { return Number(value.lastUsedAt || 0) < Date.now() - this.maxAgeMs; }
+
   prune() {
     const cutoff = Date.now() - this.maxAgeMs;
     for (const [key, value] of this.threadItems) {
@@ -285,6 +520,10 @@ class MemoryContextVerificationStore {
       this.deleteVerification(cacheKey);
     });
     trimMapByTimestamp(this.threads, this.maxThreads, "updatedAt");
+    for (const map of [this.repositories, this.worktrees, this.contentIdentities, this.gitBlobAliases, this.fileMetadata, this.fileVersions, this.manifests, this.privacyPlans, this.fileMutations]) {
+      for (const [key, value] of map) if (this.isExpired(value)) map.delete(key);
+      trimMapByTimestamp(map, this.maxLedgerItems, "lastUsedAt");
+    }
   }
 
   deleteVerification(cacheKey) {
@@ -298,6 +537,7 @@ class MemoryContextVerificationStore {
     this.threads.clear();
     this.verifications.clear();
     this.threadItems.clear();
+    for (const map of [this.repositories, this.worktrees, this.contentIdentities, this.gitBlobAliases, this.fileMetadata, this.fileVersions, this.manifests, this.privacyPlans, this.fileMutations]) map.clear();
   }
 }
 
@@ -315,7 +555,15 @@ function trimMapByTimestamp(map, limit, field, remove = key => map.delete(key)) 
 }
 
 function initializeSchema(database) {
-  database.exec(`
+  database.exec("CREATE TABLE IF NOT EXISTS privacyai_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+  const current = database.prepare("SELECT value FROM privacyai_meta WHERE key = 'schema_version'").get();
+  const version = current ? Number(current.value) : 0;
+  if (version > SCHEMA_VERSION || !Number.isSafeInteger(version)) {
+    throw contextStoreError("PRIVACYAI_CONTEXT_DB_SCHEMA_UNSUPPORTED", "PrivacyAI context verification database uses an unsupported schema version.");
+  }
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    database.exec(`
     CREATE TABLE IF NOT EXISTS privacyai_meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -352,19 +600,75 @@ function initializeSchema(database) {
     );
     CREATE INDEX IF NOT EXISTS thread_items_seen_idx
       ON thread_items(last_seen_at);
-  `);
-
-  const current = database.prepare("SELECT value FROM privacyai_meta WHERE key = 'schema_version'").get();
-  if (current && Number(current.value) !== SCHEMA_VERSION) {
-    throw contextStoreError(
-      "PRIVACYAI_CONTEXT_DB_SCHEMA_UNSUPPORTED",
-      "PrivacyAI context verification database uses an unsupported schema version."
+    CREATE INDEX IF NOT EXISTS threads_updated_idx ON threads(updated_at);
+    CREATE TABLE IF NOT EXISTS ledger_repositories (
+      repository_id TEXT PRIMARY KEY, root_ref TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS ledger_repositories_lru_idx ON ledger_repositories(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_worktrees (
+      worktree_id TEXT PRIMARY KEY, repository_id TEXT NOT NULL REFERENCES ledger_repositories(repository_id) ON DELETE CASCADE,
+      path_hash TEXT NOT NULL, metadata_ref TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS ledger_worktrees_repo_path_idx ON ledger_worktrees(repository_id, path_hash);
+    CREATE INDEX IF NOT EXISTS ledger_worktrees_lru_idx ON ledger_worktrees(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_content_identities (
+      content_hash TEXT PRIMARY KEY, byte_length INTEGER, kind TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ledger_content_lru_idx ON ledger_content_identities(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_git_blob_aliases (
+      git_blob_hash TEXT PRIMARY KEY, content_hash TEXT NOT NULL REFERENCES ledger_content_identities(content_hash) ON DELETE CASCADE,
+      repository_id TEXT REFERENCES ledger_repositories(repository_id) ON DELETE CASCADE, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ledger_git_blob_content_idx ON ledger_git_blob_aliases(content_hash);
+    CREATE INDEX IF NOT EXISTS ledger_git_blob_lru_idx ON ledger_git_blob_aliases(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_file_metadata (
+      worktree_id TEXT NOT NULL REFERENCES ledger_worktrees(worktree_id) ON DELETE CASCADE, path_hash TEXT NOT NULL,
+      content_hash TEXT NOT NULL REFERENCES ledger_content_identities(content_hash) ON DELETE CASCADE, byte_length INTEGER, mode INTEGER,
+      metadata_ref TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL, PRIMARY KEY(worktree_id, path_hash)
+    );
+    CREATE INDEX IF NOT EXISTS ledger_file_metadata_content_idx ON ledger_file_metadata(content_hash);
+    CREATE INDEX IF NOT EXISTS ledger_file_metadata_lru_idx ON ledger_file_metadata(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_file_versions (
+      worktree_id TEXT NOT NULL, path_hash TEXT NOT NULL, version_hash TEXT NOT NULL, content_hash TEXT NOT NULL REFERENCES ledger_content_identities(content_hash) ON DELETE CASCADE,
+      git_blob_hash TEXT, version_ref TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL,
+      PRIMARY KEY(worktree_id, path_hash, version_hash), FOREIGN KEY(worktree_id, path_hash) REFERENCES ledger_file_metadata(worktree_id, path_hash) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS ledger_file_versions_content_idx ON ledger_file_versions(content_hash);
+    CREATE INDEX IF NOT EXISTS ledger_file_versions_lru_idx ON ledger_file_versions(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_manifests (
+      manifest_hash TEXT PRIMARY KEY, worktree_id TEXT NOT NULL REFERENCES ledger_worktrees(worktree_id) ON DELETE CASCADE,
+      metadata_ref TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ledger_manifests_worktree_idx ON ledger_manifests(worktree_id);
+    CREATE INDEX IF NOT EXISTS ledger_manifests_lru_idx ON ledger_manifests(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_manifest_entries (
+      manifest_hash TEXT NOT NULL REFERENCES ledger_manifests(manifest_hash) ON DELETE CASCADE, path_hash TEXT NOT NULL,
+      content_hash TEXT NOT NULL REFERENCES ledger_content_identities(content_hash) ON DELETE CASCADE, git_blob_hash TEXT, mode INTEGER,
+      last_used_at INTEGER NOT NULL, PRIMARY KEY(manifest_hash, path_hash)
+    );
+    CREATE INDEX IF NOT EXISTS ledger_manifest_entries_content_idx ON ledger_manifest_entries(content_hash);
+    CREATE INDEX IF NOT EXISTS ledger_manifest_entries_lru_idx ON ledger_manifest_entries(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_privacy_plans (
+      plan_hash TEXT PRIMARY KEY, content_hash TEXT NOT NULL REFERENCES ledger_content_identities(content_hash) ON DELETE CASCADE,
+      policy_fingerprint TEXT NOT NULL, spans_json TEXT NOT NULL, edit_plan_json TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS ledger_privacy_plans_lookup_idx ON ledger_privacy_plans(content_hash, policy_fingerprint);
+    CREATE INDEX IF NOT EXISTS ledger_privacy_plans_lru_idx ON ledger_privacy_plans(last_used_at);
+    CREATE TABLE IF NOT EXISTS ledger_file_mutations (
+      mutation_id TEXT PRIMARY KEY, worktree_id TEXT NOT NULL REFERENCES ledger_worktrees(worktree_id) ON DELETE CASCADE, path_hash TEXT NOT NULL,
+      expected_content_hash TEXT NOT NULL, next_content_hash TEXT NOT NULL, manifest_hash TEXT REFERENCES ledger_manifests(manifest_hash) ON DELETE SET NULL,
+      status TEXT NOT NULL CHECK(status IN ('pending', 'committed', 'rolled_back')), opaque_reference TEXT NOT NULL,
+      committed_reference TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ledger_file_mutations_pending_idx ON ledger_file_mutations(status, last_used_at);
+    CREATE INDEX IF NOT EXISTS ledger_file_mutations_lru_idx ON ledger_file_mutations(last_used_at);
+  `);
+    database.prepare(`INSERT INTO privacyai_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(SCHEMA_VERSION));
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
   }
-  database.prepare(`
-    INSERT INTO privacyai_meta(key, value) VALUES('schema_version', ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(String(SCHEMA_VERSION));
 }
 
 function prepareStatements(database) {
@@ -426,7 +730,43 @@ function prepareStatements(database) {
         SELECT cache_key FROM verified_items
         ORDER BY last_used_at DESC LIMIT -1 OFFSET ?
       )
-    `)
+    `),
+    deleteOldThreads: database.prepare("DELETE FROM threads WHERE updated_at < ?"),
+    trimThreads: database.prepare("DELETE FROM threads WHERE session_key IN (SELECT session_key FROM threads ORDER BY updated_at DESC LIMIT -1 OFFSET ? )"),
+    putRepository: database.prepare("INSERT INTO ledger_repositories(repository_id, root_ref, created_at, last_used_at) VALUES(?, ?, ?, ?) ON CONFLICT(repository_id) DO UPDATE SET root_ref=excluded.root_ref,last_used_at=excluded.last_used_at"),
+    getRepository: database.prepare("SELECT repository_id,root_ref,last_used_at FROM ledger_repositories WHERE repository_id=?"),
+    touchRepository: database.prepare("UPDATE ledger_repositories SET last_used_at=? WHERE repository_id=?"),
+    putWorktree: database.prepare("INSERT INTO ledger_worktrees(worktree_id, repository_id, path_hash, metadata_ref, created_at, last_used_at) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(worktree_id) DO UPDATE SET repository_id=excluded.repository_id,path_hash=excluded.path_hash,metadata_ref=excluded.metadata_ref,last_used_at=excluded.last_used_at"),
+    getWorktree: database.prepare("SELECT worktree_id,repository_id,path_hash,metadata_ref,last_used_at FROM ledger_worktrees WHERE worktree_id=?"),
+    touchWorktree: database.prepare("UPDATE ledger_worktrees SET last_used_at=? WHERE worktree_id=?"),
+    putContentIdentity: database.prepare("INSERT INTO ledger_content_identities(content_hash, byte_length, kind, created_at, last_used_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT(content_hash) DO UPDATE SET byte_length=excluded.byte_length,kind=excluded.kind,last_used_at=excluded.last_used_at"),
+    getContentIdentity: database.prepare("SELECT content_hash, byte_length, kind, last_used_at FROM ledger_content_identities WHERE content_hash=?"),
+    touchContentIdentity: database.prepare("UPDATE ledger_content_identities SET last_used_at=? WHERE content_hash=?"),
+    putGitBlobAlias: database.prepare("INSERT INTO ledger_git_blob_aliases(git_blob_hash, content_hash, repository_id, created_at, last_used_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT(git_blob_hash) DO UPDATE SET content_hash=excluded.content_hash,repository_id=excluded.repository_id,last_used_at=excluded.last_used_at"),
+    findContentByGitBlob: database.prepare("SELECT c.content_hash,c.byte_length,c.kind,a.last_used_at FROM ledger_git_blob_aliases a JOIN ledger_content_identities c ON c.content_hash=a.content_hash WHERE a.git_blob_hash=?"),
+    touchGitBlobAlias: database.prepare("UPDATE ledger_git_blob_aliases SET last_used_at=? WHERE git_blob_hash=?"),
+    putFileMetadata: database.prepare("INSERT INTO ledger_file_metadata(worktree_id,path_hash,content_hash,byte_length,mode,metadata_ref,created_at,last_used_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worktree_id,path_hash) DO UPDATE SET content_hash=excluded.content_hash,byte_length=excluded.byte_length,mode=excluded.mode,metadata_ref=excluded.metadata_ref,last_used_at=excluded.last_used_at"),
+    getFileMetadata: database.prepare("SELECT worktree_id,path_hash,content_hash,byte_length,mode,metadata_ref,last_used_at FROM ledger_file_metadata WHERE worktree_id=? AND path_hash=?"),
+    touchFileMetadata: database.prepare("UPDATE ledger_file_metadata SET last_used_at=? WHERE worktree_id=? AND path_hash=?"),
+    putFileVersion: database.prepare("INSERT INTO ledger_file_versions(worktree_id,path_hash,version_hash,content_hash,git_blob_hash,version_ref,created_at,last_used_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(worktree_id,path_hash,version_hash) DO UPDATE SET content_hash=excluded.content_hash,git_blob_hash=excluded.git_blob_hash,version_ref=excluded.version_ref,last_used_at=excluded.last_used_at"),
+    getFileVersion: database.prepare("SELECT worktree_id,path_hash,version_hash,content_hash,git_blob_hash,version_ref,last_used_at FROM ledger_file_versions WHERE worktree_id=? AND path_hash=? AND version_hash=?"),
+    touchFileVersion: database.prepare("UPDATE ledger_file_versions SET last_used_at=? WHERE worktree_id=? AND path_hash=? AND version_hash=?"),
+    putManifest: database.prepare("INSERT INTO ledger_manifests(manifest_hash,worktree_id,metadata_ref,created_at,last_used_at) VALUES(?, ?, ?, ?, ?) ON CONFLICT(manifest_hash) DO UPDATE SET worktree_id=excluded.worktree_id,metadata_ref=excluded.metadata_ref,last_used_at=excluded.last_used_at"),
+    deleteManifestEntries: database.prepare("DELETE FROM ledger_manifest_entries WHERE manifest_hash=?"),
+    putManifestEntry: database.prepare("INSERT INTO ledger_manifest_entries(manifest_hash,path_hash,content_hash,git_blob_hash,mode,last_used_at) VALUES(?, ?, ?, ?, ?, ? )"),
+    getManifest: database.prepare("SELECT manifest_hash,worktree_id,metadata_ref,last_used_at FROM ledger_manifests WHERE manifest_hash=?"),
+    getManifestEntries: database.prepare("SELECT path_hash,content_hash,git_blob_hash,mode FROM ledger_manifest_entries WHERE manifest_hash=? ORDER BY path_hash"),
+    touchManifest: database.prepare("UPDATE ledger_manifests SET last_used_at=? WHERE manifest_hash=?"),
+    putPrivacyPlan: database.prepare("INSERT INTO ledger_privacy_plans(plan_hash,content_hash,policy_fingerprint,spans_json,edit_plan_json,created_at,last_used_at) VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(plan_hash) DO UPDATE SET content_hash=excluded.content_hash,policy_fingerprint=excluded.policy_fingerprint,spans_json=excluded.spans_json,edit_plan_json=excluded.edit_plan_json,last_used_at=excluded.last_used_at"),
+    getPrivacyPlan: database.prepare("SELECT plan_hash,content_hash,policy_fingerprint,spans_json,edit_plan_json,last_used_at FROM ledger_privacy_plans WHERE content_hash=? AND policy_fingerprint=?"),
+    touchPrivacyPlan: database.prepare("UPDATE ledger_privacy_plans SET last_used_at=? WHERE plan_hash=?"),
+    stageFileMutation: database.prepare("INSERT INTO ledger_file_mutations(mutation_id,worktree_id,path_hash,expected_content_hash,next_content_hash,manifest_hash,status,opaque_reference,created_at,last_used_at) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT(mutation_id) DO UPDATE SET worktree_id=excluded.worktree_id,path_hash=excluded.path_hash,expected_content_hash=excluded.expected_content_hash,next_content_hash=excluded.next_content_hash,manifest_hash=excluded.manifest_hash,status='pending',opaque_reference=excluded.opaque_reference,committed_reference=NULL,last_used_at=excluded.last_used_at"),
+    getFileMutation: database.prepare("SELECT mutation_id,worktree_id,path_hash,expected_content_hash,next_content_hash,manifest_hash,status,opaque_reference,committed_reference,last_used_at FROM ledger_file_mutations WHERE mutation_id=?"),
+    touchFileMutation: database.prepare("UPDATE ledger_file_mutations SET last_used_at=? WHERE mutation_id=?"),
+    commitFileMutation: database.prepare("UPDATE ledger_file_mutations SET status='committed',committed_reference=?,last_used_at=? WHERE mutation_id=? AND status='pending'"),
+    rollbackFileMutation: database.prepare("UPDATE ledger_file_mutations SET status='rolled_back',last_used_at=? WHERE mutation_id=? AND status='pending'"),
+    deleteOldLedger: Object.fromEntries(LEDGER_TABLES.map(table => [table, database.prepare(`DELETE FROM ${table} WHERE last_used_at < ?`)])),
+    trimLedger: Object.fromEntries(LEDGER_TABLES.map(table => [table, database.prepare(`DELETE FROM ${table} WHERE rowid IN (SELECT rowid FROM ${table} ORDER BY last_used_at DESC LIMIT -1 OFFSET ?)`)]))
   };
 }
 
@@ -474,6 +814,54 @@ function normalizeStringArray(value) {
   if (!Array.isArray(value)) return [];
   return [...new Set(value.filter(entry => typeof entry === "string" && entry.length > 0))];
 }
+
+function requiredHash(value, name) {
+  if (typeof value !== "string" || value.length === 0) throw new TypeError(`${name} must be a non-empty opaque hash.`);
+  return value;
+}
+
+function optionalInteger(value) {
+  if (value == null) return null;
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized < 0) throw new TypeError("ledger numeric metadata must be a non-negative safe integer.");
+  return normalized;
+}
+
+function opaque(value) { return typeof value === "string" ? value : ""; }
+
+function normalizeManifestEntries(value) {
+  if (!Array.isArray(value)) throw new TypeError("manifest entries must be an array.");
+  const entries = value.map(entry => ({
+    pathHash: requiredHash(entry?.pathHash, "pathHash"), contentHash: requiredHash(entry?.contentHash, "contentHash"),
+    gitBlobHash: entry?.gitBlobHash ? requiredHash(entry.gitBlobHash, "gitBlobHash") : null, mode: optionalInteger(entry?.mode)
+  })).sort((a, b) => a.pathHash.localeCompare(b.pathHash));
+  if (new Set(entries.map(entry => entry.pathHash)).size !== entries.length) throw new TypeError("manifest entries must have unique path hashes.");
+  return entries;
+}
+
+function normalizePrivacySpans(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(span => {
+    const start = optionalInteger(span?.start), end = optionalInteger(span?.end);
+    if (end < start || typeof span?.classification !== "string" || !span.classification) throw new TypeError("privacy spans require range and classification.");
+    return { start, end, classification: span.classification, reference: opaque(span.reference) };
+  }).sort((a, b) => a.start - b.start || a.end - b.end || a.classification.localeCompare(b.classification));
+}
+
+function normalizeEditPlan(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map(edit => {
+    const start = optionalInteger(edit?.start), end = optionalInteger(edit?.end);
+    if (end < start) throw new TypeError("privacy edit plan requires valid ranges.");
+    return { start, end, classification: opaque(edit.classification), reference: opaque(edit.reference) };
+  }).sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+function contentIdentityRow(row) { return { contentHash: row.content_hash, byteLength: row.byte_length, kind: row.kind }; }
+function fileMetadataRow(row) { return { worktreeId: row.worktree_id, pathHash: row.path_hash, contentHash: row.content_hash, byteLength: row.byte_length, mode: row.mode, metadataRef: row.metadata_ref }; }
+function manifestEntryRow(row) { return { pathHash: row.path_hash, contentHash: row.content_hash, gitBlobHash: row.git_blob_hash, mode: row.mode }; }
+function fileMutationRow(row) { return { mutationId: row.mutation_id, worktreeId: row.worktree_id, pathHash: row.path_hash, expectedContentHash: row.expected_content_hash, nextContentHash: row.next_content_hash, manifestHash: row.manifest_hash, status: row.status, opaqueReference: row.opaque_reference, committedReference: row.committed_reference }; }
+function writeError(action, cause) { return contextStoreError("PRIVACYAI_CONTEXT_DB_WRITE_FAILED", `PrivacyAI could not ${action} in its local cache ledger.`, cause); }
 
 function positiveInteger(value, fallback, name) {
   if (value == null) return fallback;
