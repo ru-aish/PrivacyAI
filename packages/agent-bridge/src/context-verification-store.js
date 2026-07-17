@@ -3,7 +3,7 @@ import { chmod, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const DEFAULT_MAX_VERIFIED_ITEMS = 10000;
 const DEFAULT_MAX_THREAD_ITEMS = 50000;
 const DEFAULT_MAX_THREADS = 10000;
@@ -316,10 +316,30 @@ class SqliteContextVerificationStore {
 
   stageFileMutation(record) {
     this.assertOpen();
+    const value = normalizeFileMutation(record);
     const now = Date.now();
-    const mutationId = requiredHash(record.mutationId, "mutationId");
-    this.statements.stageFileMutation.run(mutationId, requiredHash(record.worktreeId, "worktreeId"), requiredHash(record.pathHash, "pathHash"), requiredHash(record.expectedContentHash, "expectedContentHash"), requiredHash(record.nextContentHash, "nextContentHash"), record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : null, requiredOpaqueReference(record.opaqueReference, "opaqueReference"), now, now);
-    return this.getFileMutation(mutationId);
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      // Read after acquiring the writer lock: another SQLite process cannot
+      // slip a conflicting pending or committed mutation between check/write.
+      const existing = this.statements.getFileMutation.get(value.mutationId);
+      if (existing?.status === "committed" || existing?.status === "pending") {
+        const unchanged = sameMutation(existing, value) && (existing.status === "committed" || sameMutationChildren(this.statements, value));
+        this.database.exec("COMMIT");
+        return unchanged ? this.getFileMutation(value.mutationId) : mutationConflict(existing, value);
+      }
+      this.statements.upsertFileMutation.run(value.mutationId, value.worktreeId, value.pathHash, value.expectedContentHash, value.nextContentHash, value.manifestHash, value.opaqueReference, value.operationType, value.sourceLength, value.nextLength, now, now);
+      this.statements.deleteFileMutationEdits.run(value.mutationId);
+      for (const [editIndex, edit] of value.edits.entries()) {
+        this.statements.putFileMutationEdit.run(value.mutationId, editIndex, edit.start, edit.end, edit.insertedLength);
+        for (const [insertionIndex, insertion] of edit.knownInsertions.entries()) this.statements.putFileMutationInsertion.run(value.mutationId, editIndex, insertionIndex, insertion.offset, insertion.length, insertion.classification, insertion.reference);
+      }
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw writeError("stage file mutation", error);
+    }
+    return this.getFileMutation(value.mutationId);
   }
 
   getFileMutation(mutationId) {
@@ -327,21 +347,31 @@ class SqliteContextVerificationStore {
     const row = this.statements.getFileMutation.get(mutationId);
     if (!row || this.expired(row.last_used_at)) return undefined;
     this.statements.touchFileMutation.run(Date.now(), mutationId);
-    return fileMutationRow(row);
+    return fileMutationRow(row, this.statements.getFileMutationEdits.all(mutationId), this.statements.getFileMutationInsertions.all(mutationId));
   }
 
   commitFileMutation(mutationId, actualContentHash, committedReference) {
     this.assertOpen();
     actualContentHash = requiredHash(actualContentHash, "actualContentHash");
+    const reference = committedReference == null ? null : requiredOpaqueReference(committedReference, "committedReference");
     const row = this.statements.getFileMutation.get(mutationId);
-    if (!row || row.status !== "pending") return { status: row?.status || "missing" };
-    if (row.next_content_hash !== actualContentHash) return { status: "mismatch", expectedContentHash: row.next_content_hash };
-    this.statements.commitFileMutation.run(committedReference == null ? null : requiredOpaqueReference(committedReference, "committedReference"), Date.now(), mutationId);
+    if (!row) return { status: "missing" };
+    if (row.status === "committed") {
+      if (row.next_content_hash !== actualContentHash) return { status: "mismatch", expectedContentHash: row.next_content_hash, actualContentHash };
+      return reference == null || row.committed_reference === reference ? this.getFileMutation(mutationId) : { status: "conflict", reason: "committed_reference_conflict" };
+    }
+    if (row.status !== "pending") return { status: row.status };
+    if (row.next_content_hash !== actualContentHash) return { status: "mismatch", expectedContentHash: row.next_content_hash, actualContentHash };
+    this.statements.commitFileMutation.run(reference, Date.now(), mutationId);
     return this.getFileMutation(mutationId);
   }
 
   rollbackFileMutation(mutationId) {
     this.assertOpen();
+    const existing = this.statements.getFileMutation.get(mutationId);
+    if (!existing) return { status: "missing" };
+    if (existing.status === "committed") return { status: "conflict", reason: "already_committed" };
+    if (existing.status === "rolled_back") return this.getFileMutation(mutationId);
     this.statements.rollbackFileMutation.run(Date.now(), mutationId);
     return this.getFileMutation(mutationId);
   }
@@ -574,11 +604,13 @@ class MemoryContextVerificationStore {
   }
 
   stageFileMutation(record) {
-    const mutationId = requiredHash(record.mutationId, "mutationId");
-    const value = { mutationId, worktreeId: requiredHash(record.worktreeId, "worktreeId"), pathHash: requiredHash(record.pathHash, "pathHash"), expectedContentHash: requiredHash(record.expectedContentHash, "expectedContentHash"), nextContentHash: requiredHash(record.nextContentHash, "nextContentHash"), manifestHash: record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : null, opaqueReference: requiredOpaqueReference(record.opaqueReference, "opaqueReference"), committedReference: null, status: "pending", lastUsedAt: Date.now() };
-    this.fileMutations.set(mutationId, value);
+    const value = normalizeFileMutation(record);
+    const existing = this.fileMutations.get(value.mutationId);
+    if (existing?.status === "committed") return sameMutationMemory(existing, value) ? this.getFileMutation(value.mutationId) : mutationConflict(existing, value);
+    if (existing?.status === "pending") return sameMutationMemory(existing, value) ? this.getFileMutation(value.mutationId) : mutationConflict(existing, value);
+    this.fileMutations.set(value.mutationId, { ...value, committedReference: null, status: "pending", lastUsedAt: Date.now() });
     this.prune();
-    return withoutLastUsed(value);
+    return this.getFileMutation(value.mutationId);
   }
 
   getFileMutation(mutationId) {
@@ -587,16 +619,25 @@ class MemoryContextVerificationStore {
 
   commitFileMutation(mutationId, actualContentHash, committedReference) {
     const value = this.fileMutations.get(mutationId);
-    if (!value || value.status !== "pending") return { status: value?.status || "missing" };
-    if (value.nextContentHash !== requiredHash(actualContentHash, "actualContentHash")) return { status: "mismatch", expectedContentHash: value.nextContentHash };
+    const actual = requiredHash(actualContentHash, "actualContentHash");
+    const reference = committedReference == null ? null : requiredOpaqueReference(committedReference, "committedReference");
+    if (!value) return { status: "missing" };
+    if (value.status === "committed") {
+      if (value.nextContentHash !== actual) return { status: "mismatch", expectedContentHash: value.nextContentHash, actualContentHash: actual };
+      return reference == null || value.committedReference === reference ? this.getFileMutation(mutationId) : { status: "conflict", reason: "committed_reference_conflict" };
+    }
+    if (value.status !== "pending") return { status: value.status };
+    if (value.nextContentHash !== actual) return { status: "mismatch", expectedContentHash: value.nextContentHash, actualContentHash: actual };
     value.status = "committed";
-    value.committedReference = committedReference == null ? null : requiredOpaqueReference(committedReference, "committedReference");
+    value.committedReference = reference;
     return this.getFileMutation(mutationId);
   }
 
   rollbackFileMutation(mutationId) {
     const value = this.fileMutations.get(mutationId);
-    if (value?.status === "pending") value.status = "rolled_back";
+    if (!value) return { status: "missing" };
+    if (value.status === "committed") return { status: "conflict", reason: "already_committed" };
+    if (value.status === "pending") value.status = "rolled_back";
     return this.getFileMutation(mutationId);
   }
 
@@ -796,11 +837,32 @@ function initializeSchema(database) {
       mutation_id TEXT PRIMARY KEY, worktree_id TEXT NOT NULL REFERENCES ledger_worktrees(worktree_id) ON DELETE CASCADE, path_hash TEXT NOT NULL,
       expected_content_hash TEXT NOT NULL, next_content_hash TEXT NOT NULL, manifest_hash TEXT REFERENCES ledger_manifests(manifest_hash) ON DELETE SET NULL,
       status TEXT NOT NULL CHECK(status IN ('pending', 'committed', 'rolled_back')), opaque_reference TEXT NOT NULL,
+      operation_type TEXT NOT NULL DEFAULT 'unknown', source_length INTEGER, next_length INTEGER,
       committed_reference TEXT, created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS ledger_file_mutations_pending_idx ON ledger_file_mutations(status, last_used_at);
     CREATE INDEX IF NOT EXISTS ledger_file_mutations_lru_idx ON ledger_file_mutations(last_used_at);
   `);
+    // v2 already has the parent table; SQLite cannot add these fields through
+    // CREATE TABLE IF NOT EXISTS, so migrate it before creating v3 children.
+    const mutationColumns = new Set(database.prepare("PRAGMA table_info(ledger_file_mutations)").all().map(column => column.name));
+    if (!mutationColumns.has("operation_type")) database.exec("ALTER TABLE ledger_file_mutations ADD COLUMN operation_type TEXT NOT NULL DEFAULT 'unknown'");
+    if (!mutationColumns.has("source_length")) database.exec("ALTER TABLE ledger_file_mutations ADD COLUMN source_length INTEGER");
+    if (!mutationColumns.has("next_length")) database.exec("ALTER TABLE ledger_file_mutations ADD COLUMN next_length INTEGER");
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS ledger_file_mutation_edits (
+        mutation_id TEXT NOT NULL REFERENCES ledger_file_mutations(mutation_id) ON DELETE CASCADE,
+        edit_index INTEGER NOT NULL, start_offset INTEGER NOT NULL, end_offset INTEGER NOT NULL, inserted_length INTEGER NOT NULL,
+        PRIMARY KEY(mutation_id, edit_index), CHECK(start_offset <= end_offset), CHECK(inserted_length >= 0)
+      );
+      CREATE TABLE IF NOT EXISTS ledger_file_mutation_insertions (
+        mutation_id TEXT NOT NULL, edit_index INTEGER NOT NULL, insertion_index INTEGER NOT NULL,
+        offset INTEGER NOT NULL, length INTEGER NOT NULL, classification TEXT NOT NULL, opaque_reference TEXT NOT NULL,
+        PRIMARY KEY(mutation_id, edit_index, insertion_index),
+        FOREIGN KEY(mutation_id, edit_index) REFERENCES ledger_file_mutation_edits(mutation_id, edit_index) ON DELETE CASCADE,
+        CHECK(offset >= 0), CHECK(length >= 0)
+      );
+    `);
     database.prepare(`INSERT INTO privacyai_meta(key, value) VALUES('schema_version', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(String(SCHEMA_VERSION));
     database.exec("COMMIT");
   } catch (error) {
@@ -904,8 +966,13 @@ function prepareStatements(database) {
     getPrivacyPlanSpans: database.prepare("SELECT start_offset,end_offset,classification,opaque_reference FROM ledger_privacy_plan_spans WHERE plan_hash=? ORDER BY start_offset,end_offset,classification,opaque_reference"),
     getPrivacyPlanEdits: database.prepare("SELECT start_offset,end_offset,classification,opaque_reference FROM ledger_privacy_plan_edits WHERE plan_hash=? ORDER BY start_offset,end_offset,classification,opaque_reference"),
     touchPrivacyPlan: database.prepare("UPDATE ledger_privacy_plans SET last_used_at=? WHERE plan_hash=?"),
-    stageFileMutation: database.prepare("INSERT INTO ledger_file_mutations(mutation_id,worktree_id,path_hash,expected_content_hash,next_content_hash,manifest_hash,status,opaque_reference,created_at,last_used_at) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?) ON CONFLICT(mutation_id) DO UPDATE SET worktree_id=excluded.worktree_id,path_hash=excluded.path_hash,expected_content_hash=excluded.expected_content_hash,next_content_hash=excluded.next_content_hash,manifest_hash=excluded.manifest_hash,status='pending',opaque_reference=excluded.opaque_reference,committed_reference=NULL,last_used_at=excluded.last_used_at"),
-    getFileMutation: database.prepare("SELECT mutation_id,worktree_id,path_hash,expected_content_hash,next_content_hash,manifest_hash,status,opaque_reference,committed_reference,last_used_at FROM ledger_file_mutations WHERE mutation_id=?"),
+    upsertFileMutation: database.prepare("INSERT INTO ledger_file_mutations(mutation_id,worktree_id,path_hash,expected_content_hash,next_content_hash,manifest_hash,status,opaque_reference,operation_type,source_length,next_length,created_at,last_used_at) VALUES(?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?) ON CONFLICT(mutation_id) DO UPDATE SET worktree_id=excluded.worktree_id,path_hash=excluded.path_hash,expected_content_hash=excluded.expected_content_hash,next_content_hash=excluded.next_content_hash,manifest_hash=excluded.manifest_hash,status='pending',opaque_reference=excluded.opaque_reference,operation_type=excluded.operation_type,source_length=excluded.source_length,next_length=excluded.next_length,committed_reference=NULL,last_used_at=excluded.last_used_at"),
+    deleteFileMutationEdits: database.prepare("DELETE FROM ledger_file_mutation_edits WHERE mutation_id=?"),
+    putFileMutationEdit: database.prepare("INSERT INTO ledger_file_mutation_edits(mutation_id,edit_index,start_offset,end_offset,inserted_length) VALUES(?, ?, ?, ?, ?)"),
+    putFileMutationInsertion: database.prepare("INSERT INTO ledger_file_mutation_insertions(mutation_id,edit_index,insertion_index,offset,length,classification,opaque_reference) VALUES(?, ?, ?, ?, ?, ?, ?)"),
+    getFileMutation: database.prepare("SELECT mutation_id,worktree_id,path_hash,expected_content_hash,next_content_hash,manifest_hash,status,opaque_reference,operation_type,source_length,next_length,committed_reference,last_used_at FROM ledger_file_mutations WHERE mutation_id=?"),
+    getFileMutationEdits: database.prepare("SELECT mutation_id,edit_index,start_offset,end_offset,inserted_length FROM ledger_file_mutation_edits WHERE mutation_id=? ORDER BY edit_index"),
+    getFileMutationInsertions: database.prepare("SELECT mutation_id,edit_index,insertion_index,offset,length,classification,opaque_reference FROM ledger_file_mutation_insertions WHERE mutation_id=? ORDER BY edit_index,insertion_index"),
     touchFileMutation: database.prepare("UPDATE ledger_file_mutations SET last_used_at=? WHERE mutation_id=?"),
     commitFileMutation: database.prepare("UPDATE ledger_file_mutations SET status='committed',committed_reference=?,last_used_at=? WHERE mutation_id=? AND status='pending'"),
     rollbackFileMutation: database.prepare("UPDATE ledger_file_mutations SET status='rolled_back',last_used_at=? WHERE mutation_id=? AND status='pending'"),
@@ -1014,7 +1081,48 @@ function fileMetadataRow(row) { return { worktreeId: row.worktree_id, pathHash: 
 function manifestEntryRow(row) { return { pathHash: row.path_hash, contentHash: row.content_hash, gitBlobHash: row.git_blob_hash, mode: row.mode }; }
 function privacySpanRow(row) { return { start: row.start_offset, end: row.end_offset, classification: row.classification, reference: row.opaque_reference }; }
 function privacyEditRow(row) { return { start: row.start_offset, end: row.end_offset, classification: row.classification, reference: row.opaque_reference }; }
-function fileMutationRow(row) { return { mutationId: row.mutation_id, worktreeId: row.worktree_id, pathHash: row.path_hash, expectedContentHash: row.expected_content_hash, nextContentHash: row.next_content_hash, manifestHash: row.manifest_hash, status: row.status, opaqueReference: row.opaque_reference, committedReference: row.committed_reference }; }
+function fileMutationRow(row, editRows = [], insertionRows = []) {
+  const insertions = new Map();
+  for (const row of insertionRows) {
+    const values = insertions.get(row.edit_index) || [];
+    values.push({ offset: row.offset, length: row.length, classification: row.classification, reference: row.opaque_reference });
+    insertions.set(row.edit_index, values);
+  }
+  return {
+    mutationId: row.mutation_id, worktreeId: row.worktree_id, pathHash: row.path_hash,
+    expectedContentHash: row.expected_content_hash, nextContentHash: row.next_content_hash, manifestHash: row.manifest_hash,
+    status: row.status, opaqueReference: row.opaque_reference, operationType: row.operation_type,
+    sourceLength: row.source_length, nextLength: row.next_length, committedReference: row.committed_reference,
+    edits: editRows.map(edit => ({ start: edit.start_offset, end: edit.end_offset, insertedLength: edit.inserted_length, knownInsertions: insertions.get(edit.edit_index) || [] }))
+  };
+}
+function normalizeFileMutation(record) {
+  const operationType = String(record.operationType || "unknown");
+  if (!new Set(["apply_patch", "replace_in_file", "write_file", "unknown"]).has(operationType)) throw new TypeError("operationType must be a supported non-sensitive mutation type.");
+  const sourceLength = record.sourceLength == null ? null : nonNegativeInteger(record.sourceLength, "sourceLength");
+  const nextLength = record.nextLength == null ? null : nonNegativeInteger(record.nextLength, "nextLength");
+  const edits = normalizeMutationEdits(record.edits || [], sourceLength);
+  if (sourceLength != null && nextLength != null && sourceLength + edits.reduce((sum, edit) => sum + edit.insertedLength - (edit.end - edit.start), 0) !== nextLength) throw new TypeError("mutation nextLength does not match edit geometry.");
+  return { mutationId: requiredHash(record.mutationId, "mutationId"), worktreeId: requiredHash(record.worktreeId, "worktreeId"), pathHash: requiredHash(record.pathHash, "pathHash"), expectedContentHash: requiredHash(record.expectedContentHash, "expectedContentHash"), nextContentHash: requiredHash(record.nextContentHash, "nextContentHash"), manifestHash: record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : null, opaqueReference: requiredOpaqueReference(record.opaqueReference, "opaqueReference"), operationType, sourceLength, nextLength, edits };
+}
+function normalizeMutationEdits(edits, sourceLength) {
+  if (!Array.isArray(edits)) throw new TypeError("mutation edits must be an array.");
+  let previousEnd = 0;
+  return edits.map((edit, editIndex) => {
+    const start = nonNegativeInteger(edit?.start, "edit start"); const end = nonNegativeInteger(edit?.end, "edit end"); const insertedLength = nonNegativeInteger(edit?.insertedLength, "edit insertedLength");
+    if (end < start || start < previousEnd || (sourceLength != null && end > sourceLength)) throw new TypeError("mutation edits must be ordered, non-overlapping source ranges.");
+    previousEnd = end;
+    const knownInsertions = edit.knownInsertions == null ? [] : edit.knownInsertions.map(insertion => ({ offset: nonNegativeInteger(insertion?.offset, "insertion offset"), length: nonNegativeInteger(insertion?.length, "insertion length"), classification: String(insertion?.classification || "opaque_reference"), reference: requiredOpaqueReference(insertion?.reference, "insertion reference") }));
+    let insertionEnd = 0;
+    for (const insertion of knownInsertions) { if (insertion.offset < insertionEnd || insertion.offset + insertion.length > insertedLength) throw new TypeError("known insertions must be ordered, non-overlapping, and within inserted text."); insertionEnd = insertion.offset + insertion.length; }
+    return { start, end, insertedLength, knownInsertions };
+  });
+}
+function nonNegativeInteger(value, name) { const normalized = Number(value); if (!Number.isSafeInteger(normalized) || normalized < 0) throw new TypeError(`${name} must be a non-negative safe integer.`); return normalized; }
+function sameMutation(row, value) { return row.worktree_id === value.worktreeId && row.path_hash === value.pathHash && row.expected_content_hash === value.expectedContentHash && row.next_content_hash === value.nextContentHash && row.manifest_hash === value.manifestHash && row.opaque_reference === value.opaqueReference && row.operation_type === value.operationType && row.source_length === value.sourceLength && row.next_length === value.nextLength; }
+function sameMutationMemory(row, value) { return row.worktreeId === value.worktreeId && row.pathHash === value.pathHash && row.expectedContentHash === value.expectedContentHash && row.nextContentHash === value.nextContentHash && row.manifestHash === value.manifestHash && row.opaqueReference === value.opaqueReference && row.operationType === value.operationType && row.sourceLength === value.sourceLength && row.nextLength === value.nextLength && stableJson(row.edits) === stableJson(value.edits); }
+function sameMutationChildren(statements, value) { return stableJson(fileMutationRow({ mutation_id: value.mutationId, worktree_id: value.worktreeId, path_hash: value.pathHash, expected_content_hash: value.expectedContentHash, next_content_hash: value.nextContentHash, manifest_hash: value.manifestHash, status: "pending", opaque_reference: value.opaqueReference, operation_type: value.operationType, source_length: value.sourceLength, next_length: value.nextLength }, statements.getFileMutationEdits.all(value.mutationId), statements.getFileMutationInsertions.all(value.mutationId)).edits) === stableJson(value.edits); }
+function mutationConflict(existing, attempted) { return { status: "conflict", reason: "mutation_geometry_or_hash_conflict", existing: typeof existing.mutation_id === "string" ? fileMutationRow(existing) : withoutLastUsed(existing), attemptedMutationId: attempted.mutationId }; }
 function compoundKey(...parts) { return parts.join("\0"); }
 function withoutLastUsed(value) { const { lastUsedAt: _lastUsedAt, ...record } = value; return record; }
 function writeError(action, cause) { return contextStoreError("PRIVACYAI_CONTEXT_DB_WRITE_FAILED", `PrivacyAI could not ${action} in its local cache ledger.`, cause); }

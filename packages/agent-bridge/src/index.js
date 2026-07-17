@@ -30,6 +30,7 @@ export {
 } from "./context-verification-store.js";
 export {
   commitProvenancedMutation,
+  derivePrivacyPlanFromCommittedMutation,
   normalizeFileMutationOperation,
   propagatePrivacySpans,
   reconcileExternalFileChange,
