@@ -8,7 +8,7 @@ import { estimatePrivacyTokens, normalizeTokenBudget } from "./token-budget.js";
 
 const DEFAULT_MAX_CONTEXT_CHARS = 200000;
 const MAX_PRIVATE_SPAN_CHARS = 512;
-const MAX_CHUNK_OVERLAP = 1024;
+const MIN_SAFE_CHUNK_CHARS = MAX_PRIVATE_SPAN_CHARS * 2;
 const BATCH_OVERHEAD_CHARS = 128;
 
 /**
@@ -165,10 +165,10 @@ function rebuildValue(template, resolved) {
 }
 
 function assertSafeClassifierWindow(maxChars, maxTokens, countTokens) {
-  if (maxChars <= MAX_PRIVATE_SPAN_CHARS * 2 + BATCH_OVERHEAD_CHARS) {
+  if (maxChars <= MIN_SAFE_CHUNK_CHARS + BATCH_OVERHEAD_CHARS) {
     throw contextWindowError(maxChars, maxTokens);
   }
-  const probe = `${unitHeader({ slotIndex: 0, chunkIndex: 0 })}${"!".repeat(MAX_PRIVATE_SPAN_CHARS * 2)}`;
+  const probe = `${unitHeader({ slotIndex: 0, chunkIndex: 0 })}${"!".repeat(MIN_SAFE_CHUNK_CHARS)}`;
   if (countTokens(probe) > maxTokens) throw contextWindowError(maxChars, maxTokens);
 }
 
@@ -234,9 +234,12 @@ function splitText(text, slotIndex, maxChars, maxTokens, countTokens) {
     if (end <= start && text.length > 0) throw contextWindowError(maxChars, maxTokens);
     if (end < text.length) {
       const bounded = preferredBoundary(text, start, end, Math.max(1, end - start));
-      if (bounded > start) end = bounded;
+      if (bounded - start >= MIN_SAFE_CHUNK_CHARS) end = bounded;
     }
     end = avoidBrokenSurrogate(text, start, end);
+    if (end < text.length && end - start < MIN_SAFE_CHUNK_CHARS) {
+      throw contextWindowError(maxChars, maxTokens);
+    }
     const chunk = text.slice(start, end);
     if (header.length + chunk.length > maxChars || countTokens(`${header}${chunk}`) > maxTokens) {
       throw contextWindowError(maxChars, maxTokens);
@@ -244,12 +247,10 @@ function splitText(text, slotIndex, maxChars, maxTokens, countTokens) {
     chunks.push(chunk);
     chunkIndex += 1;
     if (end >= text.length) break;
-    const overlap = Math.min(
-      MAX_CHUNK_OVERLAP,
-      MAX_PRIVATE_SPAN_CHARS,
-      Math.floor((end - start) / 2)
-    );
-    start = Math.max(start + 1, end - overlap);
+    // A non-final chunk is at least two maximum private spans wide, so keeping
+    // one full span as overlap guarantees boundary coverage and advances by at
+    // least MAX_PRIVATE_SPAN_CHARS UTF-16 units per classifier call.
+    start = end - MAX_PRIVATE_SPAN_CHARS;
   }
   return chunks;
 }

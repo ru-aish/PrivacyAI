@@ -339,6 +339,59 @@ test("chunk overlap contains every accepted 512-character private span", async (
   assert.equal(restoreValue(result.value, result.sessionMapAdditions), input);
 });
 
+test("chunk overlap protects Unicode spans with exact token counters", async () => {
+  const secret = "秘".repeat(512);
+  const input = "文".repeat(800) + secret + "後".repeat(900);
+  const tokenCounter = text => [...text].reduce(
+    (tokens, character) => tokens + (character.codePointAt(0) > 0x7f ? 2 : 1),
+    0
+  );
+  let containingCalls = 0;
+  const result = await sanitizeStructuredValue(input, {
+    maxContextChars: 4096,
+    maxContextTokens: 2200,
+    tokenCounter,
+    sanitizer: async text => {
+      const found = text.includes(secret);
+      if (found) containingCalls += 1;
+      return {
+        sanitizedPrompt: found ? text.split(secret).join("[PRIVATE_IDENTIFIER_1]") : text,
+        sessionMap: found ? { "[PRIVATE_IDENTIFIER_1]": secret } : {}
+      };
+    }
+  });
+
+  assert.equal(containingCalls >= 1, true);
+  assert.equal(result.value.includes(secret), false);
+  assert.equal(restoreValue(result.value, result.sessionMapAdditions), input);
+});
+
+test("structured sanitization rejects exact-token windows without bounded overlap progress", async () => {
+  const secret = "秘".repeat(512);
+  const input = "文".repeat(250) + secret + "後".repeat(16000);
+  const tokenCounter = text => [...text].reduce(
+    (tokens, character) => tokens + (character.codePointAt(0) > 0x7f ? 2 : 1),
+    0
+  );
+
+  for (const maxContextTokens of [1052, 1400]) {
+    let sanitizerCalls = 0;
+    await assert.rejects(
+      sanitizeStructuredValue(input, {
+        maxContextChars: 4096,
+        maxContextTokens,
+        tokenCounter,
+        sanitizer: async text => {
+          sanitizerCalls += 1;
+          return { sanitizedPrompt: text, sessionMap: {} };
+        }
+      }),
+      error => error?.code === "PRIVACYAI_CONTEXT_TOO_LARGE"
+    );
+    assert.equal(sanitizerCalls, 0);
+  }
+});
+
 
 test("privacy token estimation is text-aware and accepts an exact synchronous counter", () => {
   const prose = estimatePrivacyTokens("ordinary prose with repeated words and spacing");
