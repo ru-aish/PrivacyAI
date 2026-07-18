@@ -97,6 +97,7 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
       maxContextChars: options.maxContextChars,
       maxContextTokens: options.maxContextTokens,
       tokenCounter: options.tokenCounter,
+      normalizeClassifierResult: options.normalizeClassifierResult,
       artifactType: `${options.artifactTypePrefix || "model"}_visible_batch`,
       signal: options.signal,
       onBatchComplete: typeof options.onBatchComplete === "function"

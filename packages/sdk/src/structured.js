@@ -74,9 +74,30 @@ export async function sanitizeStructuredValue(value, options = {}) {
       throw new TypeError("Context privacy sanitizer did not return sanitizedPrompt.");
     }
 
-    const classifierMap = normalizeSessionMap(result.sessionMap);
+    let normalizedResult = {
+      sanitizedPrompt: result.sanitizedPrompt,
+      sessionMap: normalizeSessionMap(result.sessionMap)
+    };
+    if (typeof options.normalizeClassifierResult === "function") {
+      normalizedResult = await options.normalizeClassifierResult({
+        ...normalizedResult,
+        sourceText: shield.text,
+        artifactType: options.artifactType || "structured_context",
+        batchIndex,
+        batchCount: batches.length
+      });
+      if (!normalizedResult || typeof normalizedResult.sanitizedPrompt !== "string") {
+        throw new TypeError("Classifier-result normalization must return sanitizedPrompt.");
+      }
+      normalizedResult = {
+        sanitizedPrompt: normalizedResult.sanitizedPrompt,
+        sessionMap: normalizeSessionMap(normalizedResult.sessionMap)
+      };
+    }
+
+    const classifierMap = normalizedResult.sessionMap;
     const expected = sanitizeKnownText(shield.text, classifierMap);
-    if (result.sanitizedPrompt !== expected) {
+    if (normalizedResult.sanitizedPrompt !== expected) {
       const error = new Error(
         "PrivacyAI blocked structured context because the local sanitizer changed text outside exact private spans."
       );

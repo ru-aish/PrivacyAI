@@ -224,7 +224,90 @@ test("Codex function-call argument keys remain structural while leaf values are 
   assert.equal(result.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
 });
 
-test("Codex verification seeding preserves argument keys and matches values-only cache policy", async () => {
+test("Codex drops schema-identifier false positives learned from prose", async () => {
+  const body = sampleRequest();
+  body.instructions = "safe";
+  body.input = [{
+    type: "function_call",
+    call_id: "wait-prose-call",
+    name: "wait",
+    arguments: JSON.stringify({ cell_id: "3" })
+  }];
+  body.tools = [{
+    type: "function",
+    name: "wait",
+    description: "Wait using cell_id until completion.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: { cell_id: { type: "string" } },
+      required: ["cell_id"]
+    }
+  }];
+
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: async text => text.includes("cell_id")
+      ? {
+          sanitizedPrompt: text.replaceAll("cell_id", "[PRIVATE_VALUE_9]"),
+          sessionMap: { "[PRIVATE_VALUE_9]": "cell_id" }
+        }
+      : { sanitizedPrompt: text, sessionMap: {} }
+  });
+
+  assert.equal(result.body.tools[0].description, "Wait using cell_id until completion.");
+  assert.equal(Object.values(result.sessionMapAdditions).includes("cell_id"), false);
+  assert.equal(result.cacheWrites.some(([, record]) =>
+    Object.values(record.sessionMapAdditions || {}).includes("cell_id")
+  ), false);
+});
+
+test("Codex ignores legacy cached mappings for safe schema identifiers", async () => {
+  const body = sampleRequest();
+  body.instructions = "safe";
+  body.prompt_cache_key = "safe-cache-key";
+  body.input = [{
+    type: "function_call",
+    call_id: "wait-cache-call",
+    name: "wait",
+    arguments: JSON.stringify({ cell_id: "3" })
+  }];
+  body.tools = [{
+    type: "function",
+    name: "wait",
+    description: "Wait for a running cell.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: { cell_id: { type: "string" } },
+      required: ["cell_id"]
+    }
+  }];
+
+  const policyFingerprint = "legacy-schema-key-cache";
+  const seed = buildCodexRequestVerificationSeed(body, {}, { policyFingerprint });
+  const cache = new Map(seed.cacheWrites.map(([key, verification]) => [key, {
+    ...verification,
+    sessionMapAdditions: {
+      ...(verification.sessionMapAdditions || {}),
+      "[PRIVATE_VALUE_9]": "cell_id"
+    }
+  }]));
+  let sanitizerCalls = 0;
+  const result = await sanitizeCodexRequestBody(body, {
+    cache,
+    policyFingerprint,
+    sanitizer: async text => {
+      sanitizerCalls += 1;
+      return { sanitizedPrompt: text, sessionMap: {} };
+    }
+  });
+
+  assert.equal(sanitizerCalls, 0);
+  assert.equal(Object.values(result.sessionMapAdditions).includes("cell_id"), false);
+  assert.deepEqual(JSON.parse(result.body.input[0].arguments), { cell_id: "3" });
+});
+
+test("Codex verification seeding preserves argument keys and matches protocol-key cache policy", async () => {
   const body = sampleRequest();
   body.instructions = "safe";
   body.prompt_cache_key = "safe-cache-key";

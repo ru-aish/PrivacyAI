@@ -4,6 +4,7 @@ import {
   assertNoProtectedOriginalsInValue,
   normalizeSessionMap,
   rebaseSessionAdditions,
+  restoreText,
   restoreValue,
   sanitizeKnownValue
 } from "@privacy-ai/sdk";
@@ -76,7 +77,7 @@ const RESERVED_METADATA_FIELDS = new Set([
 const PROVIDER_IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]+$/;
 const PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH = 64;
 const DEFAULT_MAX_IMAGES_PER_REQUEST = 8;
-const SAFE_TOOL_ARGUMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
+const SAFE_TOOL_ARGUMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const UNSAFE_TOOL_ARGUMENT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 export async function sanitizeCodexRequestBody(body, options = {}) {
@@ -106,7 +107,11 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     transformed.prompt_cache_key = hashCacheKey(transformed.prompt_cache_key);
   }
 
-  const { slots, schemaTraces } = collectModelVisibleSlots(transformed, options.sessionMap || {});
+  const initialSessionMap = pruneCodexArgumentKeyMappings(
+    transformed,
+    options.sessionMap || {}
+  );
+  const { slots, schemaTraces } = collectModelVisibleSlots(transformed, initialSessionMap);
   const imageSlots = collectImageSlots(transformed.input, ["input"]);
   const maxImages = Number(options.maxImagesPerRequest ?? DEFAULT_MAX_IMAGES_PER_REQUEST);
   if (!Number.isSafeInteger(maxImages) || maxImages <= 0) {
@@ -120,7 +125,6 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   }
 
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
-  const initialSessionMap = { ...(options.sessionMap || {}) };
   const imageSessionMap = { ...initialSessionMap };
   const imageSessionMapAdditions = {};
 
@@ -178,11 +182,12 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   })), {
     sanitizer: options.sanitizer,
     sessionMap: imageSessionMap,
-    cache: options.cache,
+    cache: createProtocolKeyVerificationCache(options.cache, transformed),
     policyFingerprint,
     maxContextChars: options.maxContextChars,
     maxContextTokens: options.maxContextTokens,
     tokenCounter: options.tokenCounter,
+    normalizeClassifierResult: createProtocolKeyClassifierNormalizer(transformed),
     artifactTypePrefix: "codex",
     signal: options.signal,
     onBatchComplete: options.onBatchComplete,
@@ -268,7 +273,8 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
   }
 
   const transformed = deepClone(body);
-  const completeMap = { ...(sessionMap || {}) };
+  const recoverableProtocolKeys = collectRecoverableToolSchemaKeys(transformed);
+  const completeMap = pruneCodexArgumentKeyMappings(transformed, sessionMap);
   const { slots } = collectModelVisibleSlots(transformed, completeMap);
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
   const cacheWrites = [];
@@ -289,10 +295,13 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
       contentHash,
       artifactType,
       policyFingerprint,
-      sessionMapAdditions: relevantSessionMap(
-        entry.value,
-        completeMap,
-        entry.sanitizeObjectKeys
+      sessionMapAdditions: filterRecoverableProtocolMappings(
+        relevantSessionMap(
+          entry.value,
+          completeMap,
+          entry.sanitizeObjectKeys
+        ),
+        recoverableProtocolKeys
       )
     }]);
     itemRecords.push({
@@ -395,34 +404,17 @@ export function codexSessionKey(body, fallbackSessionId, headers = {}) {
 }
 
 /**
- * Function-call argument object keys are executable protocol structure, not
- * model-visible user values. Older gateways classified those keys and could
- * persist mappings such as [PRIVATE_VALUE_9] -> cell_id. Remove only mappings
- * whose originals are both observed as historical argument keys and declared
- * by a tool schema in the same request. Detectable secret-like identifiers
- * remain protected and are never auto-migrated.
+ * Tool-schema property names are executable protocol structure, not private
+ * user values. Older gateways could persist false-positive mappings such as
+ * [PRIVATE_VALUE_9] -> cell_id. Remove only conservative code-style schema
+ * identifiers that are not detected as secret-like values; known private,
+ * hyphenated, or otherwise unusual identifiers continue to fail closed.
  */
 export function pruneCodexArgumentKeyMappings(body, sessionMap = {}) {
   const normalized = normalizeSessionMap(sessionMap);
-  const argumentKeys = new Set();
-  collectFunctionArgumentKeys(body?.input, argumentKeys);
-  if (argumentKeys.size === 0) return normalized;
-
-  const schemaKeys = collectRequestToolSchemaKeys(body);
-  if (schemaKeys.size === 0) return normalized;
-
-  const recoverable = new Set();
-  for (const key of argumentKeys) {
-    const folded = key.toLocaleLowerCase("en-US");
-    if (schemaKeys.has(folded) && isRecoverableProtocolArgumentKey(key)) {
-      recoverable.add(folded);
-    }
-  }
+  const recoverable = collectRecoverableToolSchemaKeys(body);
   if (recoverable.size === 0) return normalized;
-
-  return Object.fromEntries(Object.entries(normalized).filter(([, original]) =>
-    !recoverable.has(original.toLocaleLowerCase("en-US"))
-  ));
+  return filterRecoverableProtocolMappings(normalized, recoverable);
 }
 
 export function sanitizeCodexMetadataHeaders(headers = {}) {
@@ -1544,42 +1536,19 @@ function collectStringField(object, key, slots, path) {
   if (typeof object?.[key] === "string") slots.push({ path: [...path, key], value: object[key] });
 }
 
-function collectFunctionArgumentKeys(items, output) {
-  if (!Array.isArray(items)) return;
-  for (const item of items) {
-    if (item?.type !== "function_call" || typeof item.arguments !== "string") continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(item.arguments);
-    } catch {
-      continue;
-    }
-    collectStructuredObjectKeys(parsed, output);
-  }
-}
-
-function collectStructuredObjectKeys(value, output) {
-  if (Array.isArray(value)) {
-    value.forEach(entry => collectStructuredObjectKeys(entry, output));
-    return;
-  }
-  if (!value || typeof value !== "object") return;
-  for (const [key, entry] of Object.entries(value)) {
-    output.add(key);
-    collectStructuredObjectKeys(entry, output);
-  }
-}
-
-function collectRequestToolSchemaKeys(body) {
-  const output = new Set();
-  collectToolListSchemaKeys(body?.tools, output);
-  if (!Array.isArray(body?.input)) return output;
-  for (const item of body.input) {
-    if (item?.type === "additional_tools" || item?.type === "tool_search_output") {
-      collectToolListSchemaKeys(item.tools, output);
+function collectRecoverableToolSchemaKeys(body) {
+  const candidates = new Map();
+  collectToolListSchemaKeys(body?.tools, candidates);
+  if (Array.isArray(body?.input)) {
+    for (const item of body.input) {
+      if (item?.type === "additional_tools" || item?.type === "tool_search_output") {
+        collectToolListSchemaKeys(item.tools, candidates);
+      }
     }
   }
-  return output;
+  return new Set([...candidates.entries()]
+    .filter(([, original]) => isRecoverableProtocolArgumentKey(original))
+    .map(([folded]) => folded));
 }
 
 function collectToolListSchemaKeys(tools, output) {
@@ -1597,7 +1566,8 @@ function collectSchemaPropertyKeys(schema, output) {
   if (!schema || typeof schema !== "object" || Array.isArray(schema)) return;
   if (schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)) {
     for (const key of Object.keys(schema.properties)) {
-      output.add(key.toLocaleLowerCase("en-US"));
+      const folded = key.toLocaleLowerCase("en-US");
+      if (!output.has(folded)) output.set(folded, key);
     }
   }
   for (const value of Object.values(schema)) {
@@ -1607,6 +1577,61 @@ function collectSchemaPropertyKeys(schema, output) {
       collectSchemaPropertyKeys(value, output);
     }
   }
+}
+
+function filterRecoverableProtocolMappings(sessionMap, recoverable) {
+  if (!(recoverable instanceof Set) || recoverable.size === 0) {
+    return { ...(sessionMap || {}) };
+  }
+  return Object.fromEntries(Object.entries(sessionMap || {}).filter(([, original]) =>
+    typeof original !== "string" ||
+    !recoverable.has(original.toLocaleLowerCase("en-US"))
+  ));
+}
+
+function createProtocolKeyVerificationCache(cache, body) {
+  if (!cache || typeof cache.get !== "function") return cache;
+  const recoverable = collectRecoverableToolSchemaKeys(body);
+  if (recoverable.size === 0) return cache;
+  return {
+    get(cacheKey, policyFingerprint) {
+      const verification = cache.get(cacheKey, policyFingerprint);
+      if (!verification?.sessionMapAdditions) return verification;
+      return {
+        ...verification,
+        sessionMapAdditions: filterRecoverableProtocolMappings(
+          verification.sessionMapAdditions,
+          recoverable
+        )
+      };
+    }
+  };
+}
+
+function createProtocolKeyClassifierNormalizer(body) {
+  const recoverable = collectRecoverableToolSchemaKeys(body);
+  if (recoverable.size === 0) return undefined;
+
+  return ({ sanitizedPrompt, sessionMap }) => {
+    const accepted = {};
+    const rejected = {};
+    for (const [placeholder, original] of Object.entries(sessionMap || {})) {
+      if (
+        typeof original === "string" &&
+        recoverable.has(original.toLocaleLowerCase("en-US"))
+      ) {
+        rejected[placeholder] = original;
+      } else {
+        accepted[placeholder] = original;
+      }
+    }
+    return {
+      sanitizedPrompt: Object.keys(rejected).length > 0
+        ? restoreText(sanitizedPrompt, rejected)
+        : sanitizedPrompt,
+      sessionMap: accepted
+    };
+  };
 }
 
 function shouldSanitizeCodexArgumentKey({ key }) {
