@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
 
+import { restoreValue } from "@privacy-ai/sdk";
+
 import { createAgyImageSanitizer } from "./agy-image-adapter.js";
 import {
   agySessionKey,
@@ -10,6 +12,10 @@ import {
   openContextVerificationStore,
   verificationFingerprint
 } from "./context-verification-store.js";
+import {
+  commitHookFileMutation,
+  stageHookFileMutation
+} from "./hook-file-mutation.js";
 import {
   KeyedSerialQueue,
   commitVerificationWrites,
@@ -88,6 +94,7 @@ export async function createAgySessionController(options = {}) {
             currentThread.sessionMap || {}
           )
         );
+        await commitAgyMutationHistory(body, sessionKey, sessionMap, context);
         const cache = sessionVerificationCache(context, sessionKey);
         const result = await sanitizeAgyRequestBody(body, {
           sanitizer: context.sanitizer,
@@ -132,6 +139,39 @@ export async function createAgySessionController(options = {}) {
           await context.onSanitizedRequest(result.body, { sessionKey });
         }
         return { body: result.body, sessionKey, sessionMap: completeMap };
+      }));
+    },
+    async stageToolCalls(sessionKey, calls) {
+      assertOpen();
+      if (!Array.isArray(calls) || calls.length === 0) return { stagedCount: 0 };
+      return trackOperation(context.serial.run(sessionKey, async () => {
+        const [vaultRecord, threadRecord] = await Promise.all([
+          context.vault.load(sessionKey),
+          Promise.resolve(context.verificationStore.loadThread(sessionKey))
+        ]);
+        const sessionMap = mergeAgySessionMaps(
+          vaultRecord?.sessionMap || {},
+          threadRecord.sessionMap || {}
+        );
+        let stagedCount = 0;
+        const results = [];
+        for (const call of calls) {
+          const event = agyToolMutationEvent(call, sessionKey, context.cwd);
+          if (!event) continue;
+          try {
+            const result = await stageHookFileMutation(event, {
+              store: context.verificationStore,
+              sessionMap,
+              policyFingerprint: context.policyFingerprint,
+              cwd: context.cwd
+            });
+            results.push(result);
+            stagedCount += result.stagedCount || 0;
+          } catch {
+            // Unsupported or unprovable writes remain ordinary cache misses.
+          }
+        }
+        return { stagedCount, results };
       }));
     },
     async loadSessionMap(sessionKey) {
@@ -180,6 +220,63 @@ export async function createAgySessionController(options = {}) {
       });
       return closePromise;
     }
+  };
+}
+
+async function commitAgyMutationHistory(body, sessionKey, sessionMap, context) {
+  if (!context.cwd || !Array.isArray(body?.request?.contents)) return;
+  const calls = new Map();
+  const completed = new Set();
+  for (const content of body.request.contents) {
+    for (const part of content?.parts || []) {
+      const call = part?.functionCall;
+      if (call && typeof call.id === "string" && call.id) {
+        calls.set(call.id, call);
+      }
+      const response = part?.functionResponse;
+      if (response && typeof response.id === "string" && response.id) {
+        completed.add(response.id);
+      }
+    }
+  }
+
+  for (const callId of completed) {
+    const event = agyToolMutationEvent(calls.get(callId), sessionKey, context.cwd, sessionMap);
+    if (!event) continue;
+    try {
+      await commitHookFileMutation(event, {
+        store: context.verificationStore,
+        sessionMap,
+        policyFingerprint: context.policyFingerprint,
+        cwd: context.cwd
+      });
+    } catch {
+      // A failed filesystem proof remains a cache miss; sanitization continues.
+    }
+  }
+}
+
+function agyToolMutationEvent(call, sessionKey, cwd, sessionMap = {}) {
+  if (
+    !call ||
+    typeof call !== "object" ||
+    typeof call.id !== "string" ||
+    call.id.length === 0 ||
+    typeof call.name !== "string" ||
+    call.name.length === 0 ||
+    !call.args ||
+    typeof call.args !== "object" ||
+    Array.isArray(call.args)
+  ) {
+    return null;
+  }
+  return {
+    hook_event_name: "PreToolUse",
+    session_id: sessionKey,
+    tool_use_id: call.id,
+    tool_name: restoreValue(call.name, sessionMap),
+    cwd,
+    tool_input: restoreValue(call.args, sessionMap)
   };
 }
 

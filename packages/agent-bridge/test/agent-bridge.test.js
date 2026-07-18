@@ -12,6 +12,8 @@ import { fileURLToPath } from "node:url";
 import {
   SessionVault,
   findUnresolvedPlaceholders,
+  hookFileMutationId,
+  openContextVerificationStore,
   processHookEvent,
   restoreValue,
   sanitizeKnownValue,
@@ -428,6 +430,51 @@ test("context gateway rejects oversized atomic tool results instead of partially
   );
 });
 
+test("hook lifecycle callbacks receive restored structured file inputs", async () => {
+  const observed = [];
+  const input = { file_path: "/tmp/[PERSON_1].txt", content: "[API_KEY_1]" };
+
+  await processHookEvent({ hook_event_name: "PreToolUse", tool_name: "Write", tool_input: input }, {
+    flavor: "claude",
+    sessionMap,
+    onBeforeToolUse: value => observed.push(["before", value.toolInput])
+  });
+  await processHookEvent({ hook_event_name: "PostToolUse", tool_name: "Write", tool_input: input, tool_response: null }, {
+    flavor: "claude",
+    sessionMap,
+    sanitizer: passThroughSanitizer,
+    onAfterToolUse: value => observed.push(["after", value.toolInput])
+  });
+  await processHookEvent({ hook_event_name: "PostToolUseFailure", tool_name: "Write", tool_input: input, error: "failed" }, {
+    flavor: "claude",
+    sessionMap,
+    sanitizer: passThroughSanitizer,
+    onToolFailure: value => observed.push(["failure", value.toolInput])
+  });
+
+  const expected = { file_path: "/tmp/Ada Lovelace.txt", content: "sk-local-secret" };
+  assert.deepEqual(observed, [["before", expected], ["after", expected], ["failure", expected]]);
+});
+
+test("post-tool mutation callback runs before output sanitizer failure", async () => {
+  const order = [];
+  await assert.rejects(processHookEvent({
+    hook_event_name: "PostToolUse",
+    tool_name: "Write",
+    tool_input: { file_path: "/tmp/file", content: "safe" },
+    tool_response: { value: "private" }
+  }, {
+    flavor: "claude",
+    sessionMap: {},
+    onAfterToolUse: () => order.push("mutation"),
+    sanitizer: async () => {
+      order.push("sanitizer");
+      throw new Error("sanitizer failed");
+    }
+  }), /sanitizer failed/);
+  assert.deepEqual(order, ["mutation", "sanitizer"]);
+});
+
 test("agent hook executable denies Codex tools in strict prompt-only mode", async () => {
   const result = await runHook(
     {
@@ -528,6 +575,67 @@ test("agent hook executable restores Claude tool inputs and sanitizes arbitrary 
     body: "[PRIVATE_VALUE_1]"
   });
   assert.equal(provider.requestCount, 1);
+});
+
+test("agent hook executable persists structured Write provenance across processes", async t => {
+  const baseDir = await mkdtemp(join(tmpdir(), "privacyai-file-hook-exec-"));
+  const project = join(baseDir, "project");
+  const vaultDir = join(baseDir, "vault");
+  const dbPath = join(baseDir, "context.sqlite3");
+  const configPath = join(baseDir, "privacy-config.json");
+  await import("node:fs/promises").then(({ mkdir }) => mkdir(join(project, ".git"), { recursive: true }));
+  const provider = await startMockOllamaSanitizer();
+  t.after(async () => {
+    await provider.close();
+    await rm(baseDir, { recursive: true, force: true });
+  });
+  await writeFile(configPath, `${JSON.stringify({
+    provider: "ollama",
+    model: "privacyai-test",
+    baseURL: provider.url,
+    timeoutMs: 5000,
+    numCtx: 4096
+  })}
+`, { mode: 0o600 });
+
+  const sessionId = "write-provenance-session";
+  const callId = "write-provenance-call";
+  const policyFingerprint = "sha256:write-provenance-policy";
+  const path = join(project, "CLAUDE.md");
+  const vault = new SessionVault({ baseDir: vaultDir });
+  await vault.save(sessionId, { "[LOCATION_1]": "private-workspace-name" });
+  const input = { file_path: path, content: "workspace=[LOCATION_1]\n" };
+  const event = {
+    session_id: sessionId,
+    tool_use_id: callId,
+    tool_name: "Write",
+    cwd: project,
+    tool_input: input
+  };
+  const env = {
+    ...process.env,
+    PRIVACYAI_AGENT_VAULT_DIR: vaultDir,
+    PRIVACYAI_CONFIG_FILE: configPath,
+    PRIVACYAI_CONTEXT_DB: dbPath,
+    PRIVACYAI_AGENT_FLAVOR: "claude",
+    PRIVACYAI_TOOL_POLICY: "gateway",
+    PRIVACYAI_POLICY_FINGERPRINT: policyFingerprint
+  };
+
+  const pre = await runHook({ ...event, hook_event_name: "PreToolUse" }, env);
+  assert.equal(pre.code, 0, pre.stderr);
+  assert.equal(JSON.parse(pre.stdout).hookSpecificOutput.updatedInput.content, "workspace=private-workspace-name\n");
+
+  await writeFile(path, "workspace=private-workspace-name\n");
+  const post = await runHook({ ...event, hook_event_name: "PostToolUse", tool_response: null }, env);
+  assert.equal(post.code, 0, post.stderr);
+
+  const store = await openContextVerificationStore({ verificationDbPath: dbPath });
+  t.after(() => store.close());
+  const mutation = store.getFileMutation(hookFileMutationId(event, path));
+  assert.equal(mutation.status, "committed");
+  assert.equal(mutation.operationType, "write_file");
+  assert.equal(store.getPrivacyPlan(mutation.nextContentHash, policyFingerprint).spans.length, 1);
 });
 
 test("SessionVault hashes session ids and writes private files", async () => {

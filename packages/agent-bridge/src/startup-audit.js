@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile, readdir } from "node:fs/promises";
+import { lstat, opendir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 
@@ -190,25 +190,40 @@ export async function auditClaudeStartupContext(options = {}) {
     throw new TypeError("Claude startup audit requires a local sanitizer.");
   }
 
-  const files = await collectClaudeStartupContext(options.cwd, options);
-  if (files.length === 0) return { fileCount: 0, serializedBytes: 0 };
+  const manifest = await collectClaudeStartupContext(options.cwd, options);
+  if (manifest.records.length === 0) {
+    return {
+      fileCount: 0,
+      serializedBytes: 0,
+      sessionMapAdditions: {},
+      manifestHash: manifest.manifestHash,
+      repositoryId: manifest.repositoryId,
+      worktreeId: manifest.worktreeId,
+      counters: { ...manifest.counters, sanitizerCalls: 0 }
+    };
+  }
 
-  const payload = files.map(file => ({
-    path: relative(options.cwd, file.path) || basename(file.path),
-    content: file.content
-  }));
-  const inspection = await inspectSerializedStartupContext(payload, {
+  const inspection = await sanitizeStartupFiles(manifest, {
     sanitizer: options.sanitizer,
-    sessionMap: {},
-    maxContextChars: options.maxContextChars || DEFAULT_STATIC_LIMIT,
     verificationStore: options.verificationStore,
-    policyFingerprint: options.policyFingerprint
+    policyFingerprint: String(options.policyFingerprint || "startup-context-v1")
   });
   throwIfHighRiskStartupValues(inspection.sessionMapAdditions, "Claude");
 
   return {
-    fileCount: files.length,
-    serializedBytes: Buffer.byteLength(JSON.stringify(payload))
+    fileCount: manifest.records.length,
+    serializedBytes: manifest.records.reduce(
+      (total, file) => total + file.metadata.size,
+      0
+    ),
+    sessionMapAdditions: inspection.sessionMapAdditions,
+    manifestHash: manifest.manifestHash,
+    repositoryId: manifest.repositoryId,
+    worktreeId: manifest.worktreeId,
+    counters: {
+      ...manifest.counters,
+      sanitizerCalls: inspection.sanitizerCalls
+    }
   };
 }
 
@@ -477,6 +492,8 @@ async function collectCodexStaticStartupContext(cwd, options) {
   const seen = new Set();
   const maxFiles = Number(options.maxFiles || DEFAULT_CODEX_STATIC_FILES);
   const maxBytes = Number(options.maxBytes || DEFAULT_CODEX_STATIC_LIMIT);
+  const maxEntries = startupTraversalBudget(maxFiles);
+  let traversedEntries = 0;
 
   for (const name of CODEX_HOME_FILES) await addFile(join(roots.codexHome, name));
   for (const name of CODEX_HOME_DIRECTORIES) await addDirectory(join(roots.codexHome, name));
@@ -484,21 +501,25 @@ async function collectCodexStaticStartupContext(cwd, options) {
     for (const name of CODEX_PROJECT_FILES) await addFile(join(directory, name));
     for (const name of CODEX_PROJECT_DIRECTORIES) await addDirectory(join(directory, name));
   }
-  const manifest = await resolveStartupFileManifest(files, { cwd, verificationStore: options.verificationStore });
-  const totalBytes = manifest.records.reduce((total, file) => total + file.metadata.size, 0);
-  if (manifest.records.length > maxFiles || totalBytes > maxBytes) throw staticContextTooLargeError();
+  const manifest = await resolveStartupFileManifest(files, {
+    cwd,
+    verificationStore: options.verificationStore,
+    maxFiles,
+    maxBytes
+  });
   return manifest;
 
   async function addDirectory(path) {
-    let entries;
+    let directory;
     try {
-      entries = await readdir(path, { withFileTypes: true });
+      directory = await opendir(path);
     } catch (error) {
       if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
       throw error;
     }
-    entries.sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
+    for await (const entry of directory) {
+      traversedEntries += 1;
+      if (traversedEntries > maxEntries) throw staticContextTooLargeError();
       const child = join(path, entry.name);
       if (entry.isDirectory()) await addDirectory(child);
       else if (entry.isFile() && isCodexStaticTextFile(child)) await addFile(child);
@@ -537,11 +558,12 @@ function isCodexStaticTextFile(path) {
 
 async function collectClaudeStartupContext(cwd, options) {
   const root = await findProjectRoot(cwd);
-  const files = [];
+  const paths = [];
   const seen = new Set();
   const maxFiles = Number(options.maxFiles || DEFAULT_STATIC_FILES);
   const maxBytes = Number(options.maxContextChars || DEFAULT_STATIC_LIMIT);
-  let totalBytes = 0;
+  const maxEntries = startupTraversalBudget(maxFiles);
+  let traversedEntries = 0;
 
   for (const directory of ancestors(resolve(cwd), root)) {
     for (const name of CLAUDE_INSTRUCTION_FILES) {
@@ -551,42 +573,37 @@ async function collectClaudeStartupContext(cwd, options) {
       await addDirectory(join(directory, name));
     }
   }
-  return files;
+
+  const manifest = await resolveStartupFileManifest(paths, {
+    cwd,
+    verificationStore: options.verificationStore,
+    maxFiles,
+    maxBytes
+  });
+  return manifest;
 
   async function addDirectory(path) {
-    let entries;
+    let directory;
     try {
-      entries = await readdir(path, { withFileTypes: true });
+      directory = await opendir(path);
     } catch (error) {
       if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
       throw error;
     }
-    entries.sort((left, right) => left.name.localeCompare(right.name));
-    for (const entry of entries) {
+    for await (const entry of directory) {
+      traversedEntries += 1;
+      if (traversedEntries > maxEntries) throw staticContextTooLargeError();
       const child = join(path, entry.name);
       if (entry.isDirectory()) await addDirectory(child);
       else if (entry.isFile()) await addFile(child);
-      if (files.length > maxFiles) throw staticContextTooLargeError();
+      if (paths.length > maxFiles) throw staticContextTooLargeError();
     }
   }
 
   async function addFile(path) {
     if (seen.has(path)) return;
-    let metadata;
-    try {
-      metadata = await lstat(path);
-    } catch (error) {
-      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return;
-      throw error;
-    }
-    if (!metadata.isFile() || metadata.isSymbolicLink()) return;
-    if (metadata.size > maxBytes || totalBytes + metadata.size > maxBytes) {
-      throw staticContextTooLargeError();
-    }
-    const content = await readFile(path, "utf8");
-    totalBytes += Buffer.byteLength(content);
     seen.add(path);
-    files.push({ path, content });
+    paths.push(path);
   }
 }
 
@@ -626,6 +643,13 @@ function terminateProbeTree(child) {
   } catch (error) {
     if (error?.code !== "ESRCH") throw error;
   }
+}
+
+function startupTraversalBudget(maxFiles) {
+  if (!Number.isSafeInteger(maxFiles) || maxFiles <= 0) {
+    throw new TypeError("startup context maxFiles must be a positive safe integer.");
+  }
+  return Math.min(Number.MAX_SAFE_INTEGER, maxFiles * 32);
 }
 
 function staticContextTooLargeError() {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -858,6 +858,81 @@ test("Claude startup audit scans project instructions, skills, commands, agents,
       })
     }),
     error => error?.code === "PRIVACYAI_UNSAFE_STARTUP_CONTEXT"
+  );
+});
+
+test("Claude startup audit reuses unchanged files without reads or sanitizer calls", async () => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-claude-startup-cache-"));
+  await mkdir(join(root, ".git"), { recursive: true });
+  const instructions = join(root, "CLAUDE.md");
+  await writeFile(instructions, "Safe project instructions\n");
+
+  const verificationStore = new MemoryContextVerificationStore();
+  let sanitizerCalls = 0;
+  const sanitizer = async text => {
+    sanitizerCalls += 1;
+    return { sanitizedPrompt: text, sessionMap: {} };
+  };
+  const options = {
+    cwd: root,
+    sanitizer,
+    verificationStore,
+    policyFingerprint: "sha256:claude-startup-cache-policy"
+  };
+
+  const cold = await auditClaudeStartupContext(options);
+  assert.equal(cold.counters.reads, 1);
+  assert.equal(cold.counters.sanitizerCalls, 1);
+  assert.equal(sanitizerCalls, 1);
+
+  const warm = await auditClaudeStartupContext(options);
+  assert.equal(warm.manifestHash, cold.manifestHash);
+  assert.equal(warm.counters.metadataHits, 1);
+  assert.equal(warm.counters.reads, 0);
+  assert.equal(warm.counters.sanitizerCalls, 0);
+  assert.equal(sanitizerCalls, 1);
+
+  await writeFile(instructions, "Changed safe project instructions\n");
+  const changed = await auditClaudeStartupContext(options);
+  assert.notEqual(changed.manifestHash, cold.manifestHash);
+  assert.equal(changed.counters.reads, 1);
+  assert.equal(changed.counters.sanitizerCalls, 1);
+  assert.equal(sanitizerCalls, 2);
+});
+
+test("startup directory traversal is bounded even when directories contain no files", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-traversal-limit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, ".git"), { recursive: true });
+  const claudeSkills = join(root, ".claude", "skills");
+  const codexSkills = join(root, ".codex", "skills");
+  await mkdir(claudeSkills, { recursive: true });
+  await mkdir(codexSkills, { recursive: true });
+  await Promise.all(Array.from({ length: 321 }, (_, index) => Promise.all([
+    mkdir(join(claudeSkills, "empty-" + index)),
+    mkdir(join(codexSkills, "empty-" + index))
+  ])));
+
+  await assert.rejects(
+    auditClaudeStartupContext({
+      cwd: root,
+      maxFiles: 10,
+      maxContextChars: 1024,
+      sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+    }),
+    error => error?.code === "PRIVACYAI_STARTUP_CONTEXT_TOO_LARGE"
+  );
+
+  await assert.rejects(
+    auditCodexStaticStartupContext({
+      cwd: root,
+      projectRoot: root,
+      codexHome: join(root, "codex-home"),
+      maxFiles: 10,
+      maxBytes: 1024,
+      staticSanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+    }),
+    error => error?.code === "PRIVACYAI_STARTUP_CONTEXT_TOO_LARGE"
   );
 });
 

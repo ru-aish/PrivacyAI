@@ -36,7 +36,7 @@ export async function processHookEvent(event, options = {}) {
   return null;
 }
 
-function processPreToolUse(event, sessionMap, flavor, options) {
+async function processPreToolUse(event, sessionMap, flavor, options) {
   if (resolveToolPolicy(flavor, options.toolPolicy) === "isolate") {
     return {
       hookSpecificOutput: {
@@ -66,6 +66,10 @@ function processPreToolUse(event, sessionMap, flavor, options) {
     };
   }
 
+  if (typeof options.onBeforeToolUse === "function") {
+    await options.onBeforeToolUse({ event, toolInput: restoredInput });
+  }
+
   if (valuesEqual(originalInput, restoredInput)) return null;
 
   return {
@@ -89,6 +93,12 @@ function resolveToolPolicy(flavor, requestedPolicy) {
 }
 
 async function processPostToolUse(event, sessionMap, flavor, options) {
+  if (typeof options.onAfterToolUse === "function") {
+    const toolInput = event.tool_input && typeof event.tool_input === "object"
+      ? restoreValue(event.tool_input, sessionMap)
+      : event.tool_input;
+    await options.onAfterToolUse({ event, toolInput });
+  }
   if (!("tool_response" in event)) return null;
 
   const sanitized = await sanitizeModelVisibleValue(event.tool_response, {
@@ -120,6 +130,12 @@ async function processPostToolUse(event, sessionMap, flavor, options) {
 }
 
 async function processFailureEvent(event, sessionMap, flavor, options) {
+  if (typeof options.onToolFailure === "function") {
+    const toolInput = event.tool_input && typeof event.tool_input === "object"
+      ? restoreValue(event.tool_input, sessionMap)
+      : event.tool_input;
+    await options.onToolFailure({ event, toolInput });
+  }
   const modelVisibleValue = event.hook_event_name === "PostToolBatch"
     ? modelVisibleBatchResults(event)
     : modelVisibleFailureFields(event);

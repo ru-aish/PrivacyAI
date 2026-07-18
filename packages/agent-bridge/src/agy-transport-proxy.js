@@ -179,7 +179,14 @@ async function handleInterceptedRequest(request, response, context) {
       signal: lifecycle.signal,
       agent: context.upstreamAgent
     });
-    await proxyModelResponse(response, upstream, transformed.sessionMap, context, lifecycle.signal);
+    await proxyModelResponse(
+      response,
+      upstream,
+      transformed.sessionMap,
+      transformed.sessionKey,
+      context,
+      lifecycle.signal
+    );
   } finally {
     lifecycle.cleanup();
   }
@@ -265,7 +272,14 @@ function proxyOpaqueRequest(request, response, context, url) {
   });
 }
 
-async function proxyModelResponse(response, upstream, sessionMap, context, signal) {
+async function proxyModelResponse(
+  response,
+  upstream,
+  sessionMap,
+  sessionKey,
+  context,
+  signal
+) {
   const status = upstream.statusCode || 502;
   const contentType = String(upstream.headers["content-type"] || "").toLowerCase();
   const contentEncoding = String(upstream.headers["content-encoding"] || "identity").toLowerCase();
@@ -291,9 +305,21 @@ async function proxyModelResponse(response, upstream, sessionMap, context, signa
     const restorer = new AgySseRestorer(sessionMap, context);
     for await (const chunk of upstream) {
       throwIfAborted(signal);
-      for (const value of restorer.write(chunk)) await writeWithBackpressure(response, value);
+      const output = restorer.write(chunk);
+      await stageAgyToolCalls(
+        context.sessionController,
+        sessionKey,
+        restorer.drainCompletedToolCalls()
+      );
+      for (const value of output) await writeWithBackpressure(response, value);
     }
-    for (const value of restorer.end()) await writeWithBackpressure(response, value);
+    const finalOutput = restorer.end();
+    await stageAgyToolCalls(
+      context.sessionController,
+      sessionKey,
+      restorer.drainCompletedToolCalls()
+    );
+    for (const value of finalOutput) await writeWithBackpressure(response, value);
     response.end();
     return;
   }
@@ -306,6 +332,15 @@ async function proxyModelResponse(response, upstream, sessionMap, context, signa
   forwardResponseHeaders(response, upstream.headers, { transformed: textual });
   response.writeHead(status);
   response.end(body);
+}
+
+async function stageAgyToolCalls(sessionController, sessionKey, calls) {
+  if (!sessionController?.stageToolCalls || !sessionKey || calls.length === 0) return;
+  try {
+    await sessionController.stageToolCalls(sessionKey, calls);
+  } catch {
+    // Mutation provenance is an optimization and never blocks model output.
+  }
 }
 
 function handleConnect(request, clientSocket, head, context) {

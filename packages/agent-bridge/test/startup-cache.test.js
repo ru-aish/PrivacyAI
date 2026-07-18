@@ -8,11 +8,93 @@ import test from "node:test";
 
 import { MemoryContextVerificationStore } from "../src/context-verification-store.js";
 import { auditCodexStartupContext } from "../src/startup-audit.js";
-import { renderedStartupFingerprint, resolveStartupFileManifest, sanitizeStartupFiles } from "../src/startup-cache.js";
+import { readStableStartupText, renderedStartupFingerprint, resolveStartupFileManifest, sanitizeStartupFiles, startupFileVerificationKey } from "../src/startup-cache.js";
 
 const execFile = promisify(execFileCallback);
 const policy = "sha256:test-policy";
 const sanitizer = calls => async () => { calls.count += 1; return { sessionMap: {} }; };
+
+test("startup verification keys isolate content and policy identities", () => {
+  const first = startupFileVerificationKey("sha256:content-a", "sha256:policy-a");
+  assert.notEqual(first, startupFileVerificationKey("sha256:content-b", "sha256:policy-a"));
+  assert.notEqual(first, startupFileVerificationKey("sha256:content-a", "sha256:policy-b"));
+  assert.match(first, /^sha256:[a-f0-9]{64}$/);
+});
+
+test("startup byte limits reject oversized files before any content read", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-limit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "AGENTS.md");
+  await writeFile(file, "oversized");
+  let reads = 0;
+
+  await assert.rejects(
+    resolveStartupFileManifest([file], {
+      cwd: root,
+      maxBytes: 4,
+      readStableFile: async () => {
+        reads += 1;
+        throw new Error("oversized startup file must not be read");
+      }
+    }),
+    error => error?.code === "PRIVACYAI_STARTUP_CONTEXT_TOO_LARGE"
+  );
+  assert.equal(reads, 0);
+});
+
+test("startup file-count limits stop before reading the excess file", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-file-limit-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const first = join(root, "AGENTS.md");
+  const second = join(root, "CLAUDE.md");
+  await writeFile(first, "first");
+  await writeFile(second, "second");
+  let reads = 0;
+
+  await assert.rejects(
+    resolveStartupFileManifest([first, second], {
+      cwd: root,
+      maxFiles: 1,
+      readStableFile: async ({ path }) => {
+        reads += 1;
+        return path === first ? "first" : "second";
+      }
+    }),
+    error => error?.code === "PRIVACYAI_STARTUP_CONTEXT_TOO_LARGE"
+  );
+  assert.equal(reads, 1);
+});
+
+test("stable startup reads reject stale metadata and stale content identities", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-stable-read-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "AGENTS.md");
+  await writeFile(file, "first");
+  const first = await resolveStartupFileManifest([file], {
+    cwd: root,
+    verificationStore: new MemoryContextVerificationStore()
+  });
+  const staleRecord = first.records[0];
+
+  await writeFile(file, "grown-after-lstat");
+  await assert.rejects(
+    readStableStartupText(staleRecord, { maxBytes: 1024 }),
+    error => error?.code === "PRIVACYAI_STARTUP_FILE_CHANGED"
+  );
+
+  await writeFile(file, "world");
+  const refreshed = await resolveStartupFileManifest([file], {
+    cwd: root,
+    verificationStore: new MemoryContextVerificationStore()
+  });
+  await assert.rejects(
+    readStableStartupText(refreshed.records[0], {
+      maxBytes: 1024,
+      contentHash: staleRecord.contentHash
+    }),
+    error => error?.code === "PRIVACYAI_STARTUP_FILE_CHANGED"
+  );
+});
 
 test("startup file metadata hit performs zero reads and sanitizer calls", async t => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-startup-cache-")); t.after(() => rm(root, { recursive: true, force: true }));
@@ -23,6 +105,25 @@ test("startup file metadata hit performs zero reads and sanitizer calls", async 
   const warm = await resolveStartupFileManifest([file], { cwd: root, verificationStore: store });
   const result = await sanitizeStartupFiles(warm, { verificationStore: store, policyFingerprint: policy, sanitizer: sanitizer(calls) });
   assert.equal(warm.counters.reads, 0); assert.equal(warm.counters.metadataHits, 1); assert.equal(result.sanitizerCalls, 0); assert.equal(calls.count, 1);
+});
+
+test("first-time startup sanitization persists opaque private spans", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-plan-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "AGENTS.md");
+  await writeFile(file, "owner=private@example.test\n");
+  const store = new MemoryContextVerificationStore();
+  const manifest = await resolveStartupFileManifest([file], { cwd: root, verificationStore: store });
+  await sanitizeStartupFiles(manifest, {
+    verificationStore: store,
+    policyFingerprint: policy,
+    sanitizer: async () => ({ sessionMap: { "[EMAIL_1]": "private@example.test" } })
+  });
+  const plan = store.getPrivacyPlan(manifest.records[0].contentHash, policy);
+  assert.deepEqual(plan.spans.map(span => [span.start, span.end, span.classification]), [
+    [6, 26, "email"]
+  ]);
+  assert.equal(JSON.stringify(plan).includes("private@example.test"), false);
 });
 
 test("metadata change with same bytes hashes then reuses per-file result; manifests detect mutations", async t => {
@@ -43,11 +144,27 @@ test("linked worktrees reuse Git blob identities and non-Git directories work", 
   await writeFile(join(root, "AGENTS.md"), "shared"); await execFile("git", ["-C", root, "add", "AGENTS.md"]); await execFile("git", ["-C", root, "commit", "-m", "init"]);
   const other = join(root, "other"); await execFile("git", ["-C", root, "worktree", "add", other, "-b", "other"]);
   const store = new MemoryContextVerificationStore();
+  const calls = { count: 0 };
   const original = await resolveStartupFileManifest([join(root, "AGENTS.md")], { cwd: root, verificationStore: store });
+  await sanitizeStartupFiles(original, {
+    verificationStore: store,
+    policyFingerprint: policy,
+    sanitizer: sanitizer(calls)
+  });
   const reused = await resolveStartupFileManifest([join(other, "AGENTS.md")], { cwd: other, verificationStore: store });
+  const sharedDecision = await sanitizeStartupFiles(reused, {
+    verificationStore: store,
+    policyFingerprint: policy,
+    sanitizer: async () => {
+      throw new Error("linked worktrees must reuse the shared privacy decision");
+    }
+  });
   assert.equal(reused.repositoryId, original.repositoryId);
+  assert.notEqual(reused.worktreeId, original.worktreeId);
   assert.equal(reused.counters.reads, 0);
   assert.equal(reused.counters.gitBlobReuses, 1);
+  assert.equal(sharedDecision.sanitizerCalls, 0);
+  assert.equal(calls.count, 1);
   const nongit = await mkdtemp(join(tmpdir(), "privacyai-startup-nongit-")); t.after(() => rm(nongit, { recursive: true, force: true })); await writeFile(join(nongit, "CLAUDE.md"), "ok");
   assert.equal((await resolveStartupFileManifest([join(nongit, "CLAUDE.md")], { cwd: nongit, verificationStore: store })).repo.isGit, false);
 });

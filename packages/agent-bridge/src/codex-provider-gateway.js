@@ -21,6 +21,10 @@ import {
   publicGatewayFailure,
   createGatewayDiagnosticReporter
 } from "./gateway-error.js";
+import {
+  commitCodexMutationHistory,
+  stageCompletedCodexToolCalls
+} from "./codex-mutation-tracker.js";
 import { SessionVault } from "./session-vault.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -233,6 +237,8 @@ async function handleRequestCore(request, response, context) {
       }
     }
 
+    await commitCodexMutationHistory(body, identity.sessionKey, sessionMap, context);
+
     const cache = sessionCache(context, identity.sessionKey);
     const result = await sanitizeCodexRequestBody(body, {
       sanitizer: context.sanitizer,
@@ -279,7 +285,11 @@ async function handleRequestCore(request, response, context) {
     }
     context.verificationRequestCount = (context.verificationRequestCount || 0) + 1;
     if (context.verificationRequestCount % 100 === 0) context.verificationStore.prune();
-    return { body: result.body, sessionMap: completeMap };
+    return {
+      body: result.body,
+      sessionMap: completeMap,
+      sessionKey: identity.sessionKey
+    };
   });
 
   throwIfAborted(context.requestSignal);
@@ -291,7 +301,8 @@ async function handleRequestCore(request, response, context) {
     safeSearch,
     Buffer.from(JSON.stringify(transformed.body)),
     transformed.sessionMap,
-    transformed.body.stream === true
+    transformed.body.stream === true,
+    transformed.sessionKey
   );
 }
 
@@ -348,7 +359,8 @@ async function proxyTransformed(
   search,
   body,
   sessionMap,
-  expectsSse
+  expectsSse,
+  sessionKey
 ) {
   const upstream = upstreamUrl(request.headers, context, suffix, search);
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
@@ -369,7 +381,8 @@ async function proxyTransformed(
   if (contentType.includes("text/event-stream") || headerlessExpectedSse) {
     context.phase = "sse";
     await proxySseResponse(response, upstreamResponse, context, sessionMap, statusCode, {
-      forceContentType: headerlessExpectedSse
+      forceContentType: headerlessExpectedSse,
+      sessionKey
     });
     return;
   }
@@ -444,6 +457,12 @@ async function proxySseResponse(
     done = Boolean(next.done);
     if (done) {
       staged.push(...restorer.end());
+      await stageCompletedCodexToolCalls(
+        restorer.drainCompletedToolCalls(),
+        options.sessionKey,
+        sessionMap,
+        context
+      );
       break;
     }
     probedBytes += next.value.length;
@@ -455,6 +474,12 @@ async function proxySseResponse(
       );
     }
     staged.push(...restorer.write(next.value));
+    await stageCompletedCodexToolCalls(
+      restorer.drainCompletedToolCalls(),
+      options.sessionKey,
+      sessionMap,
+      context
+    );
   }
 
   if (!containsJsonSseData(staged)) {
@@ -475,12 +500,26 @@ async function proxySseResponse(
       const next = await iterator.next();
       done = Boolean(next.done);
       if (!done) {
-        for (const output of restorer.write(next.value)) {
+        const outputs = restorer.write(next.value);
+        await stageCompletedCodexToolCalls(
+          restorer.drainCompletedToolCalls(),
+          options.sessionKey,
+          sessionMap,
+          context
+        );
+        for (const output of outputs) {
           await writeWithBackpressure(response, output);
         }
       }
     }
-    for (const output of restorer.end()) await writeWithBackpressure(response, output);
+    const finalOutputs = restorer.end();
+    await stageCompletedCodexToolCalls(
+      restorer.drainCompletedToolCalls(),
+      options.sessionKey,
+      sessionMap,
+      context
+    );
+    for (const output of finalOutputs) await writeWithBackpressure(response, output);
     response.end();
   } catch (error) {
     const cancelled = isCancellationError(error) || response.destroyed || response.writableEnded;

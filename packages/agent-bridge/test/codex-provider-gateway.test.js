@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,8 +10,10 @@ import { createGatewayDiagnosticReporter, publicGatewayFailure } from "../src/ga
 
 import {
   CodexSseRestorer,
+  MemoryContextVerificationStore,
   buildCodexProviderArgs,
   codexSessionContext,
+  hookFileMutationId,
   parseCodexPrivacyMode,
   restoreResponseItem,
   sanitizeCodexMetadataHeaders,
@@ -737,6 +739,27 @@ test("restoreResponseItem restores string outputs and JSON-sensitive function ar
   });
 });
 
+test("Codex SSE restorer exposes complete restored structured tool calls once", () => {
+  const restorer = new CodexSseRestorer(sessionMap);
+  const patch = "*** Begin Patch\n*** Add File: owner.txt\n+[EMAIL_1]\n*** End Patch";
+  const output = restorer.write(Buffer.from(sse({
+    type: "response.output_item.done",
+    item: {
+      id: "tool-item",
+      type: "custom_tool_call",
+      status: "completed",
+      call_id: "call-patch",
+      name: "apply_patch",
+      input: patch
+    }
+  })));
+  assert.equal(output.length, 1);
+  const calls = restorer.drainCompletedToolCalls();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].input.includes(PRIVATE_EMAIL), true);
+  assert.deepEqual(restorer.drainCompletedToolCalls(), []);
+});
+
 test("Codex SSE restoration survives network and event fragmentation without corrupting JSON", () => {
   const original = 'line "one"\nline two@example.test';
   const restorer = new CodexSseRestorer({ "[PRIVATE_VALUE_1]": original });
@@ -967,6 +990,90 @@ test("localhost gateway sanitizes outbound requests and restores fragmented SSE 
   assert.equal(observed[0].headers["accept-encoding"], "identity");
   assert.equal(JSON.stringify(observed[0].body).includes(PRIVATE_EMAIL), false);
   assert.equal(JSON.stringify(observed[0].body).includes(PRIVATE_KEY), false);
+});
+
+test("Codex gateway stages apply_patch and commits it from next-turn tool history", async t => {
+  const project = await mkdtemp(join(tmpdir(), "privacyai-codex-mutation-project-"));
+  await mkdir(join(project, ".git"), { recursive: true });
+  const target = join(project, "owner.txt");
+  await writeFile(target, "before\n");
+  const store = new MemoryContextVerificationStore();
+  let requestCount = 0;
+  const upstream = await startServer(async (request, response) => {
+    await readRequestJson(request);
+    requestCount += 1;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    if (requestCount === 1) {
+      response.end(
+        sse({ type: "response.created", response: { id: "mutation-response" } }) +
+        sse({
+          type: "response.output_item.done",
+          item: {
+            id: "patch-item",
+            type: "custom_tool_call",
+            status: "completed",
+            call_id: "call-patch",
+            name: "apply_patch",
+            input: "*** Begin Patch\n*** Update File: owner.txt\n@@\n-before\n+[EMAIL_1]\n*** End Patch"
+          }
+        }) +
+        sse({ type: "response.completed", response: { id: "mutation-response", usage: null } }) +
+        "data: [DONE]\n\n"
+      );
+    } else {
+      response.end(
+        sse({ type: "response.completed", response: { id: "after-mutation", usage: null } }) +
+        "data: [DONE]\n\n"
+      );
+    }
+  });
+  t.after(() => upstream.close());
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    verificationStore: store,
+    cwd: project,
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-mutation-vault-")),
+    policyFingerprint: "sha256:codex-mutation-policy",
+    apiUpstream: "http://127.0.0.1:" + upstream.port + "/v1",
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const first = await fetch(gateway.baseURL + "/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  assert.equal(first.status, 200);
+  const firstEvents = parseSse(await first.text());
+  const call = firstEvents.find(event => event.type === "response.output_item.done").item;
+  assert.equal(call.input.includes(PRIVATE_EMAIL), true);
+
+  await writeFile(target, PRIVATE_EMAIL + "\n");
+  const secondBody = sampleRequest();
+  secondBody.input = [
+    call,
+    { type: "custom_tool_call_output", call_id: "call-patch", name: "apply_patch", output: "Done!" }
+  ];
+  const second = await fetch(gateway.baseURL + "/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(secondBody)
+  });
+  assert.equal(second.status, 200);
+  await second.text();
+
+  const synthetic = {
+    session_id: "codex-provider:thread-123",
+    tool_use_id: "call-patch"
+  };
+  const mutation = store.getFileMutation(hookFileMutationId(synthetic, target));
+  assert.equal(mutation.status, "committed");
+  assert.equal(mutation.operationType, "apply_patch");
+  assert.equal(store.getPrivacyPlan(
+    mutation.nextContentHash,
+    "sha256:codex-mutation-policy"
+  ).spans.length, 1);
 });
 
 test("localhost gateway forwards only SDK-sanitized image and synchronized prompt mappings", async t => {

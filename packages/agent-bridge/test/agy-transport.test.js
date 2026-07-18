@@ -17,6 +17,7 @@ import { AgySseRestorer, restoreAgySseEvent } from "../src/agy-sse-transform.js"
 import { buildAgyUpstreamHeaders } from "../src/agy-transport-proxy.js";
 import { startAgyTransportRuntime } from "../src/agy-transport-runtime.js";
 import { MemoryContextVerificationStore } from "../src/context-verification-store.js";
+import { hookFileMutationId } from "../src/hook-file-mutation.js";
 import { createEphemeralTlsAuthority } from "../src/ephemeral-tls-authority.js";
 import { mergeSessionMaps } from "../src/model-session-state.js";
 import { SessionVault } from "../src/session-vault.js";
@@ -202,6 +203,68 @@ test("AGY request cache reuses unchanged history and tools after session-map gro
   assert.equal(calls, firstCalls);
   assert.equal(second.cacheWrites.length, 0);
   assert.deepEqual(second.body, first.body);
+});
+
+test("AGY controller stages function calls and commits matching next-turn responses", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-mutation-"));
+  const target = join(root, "owner.txt");
+  const vaultDir = join(root, "vault");
+  await writeFile(target, "before\n");
+  const store = new MemoryContextVerificationStore();
+  const vault = new SessionVault({ baseDir: vaultDir });
+  const sessionKey = "agy:mutation-session";
+  await vault.save(sessionKey, { "[EMAIL_1]": PRIVATE_EMAIL });
+  const controller = await createAgySessionController({
+    sanitizer: deterministicSanitizer,
+    imageSanitizer: { sanitize: async value => ({ inlineData: value, changed: false, sessionMapAdditions: {} }) },
+    verificationStore: store,
+    vault,
+    cwd: root,
+    policyFingerprint: "sha256:agy-mutation-policy"
+  });
+  t.after(async () => {
+    await controller.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const call = {
+    id: "agy-mutation-call",
+    name: "apply_patch",
+    args: {
+      patch: "*** Begin Patch\n*** Update File: owner.txt\n@@\n-before\n+" + PRIVATE_EMAIL + "\n*** End Patch"
+    }
+  };
+  const staged = await controller.stageToolCalls(sessionKey, [call]);
+  assert.equal(staged.stagedCount, 1);
+  await writeFile(target, PRIVATE_EMAIL + "\n");
+
+  const body = sampleRequest();
+  body.request.sessionId = "mutation-session";
+  body.request.contents = [
+    { role: "model", parts: [{ functionCall: call }] },
+    {
+      role: "user",
+      parts: [{
+        functionResponse: {
+          id: call.id,
+          name: call.name,
+          response: { output: "Done" }
+        }
+      }]
+    }
+  ];
+  await controller.transform(body);
+
+  const mutation = store.getFileMutation(hookFileMutationId({
+    session_id: sessionKey,
+    tool_use_id: call.id
+  }, target));
+  assert.equal(mutation.status, "committed");
+  assert.equal(mutation.operationType, "apply_patch");
+  assert.equal(store.getPrivacyPlan(
+    mutation.nextContentHash,
+    controller.policyFingerprint
+  ).spans.length, 1);
 });
 
 test("AGY session controllers atomically merge concurrent mappings", async t => {
@@ -616,6 +679,8 @@ test("AGY upstream headers preserve opaque encodings and normalize transformed m
 
 test("AGY transport proxy sanitizes a real CONNECT request and restores streamed output", async t => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-agy-transport-"));
+  const mutationTarget = join(root, "owner.txt");
+  await writeFile(mutationTarget, "before\n");
   const nativeToolName = "stealth-browser/browser_status";
   const requestBody = sampleRequest();
   requestBody.request.tools[0].functionDeclarations[0].name = nativeToolName;
@@ -630,6 +695,8 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   const observed = [];
   const observedPaths = [];
   const imageCalls = [];
+  const stagedTransportCalls = [];
+  const verificationStore = new MemoryContextVerificationStore();
   const runtime = await startAgyTransportRuntime({
     sanitizer: deterministicSanitizer,
     imageSanitizer: {
@@ -648,7 +715,17 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
     baseEnv: {},
     baseDir: join(root, "vault"),
     tmpDir: root,
-    verificationStore: new MemoryContextVerificationStore(),
+    cwd: root,
+    verificationStore,
+    createSessionController: async controllerOptions => {
+      const controller = await createAgySessionController(controllerOptions);
+      const stageToolCalls = controller.stageToolCalls.bind(controller);
+      controller.stageToolCalls = async (sessionKey, calls) => {
+        stagedTransportCalls.push(...calls);
+        return stageToolCalls(sessionKey, calls);
+      };
+      return controller;
+    },
     requestUpstream: async request => {
       const parsed = JSON.parse(request.body.toString("utf8"));
       observed.push(parsed);
@@ -678,13 +755,31 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
             Buffer.from(sseEvent(textEvent("result for [EMAIL_1]"))),
             Buffer.from(sseEvent({
               response: {
-                candidates: [{ content: { role: "model", parts: [{
-                  functionCall: {
-                    name: toolAlias,
-                    args: { "[EMAIL_1]": { nested: ["[EMAIL_1]"] } }
+                candidates: [{
+                  content: {
+                    role: "model",
+                    parts: [
+                      {
+                        functionCall: {
+                          name: toolAlias,
+                          args: { "[EMAIL_1]": { nested: ["[EMAIL_1]"] } }
+                        }
+                      },
+                      {
+                        functionCall: {
+                          id: "transport-patch-call",
+                          name: "apply_patch",
+                          args: {
+                            patch: "*** Begin Patch\n*** Update File: owner.txt\n@@\n-before\n+[EMAIL_1]\n*** End Patch"
+                          }
+                        }
+                      }
+                    ]
                   }
-                }] } }]
-              }
+                }]
+              },
+              traceId: "transport-patch-trace",
+              metadata: {}
             })),
             Buffer.from(sseEvent(finishEvent()))
           ])
@@ -730,6 +825,14 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   assert.equal(imageCalls.length, 2);
   assert.deepEqual(imageCalls[0].sessionMap, {});
   assert.equal(imageCalls[1].sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.equal(stagedTransportCalls.length, 2);
+  const stagedPatchCall = stagedTransportCalls.find(call => call.id === "transport-patch-call");
+  assert.equal(stagedPatchCall.args.patch.includes(PRIVATE_EMAIL), true);
+  const transportMutation = verificationStore.getFileMutation(hookFileMutationId({
+    session_id: "agy:session-123",
+    tool_use_id: "transport-patch-call"
+  }, mutationTarget));
+  assert.equal(transportMutation.status, "pending");
 
   const unexpected = await proxyHttpRequest(runtime, requestBody);
   assert.match(unexpected.statusLine, /^HTTP\/1\.1 502/);
@@ -1134,6 +1237,42 @@ test("AGY SSE avoids cloning stream templates for every text chunk", () => {
   } finally {
     globalThis.structuredClone = clone;
   }
+});
+
+test("AGY SSE restorer exposes each restored function call once", () => {
+  const alias = "privacyai_tool_apply_patch";
+  const restorer = new AgySseRestorer({
+    "[EMAIL_1]": PRIVATE_EMAIL,
+    [alias]: "apply_patch"
+  });
+  const event = {
+    response: {
+      candidates: [{
+        content: {
+          role: "model",
+          parts: [{
+            functionCall: {
+              id: "agy-patch-call",
+              name: alias,
+              args: {
+                patch: "*** Begin Patch\n*** Add File: owner.txt\n+[EMAIL_1]\n*** End Patch"
+              }
+            }
+          }]
+        }
+      }]
+    },
+    traceId: "trace-call",
+    metadata: {}
+  };
+
+  restorer.write(Buffer.from(sseEvent(event)));
+  const calls = restorer.drainCompletedToolCalls();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "apply_patch");
+  assert.equal(calls[0].args.patch.includes(PRIVATE_EMAIL), true);
+  restorer.write(Buffer.from(sseEvent(event)));
+  assert.deepEqual(restorer.drainCompletedToolCalls(), []);
 });
 
 test("AGY SSE restoration restores native function names, argument keys, and values", () => {

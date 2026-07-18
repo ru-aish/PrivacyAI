@@ -69,8 +69,17 @@ export {
   identifyGitWorktree,
   renderedStartupFingerprint,
   resolveStartupFileManifest,
-  sanitizeStartupFiles
+  sanitizeStartupFiles,
+  startupCacheHash,
+  startupFileVerificationKey
 } from "./startup-cache.js";
+export {
+  commitHookFileMutation,
+  hookFileMutationId,
+  isHookFileMutationEvent,
+  rollbackHookFileMutation,
+  stageHookFileMutation
+} from "./hook-file-mutation.js";
 export { processHookEvent } from "./hook-adapter.js";
 export {
   launchNativeTui,

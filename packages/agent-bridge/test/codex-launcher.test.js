@@ -93,16 +93,27 @@ test("a warm Codex gateway launch proves the startup fingerprint and skips promp
   const configPath = await writeTestConfig(root);
   const verificationStore = new MemoryContextVerificationStore();
   let captures = 0;
-  const launch = () => launchNativeTui("codex", ["exec", "hello"], {
+  let gatewayStarts = 0;
+  const launch = (overrides = {}) => launchNativeTui("codex", ["exec", "hello"], {
     configPath, binary: process.execPath, cwd: root, env: { CODEX_HOME: join(root, "empty-codex-home") },
     launchLockDir: join(root, "locks"), healthOptions: { skip: true }, policyFingerprint: "sha256:stable-launch-policy",
     verifyNativeExecutable: async () => ({ version: "test" }), sanitizer: passThroughSanitizer, verificationStore,
     captureCodexPromptInput: async ({ prompt }) => { captures += 1; return [{ type: "message", role: "user", content: [{ type: "input_text", text: prompt }] }]; },
-    startCodexProviderGateway: async () => ({ baseURL: "http://127.0.0.1:17777/fixed", async close() {} }),
-    spawnInherited: async () => 0, showLaunchProgress: false
+    startCodexProviderGateway: async () => {
+      gatewayStarts += 1;
+      return {
+        baseURL: "http://127.0.0.1:" + (17000 + gatewayStarts) + "/nonce-" + gatewayStarts,
+        async close() {}
+      };
+    },
+    spawnInherited: async () => 0, showLaunchProgress: false,
+    ...overrides
   });
-  await launch(); await launch();
+  await launch();
+  await launch();
   assert.equal(captures, 1);
+  await launch({ requestMaxRetries: 2 });
+  assert.equal(captures, 2);
 });
 
 test("Codex gateway relaunches protected resume and fork actions requested inside the TUI", async () => {

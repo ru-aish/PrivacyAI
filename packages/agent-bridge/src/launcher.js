@@ -124,6 +124,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       verificationStore = await openContextVerificationStore(options);
       ownsVerificationStore = !options.verificationStore;
       const policyFingerprint = launchPolicyFingerprint(sanitizer, options, "codex-provider");
+      env.PRIVACYAI_POLICY_FINGERPRINT = policyFingerprint;
+      env.PRIVACYAI_TOOL_POLICY = "gateway";
 
       await reportLaunchProgress(options, "static-scan", "Sanitizing local Codex startup files before launch");
       const staticAudit = await (options.auditCodexStaticStartupContext || auditCodexStaticStartupContext)({
@@ -150,6 +152,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       gateway = await (options.startCodexProviderGateway || startCodexProviderGateway)({
         sanitizer,
         verificationStore,
+        cwd,
         baseDir: options.vaultDir,
         maxContextChars: providerContextMaxChars,
         maxContextTokens: providerContextMaxTokens,
@@ -224,6 +227,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
     verificationStore = await openContextVerificationStore(options);
     ownsVerificationStore = !options.verificationStore;
     const policyFingerprint = launchPolicyFingerprint(sanitizer, options, "startup-context");
+    env.PRIVACYAI_POLICY_FINGERPRINT = policyFingerprint;
+    env.PRIVACYAI_TOOL_POLICY = flavor === "claude" ? "gateway" : "isolate";
 
     if (flavor === "claude") {
       const settingsPath = join(runtimeDir, "claude-settings.json");
@@ -390,6 +395,17 @@ function launchPolicyFingerprint(sanitizer, options, boundary) {
   });
 }
 
+function stableProtectedArgsForFingerprint(args) {
+  return (args || []).map(value => {
+    const argument = String(value);
+    if (!argument.startsWith("model_providers.privacyai=")) return argument;
+    return argument.replace(
+      /base_url="http:\/\/127\.0\.0\.1:\d+(?:\/[^\"]*)?"/,
+      'base_url="<privacyai-loopback>"'
+    );
+  });
+}
+
 async function startupRenderFingerprint({ binary, executableProbe, cwd, staticAudit, policyFingerprint, args, config }) {
   let stat = null;
   try {
@@ -402,7 +418,7 @@ async function startupRenderFingerprint({ binary, executableProbe, cwd, staticAu
   return renderedStartupFingerprint({
     manifestHash: staticAudit?.manifestHash || "no-manifest",
     policyFingerprint,
-    protectedArgs: args,
+    protectedArgs: stableProtectedArgsForFingerprint(args),
     config,
     cwd,
     repositoryId: staticAudit?.repositoryId || "unknown-repository",

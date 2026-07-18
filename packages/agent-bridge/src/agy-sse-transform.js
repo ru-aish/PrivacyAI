@@ -18,6 +18,8 @@ export class AgySseRestorer {
     this.decoder = new StringDecoder("utf8");
     this.buffer = "";
     this.textStreams = new Map();
+    this.completedToolCalls = [];
+    this.completedToolCallKeys = new Set();
     this.maxBufferedChars = Number(options.maxBufferedChars || 2_000_000);
   }
 
@@ -42,6 +44,12 @@ export class AgySseRestorer {
       serializeFrame({ otherLines: [] }, JSON.stringify(value))
     ));
     return output;
+  }
+
+  drainCompletedToolCalls() {
+    const completed = this.completedToolCalls;
+    this.completedToolCalls = [];
+    return completed;
   }
 
   #drain(final) {
@@ -154,6 +162,7 @@ export class AgySseRestorer {
       part.functionCall.name = restoreValue(part.functionCall.name, this.sessionMap);
       part.functionCall.args = restoreValue(part.functionCall.args, this.sessionMap);
       assertResolvedToolPayload(part.functionCall, "PRIVACYAI_AGY_UNRESOLVED_TOOL_CALL");
+      this.#recordCompletedToolCall(part.functionCall);
       return;
     }
 
@@ -161,6 +170,15 @@ export class AgySseRestorer {
     part.functionResponse.name = restoreValue(part.functionResponse.name, this.sessionMap);
     part.functionResponse.response = restoreValue(part.functionResponse.response, this.sessionMap);
     assertResolvedToolPayload(part.functionResponse, "PRIVACYAI_AGY_UNRESOLVED_TOOL_RESPONSE");
+  }
+
+  #recordCompletedToolCall(call) {
+    const key = typeof call.id === "string" && call.id.length > 0
+      ? "id:" + call.id
+      : "call:" + call.name + "\0" + JSON.stringify(call.args);
+    if (this.completedToolCallKeys.has(key)) return;
+    this.completedToolCallKeys.add(key);
+    this.completedToolCalls.push(structuredClone(call));
   }
 
   #flushTextStreams() {

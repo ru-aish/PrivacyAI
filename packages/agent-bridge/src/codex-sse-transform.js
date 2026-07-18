@@ -57,6 +57,7 @@ export class CodexSseRestorer {
     this.buffer = "";
     this.deltaStreams = new Map();
     this.functionArgumentsByAlias = new Map();
+    this.completedToolCalls = [];
     this.maxFunctionArgumentChars = Number(options.maxFunctionArgumentChars || 1_000_000);
   }
 
@@ -77,6 +78,12 @@ export class CodexSseRestorer {
     }
     this.#assertNoPendingFunctionArguments();
     return output;
+  }
+
+  drainCompletedToolCalls() {
+    const completed = this.completedToolCalls;
+    this.completedToolCalls = [];
+    return completed;
   }
 
   #drainFrames(final) {
@@ -139,7 +146,13 @@ export class CodexSseRestorer {
       this.#recordFunctionArgumentDone(event);
     } else if (event.type === "response.output_item.done" && isFunctionCallItem(event.item)) {
       const completed = this.#completeFunctionCallEvent(event);
-      transformed.push(restoreEvent(completed, this.sessionMap));
+      const restored = restoreEvent(completed, this.sessionMap);
+      transformed.push(restored);
+      this.completedToolCalls.push(restored.item);
+    } else if (event.type === "response.output_item.done" && isCustomToolCallItem(event.item)) {
+      const restored = restoreEvent(event, this.sessionMap);
+      transformed.push(restored);
+      this.completedToolCalls.push(restored.item);
     } else if (DELTA_EVENT_TYPES.has(event.type) && typeof event.delta === "string") {
       const key = deltaStreamKey(event);
       const stream = this.#streamFor(key, event);
@@ -356,6 +369,10 @@ function parseFunctionArguments(value) {
 
 function isFunctionCallItem(item) {
   return item?.type === "function_call";
+}
+
+function isCustomToolCallItem(item) {
+  return item?.type === "custom_tool_call";
 }
 
 function functionArgumentAliases(event, item) {

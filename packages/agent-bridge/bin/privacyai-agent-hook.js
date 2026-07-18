@@ -1,8 +1,17 @@
 #!/usr/bin/env node
 import { loadPrivacyConfig } from "../src/config-store.js";
+import { openContextVerificationStore } from "../src/context-verification-store.js";
+import {
+  commitHookFileMutation,
+  isHookFileMutationEvent,
+  rollbackHookFileMutation,
+  stageHookFileMutation
+} from "../src/hook-file-mutation.js";
 import { processHookEvent } from "../src/hook-adapter.js";
 import { createPrivacySanitizer } from "../src/privacy-sanitizer.js";
 import { SessionVault } from "../src/session-vault.js";
+
+let verificationStore;
 
 try {
   const raw = await readStdin();
@@ -24,15 +33,55 @@ try {
 
   const output = await processHookEvent(event, {
     flavor: process.env.PRIVACYAI_AGENT_FLAVOR || "claude",
+    toolPolicy: process.env.PRIVACYAI_TOOL_POLICY || undefined,
     sessionMap,
     sanitizer,
-    onSessionMapAdditions: additions => vault.merge(sessionId, additions)
+    onSessionMapAdditions: additions => vault.merge(sessionId, additions),
+    onBeforeToolUse: ({ event: hookEvent, toolInput }) => trackMutationSafely(
+      hookEvent,
+      store => stageHookFileMutation(hookEvent, {
+        store,
+        toolInput,
+        sessionMap,
+        policyFingerprint: process.env.PRIVACYAI_POLICY_FINGERPRINT
+      })
+    ),
+    onAfterToolUse: ({ event: hookEvent, toolInput }) => trackMutationSafely(
+      hookEvent,
+      store => commitHookFileMutation(hookEvent, {
+        store,
+        toolInput,
+        sessionMap,
+        policyFingerprint: process.env.PRIVACYAI_POLICY_FINGERPRINT
+      })
+    ),
+    onToolFailure: ({ event: hookEvent, toolInput }) => trackMutationSafely(
+      hookEvent,
+      store => rollbackHookFileMutation(hookEvent, { store, toolInput })
+    )
   });
 
   if (output) process.stdout.write(JSON.stringify(output));
 } catch (error) {
   process.stderr.write(`PrivacyAI agent hook blocked processing: ${safeErrorMessage(error)}\n`);
   process.exitCode = 2;
+} finally {
+  try {
+    verificationStore?.close();
+  } catch {
+    // Mutation tracking is an optimization and must not mask hook results.
+  }
+}
+
+
+async function trackMutationSafely(event, callback) {
+  if (!isHookFileMutationEvent(event)) return;
+  try {
+    verificationStore ||= await openContextVerificationStore();
+    await callback(verificationStore);
+  } catch {
+    // Provenance never weakens the privacy boundary or blocks the tool result.
+  }
 }
 
 async function readStdin() {
