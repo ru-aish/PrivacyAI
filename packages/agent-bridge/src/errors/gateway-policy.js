@@ -78,7 +78,7 @@ export function createGatewayContractError(code, message, options = {}) {
 }
 
 export function normalizeGatewayContractError(error) {
-  const exposedCode = safePrivacyCode(error?.code);
+  const exposedCode = gatewayIdentityCode(error);
   if (exposedCode) {
     const resolved = gatewayCodePolicy(exposedCode);
     if (resolved) return normalizedError(error, resolved);
@@ -129,9 +129,11 @@ function normalizedError(error, resolved) {
     category: resolved.category,
     message: resolved.publicMessage,
     publicMessage: resolved.publicMessage,
+    phase: isPrivacyError(error) ? error.phase : undefined,
     status: resolved.status,
     retryable: resolved.retryable,
     cause: error,
+    diagnostics: isPrivacyError(error) ? error.diagnostics : undefined,
     name: "PrivacyError"
   });
 }
@@ -166,6 +168,15 @@ function gatewayStatus(category, fallback) {
   if (category === "timeout") return 504;
   if (category === "storage" || category === "internal") return fallback;
   return 502;
+}
+
+function gatewayIdentityCode(error) {
+  const exposedCode = safePrivacyCode(error?.code);
+  if (!isPrivacyError(error) || !exposedCode) return exposedCode;
+
+  const exposedPolicy = gatewayCodePolicy(exposedCode);
+  if (exposedPolicy?.category === "client_cancelled") return exposedCode;
+  return safePrivacyCode(error.contractCode) || exposedCode;
 }
 
 function safePrivacyCode(value) {

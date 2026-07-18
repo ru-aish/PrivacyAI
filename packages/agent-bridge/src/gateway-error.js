@@ -101,7 +101,7 @@ function safeRetryCount(value) {
 
 function safeDiagnosticTime(value) {
   const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : Date.now();
+  return Number.isFinite(numeric) && Math.abs(numeric) <= 8.64e15 ? numeric : Date.now();
 }
 
 function safeDiagnosticTimeFromClock(clock) {

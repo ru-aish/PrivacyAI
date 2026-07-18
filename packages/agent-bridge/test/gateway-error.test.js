@@ -142,21 +142,37 @@ test("unknown raw and factory codes fail closed to a safe gateway failure", () =
   assert.equal(factoryUnknown.message, EXPECTED_MESSAGES.fallback);
 });
 
-test("explicit canonical storage and internal failures keep safe policies", () => {
+test("canonical normalization keeps stable identity, phase, and safe diagnostics", () => {
   const storage = createPrivacyError({
     code: "PRIVACYAI_STORAGE_FAILURE",
     category: "storage",
     phase: "storage_write",
     message: `sqlite failure ${SECRET}`,
     publicMessage: "PrivacyAI could not access required local storage.",
-    cause: new Error(PRIVATE_PROMPT)
+    cause: new Error(PRIVATE_PROMPT),
+    diagnostics: { attempt: 1, statusCode: 500 }
   });
+  storage.code = "PRIVACYAI_CODEX_BODY_TOO_LARGE";
+
   const normalized = normalizeGatewayContractError(storage);
   assert.equal(normalized.code, "PRIVACYAI_STORAGE_FAILURE");
   assert.equal(normalized.category, "storage");
+  assert.equal(normalized.phase, "storage_write");
   assert.equal(normalized.status, 500);
   assert.equal(normalized.retryable, false);
   assert.equal(normalized.publicMessage, "PrivacyAI could not access required local storage.");
+  assert.deepEqual(normalized.diagnostics, { attempt: 1, statusCode: 500 });
+  assert.equal(normalized.cause, storage);
+});
+
+test("legacy provider cancellation keeps its exposed compatibility code", () => {
+  const cancelled = new ProviderError("Provider request cancelled.");
+  cancelled.code = "PRIVACYAI_REQUEST_ABORTED";
+
+  const normalized = normalizeGatewayContractError(cancelled);
+  assert.equal(normalized.code, "PRIVACYAI_REQUEST_ABORTED");
+  assert.equal(normalized.category, "client_cancelled");
+  assert.equal(normalized.retryable, false);
 });
 
 test("gateway diagnostics are allowlisted, stable, and secret-free", () => {
@@ -196,6 +212,11 @@ test("gateway diagnostics are allowlisted, stable, and secret-free", () => {
     "code",
     "category"
   ]);
+
+  const beforeFallback = Date.now();
+  const fallbackTimestamp = Date.parse(safeGatewayDiagnostic(cause, { now: 1e20 }).timestamp);
+  const afterFallback = Date.now();
+  assert.ok(fallbackTimestamp >= beforeFallback && fallbackTimestamp <= afterFallback);
 
   assert.throws(
     () => safeGatewayDiagnostic(cause, { prompt: PRIVATE_PROMPT }),

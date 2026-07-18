@@ -149,13 +149,14 @@ export class PrivacyGuardianError extends PrivacyError {
 export class ProviderError extends PrivacyGuardianError {
   constructor(message, details = undefined, options = {}) {
     const opts = normalizedOptions(options);
-    const status = providerStatus(message, details);
+    const derivedStatus = providerStatus(message, details);
+    const effectiveStatus = validStatus(opts.status) ? opts.status : derivedStatus;
     super(message, details, {
       ...opts,
       code: opts.code || "PRIVACYAI_LOCAL_MODEL_FAILURE",
       category: "local_model",
-      status: opts.status ?? status ?? CATEGORY_POLICIES.local_model.status,
-      retryable: opts.retryable ?? providerRetryable(message, details, status),
+      status: effectiveStatus ?? CATEGORY_POLICIES.local_model.status,
+      retryable: opts.retryable ?? providerRetryable(message, details, effectiveStatus),
       publicMessage: opts.publicMessage || CATEGORY_POLICIES.local_model.publicMessage,
       name: "ProviderError"
     });
@@ -197,7 +198,11 @@ function normalizedPhase(value) {
 }
 
 function normalizedStatus(value, fallback) {
-  return Number.isInteger(value) && value >= 100 && value <= 599 ? value : fallback;
+  return validStatus(value) ? value : fallback;
+}
+
+function validStatus(value) {
+  return Number.isInteger(value) && value >= 100 && value <= 599;
 }
 
 function normalizedRetryable(value, fallback) {

@@ -162,6 +162,22 @@ test("nullable compatibility options normalize without changing legacy behavior"
   );
 });
 
+test("provider retryability follows an explicit effective status", () => {
+  const retryable = new ProviderError("Provider failed.", undefined, { status: 503 });
+  const terminal = new ProviderError("Provider failed.", undefined, { status: 400 });
+  const overridden = new ProviderError("Provider failed.", undefined, {
+    status: 503,
+    retryable: false
+  });
+
+  assert.equal(retryable.status, 503);
+  assert.equal(retryable.retryable, true);
+  assert.equal(terminal.status, 400);
+  assert.equal(terminal.retryable, false);
+  assert.equal(overridden.status, 503);
+  assert.equal(overridden.retryable, false);
+});
+
 test("legacy guardian and provider errors retain their public surface", () => {
   const guardianDetails = { reason: "legacy" };
   const guardian = new PrivacyGuardianError("Legacy guardian failure.", guardianDetails);
