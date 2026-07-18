@@ -1,68 +1,56 @@
-const SAFE_CODE_PATTERN = /^PRIVACYAI_[A-Z0-9_]{1,96}$/;
+import { sanitizePrivacyDiagnostics } from "@privacy-ai/sdk";
+
+import {
+  createGatewayContractError,
+  gatewayNetworkCode,
+  normalizeGatewayContractError
+} from "./errors/gateway-policy.js";
+
 const SAFE_PHASES = new Set(["request", "upstream_connect", "upstream_response", "sse"]);
 const SAFE_ROUTES = new Set(["responses", "responses_compact", "models", "gateway"]);
-const SAFE_NETWORK_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "EPIPE", "ENOTFOUND", "EAI_AGAIN", "EAI_FAIL", "ENODATA", "ESERVFAIL"]);
+const SAFE_DIAGNOSTIC_OPTIONS = new Set([
+  "now",
+  "route",
+  "phase",
+  "retryCount",
+  "downstreamClosed"
+]);
 
 export function gatewayError(code, message) {
-  if (!SAFE_CODE_PATTERN.test(String(code || ""))) {
-    throw new TypeError("PrivacyAI gateway errors require an internal error code.");
-  }
-  const error = new Error(message);
-  error.code = code;
-  return error;
+  return createGatewayContractError(code, message);
 }
 
 export function publicGatewayFailure(error) {
-  const code = internalGatewayCode(error) || providerFailureCode(error) || "PRIVACYAI_CODEX_GATEWAY_FAILURE";
+  const failure = normalizeGatewayContractError(error);
   return {
-    code,
-    category: gatewayFailureCategory(code)
+    code: failure.code,
+    category: failure.category
   };
 }
 
 export function publicGatewayHttpStatus(error) {
-  const failure = publicGatewayFailure(error);
-  if (failure.code === "PRIVACYAI_CODEX_BODY_TOO_LARGE") return 413;
-  if (failure.category === "privacy_boundary") return 422;
-  if (failure.category === "timeout") return 504;
-  return 502;
+  return normalizeGatewayContractError(error).status;
 }
 
 export function publicGatewayMessage(error) {
-  const { category } = publicGatewayFailure(error);
-  switch (category) {
-    case "timeout":
-      return "PrivacyAI timed out waiting for the upstream Codex service.";
-    case "dns":
-      return "PrivacyAI could not resolve the upstream Codex service.";
-    case "upstream_reset":
-    case "broken_pipe":
-    case "upstream":
-      return "PrivacyAI lost its connection to the upstream Codex service.";
-    case "protocol":
-      return "PrivacyAI could not safely process the upstream Codex response protocol.";
-    case "local_model":
-      return "PrivacyAI could not complete local privacy classification.";
-    case "request_limit":
-      return "PrivacyAI blocked an oversized Codex request.";
-    case "client_cancelled":
-      return "Codex disconnected before PrivacyAI completed the request.";
-    case "privacy_boundary":
-      return "PrivacyAI stopped this Codex request because its privacy boundary could not be verified.";
-    default:
-      return "PrivacyAI stopped this Codex request because the local gateway failed.";
-  }
+  return normalizeGatewayContractError(error).publicMessage;
 }
 
 export function safeGatewayDiagnostic(error, options = {}) {
-  const failure = publicGatewayFailure(error);
+  assertSafeDiagnosticOptions(options);
+  const failure = normalizeGatewayContractError(error);
+  const metadata = sanitizePrivacyDiagnostics({
+    networkCode: gatewayNetworkCode(error),
+    retryCount: safeRetryCount(options.retryCount),
+    downstreamClosed: options.downstreamClosed === true
+  });
   return {
     timestamp: new Date(safeDiagnosticTime(options.now)).toISOString(),
     route: SAFE_ROUTES.has(options.route) ? options.route : "gateway",
     phase: SAFE_PHASES.has(options.phase) ? options.phase : "request",
-    networkCode: safeNetworkCode(error),
-    retryCount: safeRetryCount(options.retryCount),
-    downstreamClosed: options.downstreamClosed === true,
+    networkCode: metadata.networkCode,
+    retryCount: metadata.retryCount,
+    downstreamClosed: metadata.downstreamClosed,
     code: failure.code,
     category: failure.category
   };
@@ -96,47 +84,15 @@ export function createGatewayDiagnosticReporter(callback, options = {}) {
   };
 }
 
-function internalGatewayCode(error) {
-  const code = String(error?.code || "");
-  if (!SAFE_CODE_PATTERN.test(code)) return null;
-  // SDK and agent-bridge errors share the PRIVACYAI_* namespace. Safe SDK
-  // boundary codes must remain observable instead of collapsing to a generic
-  // gateway diagnostic.
-  return code;
-}
-
-function providerFailureCode(error) {
-  if (error?.name === "ProviderError") return "PRIVACYAI_LOCAL_MODEL_FAILURE";
-  switch (safeNetworkCode(error)) {
-    case "ECONNRESET": return "PRIVACYAI_CODEX_UPSTREAM_RESET";
-    case "ETIMEDOUT": return "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT";
-    case "EPIPE": return "PRIVACYAI_CODEX_UPSTREAM_BROKEN_PIPE";
-    case "ENOTFOUND":
-    case "EAI_AGAIN":
-    case "EAI_FAIL":
-    case "ENODATA":
-    case "ESERVFAIL": return "PRIVACYAI_CODEX_UPSTREAM_DNS";
-    default: return null;
+function assertSafeDiagnosticOptions(options) {
+  if (options == null || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("PrivacyAI gateway diagnostic options must be an object.");
   }
-}
-
-function gatewayFailureCategory(code) {
-  if (code === "PRIVACYAI_LOCAL_MODEL_FAILURE") return "local_model";
-  if (code === "PRIVACYAI_CODEX_BODY_TOO_LARGE") return "request_limit";
-  if (code === "PRIVACYAI_CODEX_UPSTREAM_RESET") return "upstream_reset";
-  if (code === "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT") return "timeout";
-  if (code === "PRIVACYAI_CODEX_UPSTREAM_BROKEN_PIPE") return "broken_pipe";
-  if (code === "PRIVACYAI_CODEX_UPSTREAM_DNS") return "dns";
-  if (code.includes("_SSE")) return "protocol";
-  if (/_(?:UPSTREAM|RESPONSE)/.test(code)) return "upstream";
-  if (/(?:DISCONNECTED|ABORTED|CANCELLED)/.test(code)) return "client_cancelled";
-  if (code === "PRIVACYAI_CODEX_GATEWAY_FAILURE") return "gateway";
-  return "privacy_boundary";
-}
-
-function safeNetworkCode(error) {
-  const code = String(error?.code || "").toUpperCase();
-  return SAFE_NETWORK_CODES.has(code) ? code : "NONE";
+  for (const field of Object.keys(options)) {
+    if (!SAFE_DIAGNOSTIC_OPTIONS.has(field)) {
+      throw new TypeError(`PrivacyAI gateway diagnostics do not allow ${field}.`);
+    }
+  }
 }
 
 function safeRetryCount(value) {

@@ -27,7 +27,16 @@ export {
 } from "./dummy-data.js";
 export { localSanitize } from "./local-sanitizer.js";
 export { RegexDetector } from "./detectors/regex.js";
-export { PrivacyGuardianError, ProviderError } from "./errors.js";
+export {
+  PrivacyError,
+  PrivacyGuardianError,
+  ProviderError,
+  createPrivacyError,
+  isPrivacyError,
+  privacyErrorPolicy,
+  sanitizePrivacyDiagnostics,
+  serializePrivacyError
+} from "./errors.js";
 export {
   assertNoProtectedOriginals,
   assertNoProtectedOriginalsInValue,
