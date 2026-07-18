@@ -324,7 +324,9 @@ class SqliteContextVerificationStore {
       // slip a conflicting pending or committed mutation between check/write.
       const existing = this.statements.getFileMutation.get(value.mutationId);
       if (existing?.status === "committed" || existing?.status === "pending") {
-        const unchanged = sameMutation(existing, value) && (existing.status === "committed" || sameMutationChildren(this.statements, value));
+        const unchanged =
+          sameMutation(existing, value) &&
+          sameMutationChildren(this.statements, value);
         this.database.exec("COMMIT");
         return unchanged ? this.getFileMutation(value.mutationId) : mutationConflict(existing, value);
       }

@@ -32,11 +32,12 @@ export async function sanitizeStructuredValue(value, options = {}) {
   const slots = [];
   const template = describeValue(value, slots);
   if (slots.length === 0) {
+    // Preserve the established empty-value result shape. Callers that aggregate
+    // batching metrics already know no model work occurred when no slots exist.
     return {
       value,
       sessionMapAdditions: {},
-      changed: false,
-      metrics: { modelCallCount: 0, batchCount: 0, unitCount: 0, packedChars: 0 }
+      changed: false
     };
   }
   if (typeof options.sanitizer !== "function") {

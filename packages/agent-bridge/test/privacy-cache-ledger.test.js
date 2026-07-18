@@ -77,9 +77,15 @@ test("mutation geometry is relational, transactional, conflict-safe, and cascade
   assert.equal(value.stageFileMutation({ ...record, nextContentHash: id("different") }).status, "conflict");
   assert.equal(value.rollbackFileMutation(record.mutationId).status, "rolled_back");
   assert.equal(value.stageFileMutation({ ...record, nextContentHash: id("restaged") }).nextContentHash, id("restaged"));
-  assert.equal(value.commitFileMutation(record.mutationId, id("restaged")).status, "committed");
-  assert.equal(value.commitFileMutation(record.mutationId, id("restaged")).status, "committed");
+  assert.equal(value.commitFileMutation(record.mutationId, id("restaged"), id("commit-ref")).status, "committed");
+  assert.equal(value.commitFileMutation(record.mutationId, id("restaged"), id("commit-ref")).status, "committed");
+  assert.equal(value.commitFileMutation(record.mutationId, id("restaged"), id("other-ref")).status, "conflict");
   assert.equal(value.stageFileMutation(record).status, "conflict");
+  assert.equal(value.stageFileMutation({
+    ...record,
+    nextContentHash: id("restaged"),
+    edits: [{ start: 1, end: 3, insertedLength: 4, knownInsertions: [] }]
+  }).status, "conflict");
   value.registerRepository({ repositoryId: id("repo-2"), rootRef: id("root-2") }); value.prune();
   assert.equal(value.database.prepare("SELECT COUNT(*) AS count FROM ledger_file_mutation_edits").get().count, 0);
 });
