@@ -272,21 +272,63 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
   );
 
   const custom = sampleRequest();
+  custom.instructions = "Safe instructions";
+  custom.input = [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "Safe request" }]
+  }];
+  custom.prompt_cache_key = "cache:safe";
+  custom.client_metadata = { session_id: "custom-grammar-session" };
+  const grammar = [
+    "start: pragma_source | plain_source",
+    "pragma_source: PRAGMA_LINE NEWLINE SOURCE",
+    "plain_source: SOURCE",
+    "PRAGMA_LINE: /[ \\t]*\/\/ @exec:[^\r\n]*/",
+    "SOURCE: /(.|\n)+/",
+    "%import common.NEWLINE"
+  ].join("\n");
+  const sanitizerInputs = [];
   custom.tools = [{
     type: "custom",
     name: "apply_patch",
-    description: `Apply a patch for ${PRIVATE_EMAIL}`,
+    description: "Maintain a patch for " + PRIVATE_EMAIL,
     format: {
       type: "grammar",
       syntax: "lark",
-      definition: `start: "${PRIVATE_KEY}"`
+      definition: grammar
     }
   }];
-  const customResult = await sanitizeCodexRequestBody(custom, { sanitizer: deterministicSanitizer });
-  assert.equal(JSON.stringify(customResult.body.tools).includes(PRIVATE_EMAIL), false);
-  assert.equal(JSON.stringify(customResult.body.tools).includes(PRIVATE_KEY), false);
-  assert.match(customResult.body.tools[0].description, /\[EMAIL_1\]/);
-  assert.match(customResult.body.tools[0].format.definition, /\[API_KEY_1\]/);
+  const customResult = await sanitizeCodexRequestBody(custom, {
+    sanitizer: async text => {
+      sanitizerInputs.push(text);
+      return {
+        sanitizedPrompt: text.replace(/ai/gi, "[PRIVATE_VALUE_7]"),
+        sessionMap: { "[PRIVATE_VALUE_7]": "ai" }
+      };
+    }
+  });
+  assert.match(customResult.body.tools[0].description, /\[PRIVATE_VALUE_7\]/);
+  assert.equal(customResult.sessionMapAdditions["[PRIVATE_VALUE_7]"], "ai");
+  assert.equal(customResult.body.tools[0].format.definition, grammar);
+  assert.equal(sanitizerInputs.some(text => text.includes("plain_source: SOURCE")), false);
+
+  const protectedGrammar = sampleRequest();
+  protectedGrammar.tools = [{
+    type: "custom",
+    name: "apply_patch",
+    description: "Apply a patch",
+    format: {
+      type: "grammar",
+      syntax: "lark",
+      definition: 'start: "' + PRIVATE_KEY + '"'
+    }
+  }];
+  await assert.rejects(
+    sanitizeCodexRequestBody(protectedGrammar, { sanitizer: deterministicSanitizer }),
+    error => error?.code === "PRIVACYAI_CODEX_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE" &&
+      !error.message.includes(PRIVATE_KEY)
+  );
 
   const localShell = sampleRequest();
   localShell.input = [{
@@ -592,6 +634,31 @@ test("Codex JSON Schema policy preserves protocol fields and only sanitizes pros
     [PRIVATE_EMAIL]: "visible",
     nested: { [PRIVATE_KEY]: "value" }
   });
+});
+
+test("Codex schema traces report warm cache hits without reclassifying structure", async () => {
+  const body = sampleRequest();
+  body.tools[0].parameters = {
+    type: "object",
+    description: "Owner " + PRIVATE_EMAIL,
+    properties: {}
+  };
+  const cache = new Map();
+  let calls = 0;
+  const sanitizer = async text => {
+    calls += 1;
+    return deterministicSanitizer(text);
+  };
+
+  const first = await sanitizeCodexRequestBody(body, { cache, sanitizer });
+  for (const [key, record] of first.cacheWrites) cache.set(key, record);
+  const firstCalls = calls;
+  assert.equal(first.schemaTraces[0].cacheHitCount, 0);
+
+  const second = await sanitizeCodexRequestBody(body, { cache, sanitizer });
+  assert.equal(calls, firstCalls);
+  assert.equal(second.schemaTraces[0].cacheHitCount, 1);
+  assert.equal(second.schemaTraces[0].structurePreserved, true);
 });
 
 test("Codex text.format schema uses the same immutable policy, including boolean schemas", async () => {

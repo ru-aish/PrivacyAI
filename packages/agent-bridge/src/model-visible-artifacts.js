@@ -29,6 +29,7 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
   const sessionMapAdditions = {};
   const cacheWrites = [];
   const itemRecords = [];
+  const cacheHitSlotKeys = new Set();
   const uniqueByContent = new Map();
   let cacheHitCount = 0;
   let uncachedSlotCount = 0;
@@ -54,6 +55,7 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
 
     if (cached?.sessionMapAdditions && typeof cached.sessionMapAdditions === "object") {
       mergeMappings(completeMap, sessionMapAdditions, cached.sessionMapAdditions);
+      cacheHitSlotKeys.add(entry.slotKey);
       cacheHitCount += 1;
       continue;
     }
@@ -170,6 +172,7 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
     sessionMapAdditions,
     cacheWrites,
     itemRecords,
+    cacheHitSlotKeys,
     policyFingerprint,
     metrics: {
       uniqueUncachedCount: uniqueUncached.length,

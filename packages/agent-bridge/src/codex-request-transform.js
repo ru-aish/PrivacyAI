@@ -12,6 +12,7 @@ import {
   finalizeCodexJsonSchemaTrace
 } from "./codex-json-schema-policy.js";
 import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
+import { assertImmutableToolString } from "./immutable-tool-structure.js";
 
 const ALLOWED_TOP_LEVEL_FIELDS = new Set([
   "model",
@@ -222,7 +223,11 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   const finalizedSchemaTraces = schemaTraces.map(trace => finalizeCodexJsonSchemaTrace(
     getAtPath(transformed, trace.path),
     trace,
-    resolved.map((value, index) => ({ entry: slots[index], value }))
+    resolved.map((value, index) => ({
+      entry: slots[index],
+      value,
+      cacheHit: artifactResult.cacheHitSlotKeys.has(slotIdentity(slots[index]))
+    }))
   ));
   if (typeof options.onSchemaTrace === "function") {
     for (const trace of finalizedSchemaTraces) await options.onSchemaTrace(trace);
@@ -1129,7 +1134,11 @@ function collectToolDefinition(tool, slots, path, options = {}) {
           "PrivacyAI supports only Codex Lark grammar custom tools."
         );
       }
-      collectRequiredString(tool.format, "definition", slots, [...path, "format"]);
+      validateImmutableCodexToolStructure(
+        tool.format.definition,
+        options.sessionMap,
+        "custom Lark grammar"
+      );
       return;
     case "web_search":
       throw gatewayError(
@@ -1325,6 +1334,19 @@ function sanitizeInternalMessageMetadata(item) {
     return;
   }
   assertProtocolToken(item[key].turn_id, "internal turn id", 256);
+}
+
+function validateImmutableCodexToolStructure(value, sessionMap, label) {
+  assertImmutableToolString(value, sessionMap, {
+    protectedValueError: () => gatewayError(
+      "PRIVACYAI_CODEX_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE",
+      `PrivacyAI blocked protected data in immutable Codex ${label}.`
+    ),
+    invalidValueError: () => gatewayError(
+      "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION",
+      `PrivacyAI blocked an invalid immutable Codex ${label}.`
+    )
+  });
 }
 
 function collectRequiredString(object, key, slots, path) {

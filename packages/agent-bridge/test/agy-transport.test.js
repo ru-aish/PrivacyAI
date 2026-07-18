@@ -63,7 +63,107 @@ test("AGY request transformation sanitizes per-item artifacts and preserves the 
   assert.equal(result.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
   assert.equal(result.sessionMapAdditions["[API_KEY_1]"], PRIVATE_KEY);
   assert.equal(Object.hasOwn(result.sessionMapAdditions, "[TOOL_1]"), false);
-  assert.equal(result.itemRecords.length, 7);
+  assert.equal(result.itemRecords.length, 6);
+  assert.equal(result.schemaTraces.length, 1);
+  assert.equal(result.schemaTraces[0].structurePreserved, true);
+  assert.equal(result.schemaTraces[0].sanitizedAnnotationCount, 0);
+});
+
+test("AGY tool schemas sanitize only prose annotations and preserve future structure", async () => {
+  const body = sampleRequest();
+  const declaration = body.request.tools[0].functionDeclarations[0];
+  declaration.parameters = {
+    type: "OBJECT",
+    description: `Parameters for ${PRIVATE_EMAIL}`,
+    properties: {
+      recipient: {
+        type: "STRING",
+        title: `Recipient ${PRIVATE_KEY}`,
+        enum: ["primary", "secondary"],
+        default: { description: "DEFAULT_DESCRIPTION_SENTINEL" }
+      }
+    },
+    required: ["recipient"],
+    $defs: { Output: { type: "STRING" } },
+    allOf: [{ $ref: "#/$defs/Output" }],
+    "x-future-provider-control": {
+      description: "EXTENSION_DESCRIPTION_SENTINEL"
+    }
+  };
+  body.request.generationConfig.responseSchema = {
+    type: "object",
+    description: `Output for ${PRIVATE_EMAIL}`,
+    properties: { status: { type: "string" } },
+    required: ["status"]
+  };
+
+  const sanitizerInputs = [];
+  const traces = [];
+  const result = await sanitizeAgyRequestBody(body, {
+    sanitizer: async text => {
+      sanitizerInputs.push(text);
+      return deterministicSanitizer(text);
+    },
+    onSchemaTrace: trace => traces.push(trace)
+  });
+
+  const schema = result.body.request.tools[0].functionDeclarations[0].parameters;
+  assert.equal(schema.description, "Parameters for [EMAIL_1]");
+  assert.equal(schema.properties.recipient.title, "Recipient [API_KEY_1]");
+  assert.deepEqual(schema.properties.recipient.enum, ["primary", "secondary"]);
+  assert.deepEqual(schema.required, ["recipient"]);
+  assert.equal(schema.allOf[0].$ref, "#/$defs/Output");
+  assert.deepEqual(schema.$defs, { Output: { type: "STRING" } });
+  assert.deepEqual(schema.properties.recipient.default, {
+    description: "DEFAULT_DESCRIPTION_SENTINEL"
+  });
+  assert.deepEqual(schema["x-future-provider-control"], {
+    description: "EXTENSION_DESCRIPTION_SENTINEL"
+  });
+  assert.equal(
+    result.body.request.generationConfig.responseSchema.description,
+    "Output for [EMAIL_1]"
+  );
+
+  const inspected = JSON.stringify(sanitizerInputs);
+  for (const immutableValue of [
+    "#/$defs/Output",
+    "DEFAULT_DESCRIPTION_SENTINEL",
+    "EXTENSION_DESCRIPTION_SENTINEL",
+    "primary",
+    "secondary"
+  ]) {
+    assert.equal(inspected.includes(immutableValue), false);
+  }
+  assert.equal(traces.length, 2);
+  assert.equal(traces.every(trace => trace.structurePreserved), true);
+  assert.equal(traces.reduce((count, trace) => count + trace.sanitizedAnnotationCount, 0), 3);
+  assert.deepEqual(result.schemaTraces, traces);
+
+  const protectedIdentifier = sampleRequest();
+  protectedIdentifier.request.tools[0].functionDeclarations[0].parameters = {
+    type: "object",
+    properties: { [PRIVATE_EMAIL]: { type: "string" } }
+  };
+  await assert.rejects(
+    sanitizeAgyRequestBody(protectedIdentifier, { sanitizer: deterministicSanitizer }),
+    error => error?.code === "PRIVACYAI_AGY_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE" &&
+      !error.message.includes(PRIVATE_EMAIL)
+  );
+
+  const protectedFutureField = sampleRequest();
+  protectedFutureField.request.tools[0].functionDeclarations[0].parameters = {
+    type: "object",
+    "x-future-provider-control": { token: PRIVATE_KEY }
+  };
+  await assert.rejects(
+    sanitizeAgyRequestBody(protectedFutureField, {
+      sanitizer: deterministicSanitizer,
+      sessionMap: { "[API_KEY_1]": PRIVATE_KEY }
+    }),
+    error => error?.code === "PRIVACYAI_AGY_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE" &&
+      !error.message.includes(PRIVATE_KEY)
+  );
 });
 
 test("AGY session-map migration replaces stale bracket tool placeholders", () => {

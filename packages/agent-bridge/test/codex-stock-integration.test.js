@@ -114,6 +114,90 @@ test("installed stock Codex executes its native command through the provider gat
   assert.equal(captured.every(body => !JSON.stringify(body).includes(PRIVATE_EMAIL)), true);
 });
 
+test("installed stock Codex preserves custom Lark grammar under a false-positive sanitizer", { timeout: 60_000 }, async t => {
+  const codex = await resolveExecutable("codex");
+  if (!codex) return t.skip("Codex is not installed");
+
+  const workspace = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-grammar-workspace-"));
+  const codexHome = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-grammar-home-"));
+  const vaultDir = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-grammar-vault-"));
+  const sanitizerInputs = [];
+  let captured;
+
+  const upstream = await startServer(async (request, response) => {
+    if (request.method === "GET" && request.url.startsWith("/v1/models")) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ models: [] }));
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v1/responses") {
+      response.writeHead(404).end();
+      return;
+    }
+
+    captured = await readRequestJson(request);
+    writeSse(response, [
+      responseCreated("resp-grammar"),
+      assistantMessage("msg-grammar", "TOOL_GRAMMAR_OK"),
+      responseCompleted("resp-grammar")
+    ]);
+  });
+  t.after(() => upstream.close());
+
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => {
+      sanitizerInputs.push(text);
+      const found = /ai/i.test(text);
+      return {
+        sanitizedPrompt: found ? text.replace(/ai/gi, "[PRIVATE_VALUE_7]") : text,
+        sessionMap: found ? { "[PRIVATE_VALUE_7]": "ai" } : {}
+      };
+    },
+    baseDir: vaultDir,
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const args = [
+    ...buildCodexProviderArgs(gateway.baseURL),
+    "-m",
+    "gpt-5.4-mini",
+    "-a",
+    "never",
+    "-s",
+    "read-only",
+    "exec",
+    "--skip-git-repo-check",
+    "Reply with exactly TOOL_GRAMMAR_OK and do not call tools."
+  ];
+  const result = await run(codex, args, {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      OPENAI_API_KEY: "dummy-local-test-key",
+      NO_COLOR: "1"
+    }
+  });
+
+  assert.equal(result.code, 0, `Codex failed:\n${result.stderr}\n${result.stdout}`);
+  assert.ok(captured, "Codex should send one request through the provider gateway");
+  const customTool = captured.tools.find(tool =>
+    tool.type === "custom" && tool.format?.type === "grammar" && tool.format?.syntax === "lark"
+  );
+  assert.ok(customTool, "Codex should include its native custom Lark tool");
+  const grammar = customTool.format.definition;
+  assert.match(grammar, /start:\s*begin_patch hunk\+ end_patch/);
+  assert.match(grammar, /begin_patch:\s*"\*\*\* Begin Patch" LF/);
+  assert.doesNotMatch(grammar, /PRIVATE_VALUE_7/);
+  assert.equal(
+    sanitizerInputs.some(text => text.includes('begin_patch: "*** Begin Patch" LF')),
+    false,
+    "executable grammar must never enter the text sanitizer"
+  );
+});
+
 function responseCreated(id) {
   return { type: "response.created", response: { id } };
 }

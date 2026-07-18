@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
 import { normalizeSessionMap } from "@privacy-ai/sdk";
+import {
+  collectAgyToolSchema,
+  finalizeAgyToolSchemaTrace
+} from "./agy-tool-schema-policy.js";
 import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
 
 const OUTER_FIELDS = new Set([
@@ -130,7 +134,7 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
     }
   }
 
-  const slots = collectAgyArtifacts(transformed);
+  const { slots, schemaTraces } = collectAgyArtifacts(transformed, completeSessionMap);
   let artifactResult;
   try {
     artifactResult = await sanitizeModelVisibleArtifacts(
@@ -146,8 +150,8 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
         cache: options.cache,
         policyFingerprint: options.policyFingerprint,
         maxContextChars: options.maxContextChars,
-          maxContextTokens: options.maxContextTokens,
-          tokenCounter: options.tokenCounter,
+        maxContextTokens: options.maxContextTokens,
+        tokenCounter: options.tokenCounter,
         artifactTypePrefix: "agy",
         signal: options.signal,
         onBatchComplete: options.onBatchComplete,
@@ -197,6 +201,19 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
       : value;
     setAtPath(transformed, slots[index].path, resolved);
   });
+
+  const finalizedSchemaTraces = schemaTraces.map(trace => finalizeAgyToolSchemaTrace(
+    getAtPath(transformed, trace.path),
+    trace,
+    artifactResult.values.map((value, index) => ({
+      entry: slots[index],
+      value,
+      cacheHit: artifactResult.cacheHitSlotKeys.has(slots[index].slotKey)
+    }))
+  ));
+  if (typeof options.onSchemaTrace === "function") {
+    for (const trace of finalizedSchemaTraces) await options.onSchemaTrace(trace);
+  }
   validateAgyRequestBody(transformed, { functionNameMode: "provider" });
 
   return {
@@ -206,7 +223,8 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
     cacheWrites: artifactResult.cacheWrites,
     itemRecords: artifactResult.itemRecords,
     policyFingerprint: artifactResult.policyFingerprint,
-    metrics: artifactResult.metrics
+    metrics: artifactResult.metrics,
+    schemaTraces: finalizedSchemaTraces
   };
 }
 
@@ -276,9 +294,10 @@ function collectAgyImageSlots(body) {
   return slots;
 }
 
-function collectAgyArtifacts(body) {
+function collectAgyArtifacts(body, sessionMap = {}) {
   const request = body.request;
   const slots = [];
+  const schemaTraces = [];
 
   request.contents.forEach((content, index) => {
     collectContentArtifacts(
@@ -300,19 +319,20 @@ function collectAgyArtifacts(body) {
     );
   }
 
-  collectToolArtifacts(request.tools, slots);
+  collectToolArtifacts(request.tools, slots, sessionMap, schemaTraces);
 
   if (request.generationConfig?.responseSchema != null) {
-    slots.push({
-      path: ["request", "generationConfig", "responseSchema"],
-      value: request.generationConfig.responseSchema,
-      slotKey: "generationConfig/responseSchema",
-      artifactKey: "generationConfig/responseSchema",
-      artifactType: "json_schema"
-    });
+    collectAgySchemaSlots(
+      request.generationConfig.responseSchema,
+      ["request", "generationConfig", "responseSchema"],
+      sessionMap,
+      schemaTraces,
+      slots,
+      "generation_response_schema"
+    );
   }
 
-  return slots;
+  return { slots, schemaTraces };
 }
 
 function collectContentArtifacts(content, basePath, artifactKey, slots, textArtifactType) {
@@ -368,7 +388,7 @@ function collectContentArtifacts(content, basePath, artifactKey, slots, textArti
   });
 }
 
-function collectToolArtifacts(tools, slots) {
+function collectToolArtifacts(tools, slots, sessionMap, schemaTraces) {
   for (let toolIndex = 0; toolIndex < (tools?.length || 0); toolIndex += 1) {
     const declarations = tools[toolIndex].functionDeclarations;
     for (let declarationIndex = 0; declarationIndex < declarations.length; declarationIndex += 1) {
@@ -396,16 +416,23 @@ function collectToolArtifacts(tools, slots) {
 
       for (const key of ["parameters", "parametersJsonSchema", "response", "responseJsonSchema"]) {
         if (declaration[key] == null) continue;
-        slots.push({
-          path: [...basePath, key],
-          value: declaration[key],
-          slotKey: `${slotPrefix}/${key}`,
-          artifactKey: "tool_definitions",
-          artifactType: "tool_definition"
-        });
+        collectAgySchemaSlots(
+          declaration[key],
+          [...basePath, key],
+          sessionMap,
+          schemaTraces,
+          slots,
+          `tool_${key}`
+        );
       }
     }
   }
+}
+
+function collectAgySchemaSlots(value, path, sessionMap, schemaTraces, slots, schemaKind) {
+  const collected = collectAgyToolSchema(value, path, sessionMap, schemaKind);
+  slots.push(...collected.slots);
+  schemaTraces.push(collected.trace);
 }
 
 export function normalizeAgySessionMap(body, sessionMap = {}) {
@@ -736,6 +763,10 @@ function validateJsonControl(value, label, depth = 0) {
     }
     validateJsonControl(entry, `${label}.${safeToken(key)}`, depth + 1);
   }
+}
+
+function getAtPath(root, path) {
+  return path.reduce((value, key) => value[key], root);
 }
 
 function setAtPath(root, path, value) {
