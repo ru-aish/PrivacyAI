@@ -12,9 +12,11 @@ import {
   CodexSseRestorer,
   MemoryContextVerificationStore,
   buildCodexProviderArgs,
+  buildCodexRequestVerificationSeed,
   codexSessionContext,
   hookFileMutationId,
   parseCodexPrivacyMode,
+  pruneCodexArgumentKeyMappings,
   restoreResponseItem,
   sanitizeCodexMetadataHeaders,
   sanitizeCodexRequestBody,
@@ -156,6 +158,183 @@ test("Codex request transformation sanitizes model-visible fields and preserves 
   assert.equal(Object.hasOwn(metadata, "extra"), false);
   assert.equal(JSON.stringify(result.body).includes(PRIVATE_EMAIL), false);
   assert.equal(JSON.stringify(result.body).includes(PRIVATE_KEY), false);
+});
+
+test("Codex function-call argument keys remain structural while leaf values are sanitized", async () => {
+  const body = sampleRequest();
+  body.instructions = "Use the wait tool safely.";
+  body.input = [{
+    type: "function_call",
+    call_id: "wait-call",
+    name: "wait",
+    arguments: JSON.stringify({
+      cell_id: "3",
+      nested: { owner: PRIVATE_EMAIL },
+      dynamic: { [PRIVATE_EMAIL]: "public" }
+    })
+  }];
+  body.tools = [{
+    type: "function",
+    name: "wait",
+    description: "Wait for a running cell.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        cell_id: { type: "string" },
+        nested: {
+          type: "object",
+          properties: { owner: { type: "string" } },
+          required: ["owner"]
+        },
+        dynamic: {
+          type: "object",
+          additionalProperties: { type: "string" }
+        }
+      },
+      required: ["cell_id"]
+    }
+  }];
+
+  let sawCellId = false;
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: async text => {
+      sawCellId ||= text.includes("cell_id");
+      let sanitizedPrompt = text;
+      const mapped = {};
+      if (text.includes("cell_id")) {
+        sanitizedPrompt = sanitizedPrompt.replaceAll("cell_id", "[PRIVATE_VALUE_9]");
+        mapped["[PRIVATE_VALUE_9]"] = "cell_id";
+      }
+      if (text.includes(PRIVATE_EMAIL)) {
+        sanitizedPrompt = sanitizedPrompt.replaceAll(PRIVATE_EMAIL, "[EMAIL_1]");
+        mapped["[EMAIL_1]"] = PRIVATE_EMAIL;
+      }
+      return { sanitizedPrompt, sessionMap: mapped };
+    }
+  });
+
+  assert.equal(sawCellId, false);
+  assert.deepEqual(JSON.parse(result.body.input[0].arguments), {
+    cell_id: "3",
+    nested: { owner: "[EMAIL_1]" },
+    dynamic: { "[EMAIL_1]": "public" }
+  });
+  assert.equal(Object.values(result.sessionMapAdditions).includes("cell_id"), false);
+  assert.equal(result.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
+});
+
+test("Codex verification seeding preserves argument keys and matches values-only cache policy", async () => {
+  const body = sampleRequest();
+  body.instructions = "safe";
+  body.prompt_cache_key = "safe-cache-key";
+  body.input = [{
+    type: "function_call",
+    call_id: "wait-seed-call",
+    name: "wait",
+    arguments: JSON.stringify({ cell_id: "3", note: PRIVATE_EMAIL })
+  }];
+  body.tools = [{
+    type: "function",
+    name: "wait",
+    description: "Wait for a running cell.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: {
+        cell_id: { type: "string" },
+        note: { type: "string" }
+      },
+      required: ["cell_id"]
+    }
+  }];
+
+  const policyFingerprint = "seed-values-only-policy";
+  const seed = buildCodexRequestVerificationSeed(body, sessionMap, { policyFingerprint });
+  const argumentRecord = seed.itemRecords.find(record => record.slotKey === "input/0/arguments");
+  assert.ok(argumentRecord);
+  const argumentVerification = seed.cacheWrites.find(([key]) => key === argumentRecord.cacheKey)?.[1];
+  assert.ok(argumentVerification);
+  assert.equal(Object.values(argumentVerification.sessionMapAdditions).includes("cell_id"), false);
+  assert.equal(argumentVerification.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
+
+  const cache = new Map(seed.cacheWrites);
+  let sanitizerCalls = 0;
+  const result = await sanitizeCodexRequestBody(body, {
+    cache,
+    policyFingerprint,
+    sessionMap,
+    sanitizer: async text => {
+      sanitizerCalls += 1;
+      return { sanitizedPrompt: text, sessionMap: {} };
+    }
+  });
+
+  assert.equal(sanitizerCalls, 0);
+  assert.deepEqual(JSON.parse(result.body.input[0].arguments), {
+    cell_id: "3",
+    note: "[EMAIL_1]"
+  });
+  assert.equal(result.metrics.cacheHitCount > 0, true);
+});
+
+test("Codex prunes only safe schema-declared argument-key mappings from poisoned sessions", () => {
+  const body = sampleRequest();
+  body.input = [{
+    type: "function_call",
+    call_id: "wait-call",
+    name: "wait",
+    arguments: JSON.stringify({ cell_id: "3", unrelated_key: "kept" })
+  }];
+  body.tools = [{
+    type: "function",
+    name: "wait",
+    description: "Wait for a running cell.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: { cell_id: { type: "string" } },
+      required: ["cell_id"]
+    }
+  }];
+
+  const poisoned = {
+    "[PRIVATE_VALUE_9]": "cell_id",
+    "[PRIVATE_VALUE_10]": "unrelated_key",
+    "[EMAIL_1]": PRIVATE_EMAIL
+  };
+  const pruned = pruneCodexArgumentKeyMappings(body, poisoned);
+  assert.equal(Object.values(pruned).includes("cell_id"), false);
+  assert.equal(pruned["[PRIVATE_VALUE_10]"], "unrelated_key");
+  assert.equal(pruned["[EMAIL_1]"], PRIVATE_EMAIL);
+
+  const noSchema = { ...body, tools: [] };
+  assert.equal(
+    pruneCodexArgumentKeyMappings(noSchema, poisoned)["[PRIVATE_VALUE_9]"],
+    "cell_id"
+  );
+
+  const sensitiveKeyBody = { ...body };
+  sensitiveKeyBody.input = [{
+    type: "function_call",
+    call_id: "sensitive-call",
+    name: "sensitive_tool",
+    arguments: JSON.stringify({ [PRIVATE_EMAIL]: "value" })
+  }];
+  sensitiveKeyBody.tools = [{
+    type: "function",
+    name: "sensitive_tool",
+    description: "Test sensitive schema keys.",
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: { [PRIVATE_EMAIL]: { type: "string" } }
+    }
+  }];
+  assert.equal(
+    pruneCodexArgumentKeyMappings(sensitiveKeyBody, poisoned)["[EMAIL_1]"],
+    PRIVATE_EMAIL
+  );
 });
 
 test("Codex request transformation rejects unknown fields, media, unknown items, and leaked no-op mappings", async () => {
@@ -535,6 +714,51 @@ test("provider-safe tool aliases avoid collisions with real tool names", async (
   const call = { type: "function_call", call_id: "collision-call", name: alias, arguments: "{}" };
   restoreResponseItem(call, result.sessionMapAdditions);
   assert.equal(call.name, privateToolName);
+});
+
+test("Codex function-call arguments sanitize values without classifying protocol keys", async () => {
+  const body = sampleRequest();
+  const calls = [];
+  body.instructions = "safe";
+  body.tools = [];
+  body.prompt_cache_key = "safe-cache-key";
+  body.input = [{
+    type: "additional_tools",
+    role: "developer",
+    tools: [{
+      type: "function",
+      name: "wait",
+      description: "Wait for a running cell.",
+      strict: false,
+      parameters: {
+        type: "object",
+        properties: {
+          cell_id: { type: "string" },
+          yield_time_ms: { type: "integer" }
+        },
+        required: ["cell_id"]
+      }
+    }]
+  }, {
+    type: "function_call",
+    call_id: "call-wait",
+    name: "wait",
+    arguments: JSON.stringify({ cell_id: "3", note: PRIVATE_EMAIL })
+  }];
+
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: async text => {
+      calls.push(text);
+      return deterministicSanitizer(text);
+    }
+  });
+  const args = JSON.parse(result.body.input[1].arguments);
+
+  assert.equal(calls.some(text => text.includes("cell_id")), false);
+  assert.equal(calls.some(text => text.includes("yield_time_ms")), false);
+  assert.deepEqual(args, { cell_id: "3", note: "[EMAIL_1]" });
+  assert.equal(result.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.equal(Object.values(result.sessionMapAdditions).includes("cell_id"), false);
 });
 
 test("Codex JSON Schema policy preserves protocol fields and only sanitizes prose annotations", async () => {
@@ -1057,6 +1281,87 @@ test("localhost gateway sanitizes outbound requests and restores fragmented SSE 
   assert.equal(observed[0].headers["accept-encoding"], "identity");
   assert.equal(JSON.stringify(observed[0].body).includes(PRIVATE_EMAIL), false);
   assert.equal(JSON.stringify(observed[0].body).includes(PRIVATE_KEY), false);
+});
+
+test("Codex gateway prunes legacy function-argument key mappings before schema validation", async t => {
+  const observed = [];
+  const upstream = await startServer(async (request, response) => {
+    observed.push(await readRequestJson(request));
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.completed", response: { id: "legacy-key-cleanup", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+
+  const sessionKey = "codex-provider:legacy-argument-key-thread";
+  const store = new MemoryContextVerificationStore();
+  store.saveThread(sessionKey, {
+    parentSessionKeys: [],
+    sessionMap: { "[PRIVATE_VALUE_9]": "cell_id" },
+    policyFingerprint: "legacy-policy"
+  });
+
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+    verificationStore: store,
+    policyFingerprint: "fixed-policy",
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-key-cleanup-")),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const body = sampleRequest();
+  body.instructions = "safe";
+  body.tools = [];
+  body.prompt_cache_key = "safe-cache-key";
+  body.client_metadata = {
+    session_id: "legacy-argument-key-thread",
+    thread_id: "legacy-argument-key-thread",
+    turn_id: "legacy-turn"
+  };
+  body.input = [{
+    type: "additional_tools",
+    role: "developer",
+    tools: [{
+      type: "function",
+      name: "wait",
+      description: "Wait for a running cell.",
+      strict: false,
+      parameters: {
+        type: "object",
+        properties: { cell_id: { type: "string" } },
+        required: ["cell_id"]
+      }
+    }]
+  }, {
+    type: "function_call",
+    call_id: "call-wait-legacy",
+    name: "wait",
+    arguments: JSON.stringify({ cell_id: "3" })
+  }];
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  assert.equal(response.status, 200, await response.text());
+  if (!response.bodyUsed) await response.text();
+
+  assert.equal(observed.length, 1);
+  assert.equal(
+    Object.hasOwn(observed[0].input[0].tools[0].parameters.properties, "cell_id"),
+    true
+  );
+  assert.deepEqual(observed[0].input[0].tools[0].parameters.required, ["cell_id"]);
+  assert.deepEqual(JSON.parse(observed[0].input[1].arguments), { cell_id: "3" });
+  assert.equal(
+    Object.values(store.loadThread(sessionKey).sessionMap).includes("cell_id"),
+    false
+  );
 });
 
 test("Codex gateway stages apply_patch and commits it from next-turn tool history", async t => {

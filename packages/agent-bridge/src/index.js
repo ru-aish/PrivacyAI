@@ -41,6 +41,7 @@ export {
   buildCodexRequestVerificationSeed,
   codexSessionContext,
   codexSessionKey,
+  pruneCodexArgumentKeyMappings,
   restoreCodexCompactResponse,
   restoreCodexJsonResponse,
   restoreResponseItem,

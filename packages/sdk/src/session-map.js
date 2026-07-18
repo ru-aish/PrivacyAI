@@ -153,24 +153,31 @@ function replacementCandidates(replacements) {
   );
 }
 
-export function transformValue(value, transformText) {
+export function transformValue(value, transformText, options = {}, path = []) {
   if (typeof transformText !== "function") {
     throw new TypeError("transformValue requires a text transformation function.");
   }
   if (typeof value === "string") return transformText(value);
-  if (Array.isArray(value)) return value.map(item => transformValue(item, transformText));
+  if (Array.isArray(value)) {
+    return value.map((item, index) =>
+      transformValue(item, transformText, options, [...path, index])
+    );
+  }
 
   if (value && typeof value === "object") {
     const transformed = {};
     for (const [key, item] of Object.entries(value)) {
-      const transformedKey = transformText(key);
+      const keyPath = [...path, key];
+      const transformedKey = shouldProcessObjectKey(options.transformKeys, keyPath, key)
+        ? transformText(key)
+        : key;
       if (Object.hasOwn(transformed, transformedKey)) {
         const error = new Error("PrivacyAI blocked a structured value because key transformation caused a collision.");
         error.code = "PRIVACYAI_TRANSFORM_KEY_COLLISION";
         throw error;
       }
       Object.defineProperty(transformed, transformedKey, {
-        value: transformValue(item, transformText),
+        value: transformValue(item, transformText, options, keyPath),
         enumerable: true,
         configurable: true,
         writable: true
@@ -182,12 +189,19 @@ export function transformValue(value, transformText) {
   return value;
 }
 
-export function restoreValue(value, sessionMap = {}) {
-  return transformValue(value, text => restoreText(text, sessionMap));
+function shouldProcessObjectKey(policy, path, key) {
+  if (typeof policy === "function") {
+    return policy({ path: [...path], key }) !== false;
+  }
+  return policy !== false;
 }
 
-export function sanitizeKnownValue(value, sessionMap = {}) {
-  return transformValue(value, text => sanitizeKnownText(text, sessionMap));
+export function restoreValue(value, sessionMap = {}, options = {}) {
+  return transformValue(value, text => restoreText(text, sessionMap), options);
+}
+
+export function sanitizeKnownValue(value, sessionMap = {}, options = {}) {
+  return transformValue(value, text => sanitizeKnownText(text, sessionMap), options);
 }
 
 export function findUnresolvedPlaceholders(value, pattern = DEFAULT_PLACEHOLDER_PATTERN) {
@@ -223,12 +237,12 @@ export function assertNoProtectedOriginals(serializedPayload, sessionMap = {}) {
   if (leaks.size > 0) throw providerPayloadLeakError(leaks.size);
 }
 
-export function assertNoProtectedOriginalsInValue(value, sessionMap = {}) {
+export function assertNoProtectedOriginalsInValue(value, sessionMap = {}, options = {}) {
   const normalizedMap = normalizeSessionMap(sessionMap);
   const leaks = new Set();
   visitText(value, text => {
     for (const original of protectedOriginalsInText(text, normalizedMap)) leaks.add(original);
-  });
+  }, options);
   if (leaks.size > 0) throw providerPayloadLeakError(leaks.size);
 }
 
@@ -248,19 +262,22 @@ function protectedOriginalsInText(text, sessionMap) {
   return leaks;
 }
 
-function visitText(value, visitor) {
+function visitText(value, visitor, options = {}, path = []) {
   if (typeof value === "string") {
     visitor(value);
     return;
   }
   if (Array.isArray(value)) {
-    for (const entry of value) visitText(entry, visitor);
+    for (let index = 0; index < value.length; index += 1) {
+      visitText(value[index], visitor, options, [...path, index]);
+    }
     return;
   }
   if (!value || typeof value !== "object") return;
   for (const [key, entry] of Object.entries(value)) {
-    visitor(key);
-    visitText(entry, visitor);
+    const keyPath = [...path, key];
+    if (shouldProcessObjectKey(options.includeKeys, keyPath, key)) visitor(key);
+    visitText(entry, visitor, options, keyPath);
   }
 }
 

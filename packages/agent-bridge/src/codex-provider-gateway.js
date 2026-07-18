@@ -6,6 +6,7 @@ import { restoreText } from "@privacy-ai/sdk";
 import { createCodexImageSanitizer } from "./codex-image-adapter.js";
 import {
   codexSessionContext,
+  pruneCodexArgumentKeyMappings,
   restoreCodexCompactResponse,
   restoreCodexJsonResponse,
   sanitizeCodexMetadataHeaders,
@@ -236,6 +237,7 @@ async function handleRequestCore(request, response, context) {
         sessionMap = mergeInheritedSessionMap(sessionMap, parentThread.sessionMap);
       }
     }
+    sessionMap = pruneCodexArgumentKeyMappings(body, sessionMap);
 
     await commitCodexMutationHistory(body, identity.sessionKey, sessionMap, context);
 

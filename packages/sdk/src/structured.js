@@ -30,7 +30,7 @@ export async function sanitizeStructuredValue(value, options = {}) {
   const countTokens = text => estimatePrivacyTokens(text, options.tokenCounter);
 
   const slots = [];
-  const template = describeValue(value, slots);
+  const template = describeValue(value, slots, options);
   if (slots.length === 0) {
     // Preserve the established empty-value result shape. Callers that aggregate
     // batching metrics already know no model work occurred when no slots exist.
@@ -124,23 +124,39 @@ function throwIfAborted(signal) {
   throw error;
 }
 
-function describeValue(value, slots, options = {}) {
+function describeValue(value, slots, options = {}, path = []) {
   if (typeof value === "string") {
     const index = slots.length;
     slots.push({ value, kind: options.kind || "value" });
     return { type: "slot", index };
   }
   if (Array.isArray(value)) {
-    return { type: "array", items: value.map(entry => describeValue(entry, slots)) };
+    return {
+      type: "array",
+      items: value.map((entry, index) => describeValue(entry, slots, options, [...path, index]))
+    };
   }
   if (!value || typeof value !== "object") return { type: "literal", value };
 
   const entries = [];
   for (const [key, entry] of Object.entries(value)) {
-    const keyDescriptor = describeValue(key, slots, { kind: "key" });
-    entries.push({ key: keyDescriptor, value: describeValue(entry, slots) });
+    const keyPath = [...path, key];
+    const keyDescriptor = shouldSanitizeObjectKey(options.sanitizeObjectKeys, keyPath, key)
+      ? describeValue(key, slots, { ...options, kind: "key" }, keyPath)
+      : { type: "literal", value: key };
+    entries.push({
+      key: keyDescriptor,
+      value: describeValue(entry, slots, { ...options, kind: "value" }, keyPath)
+    });
   }
   return { type: "object", entries };
+}
+
+function shouldSanitizeObjectKey(policy, path, key) {
+  if (typeof policy === "function") {
+    return policy({ path: [...path], key }) !== false;
+  }
+  return policy !== false;
 }
 
 function rebuildValue(template, resolved) {

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   assertNoProtectedOriginalsInValue,
+  normalizeSessionMap,
   rebaseSessionAdditions,
   restoreValue,
   sanitizeKnownValue
@@ -75,6 +76,8 @@ const RESERVED_METADATA_FIELDS = new Set([
 const PROVIDER_IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]+$/;
 const PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH = 64;
 const DEFAULT_MAX_IMAGES_PER_REQUEST = 8;
+const SAFE_TOOL_ARGUMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/;
+const UNSAFE_TOOL_ARGUMENT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
 export async function sanitizeCodexRequestBody(body, options = {}) {
   throwIfAborted(options.signal);
@@ -169,6 +172,8 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     artifactType: artifactTypeForSlot(entry),
     artifactKey: artifactIdentityForSlot(entry),
     mutable: entry.mutable,
+    sanitizeObjectKeys: entry.sanitizeObjectKeys,
+    objectKeyPolicyKey: entry.objectKeyPolicyKey,
     label: entry.label
   })), {
     sanitizer: options.sanitizer,
@@ -272,13 +277,23 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
   for (const entry of slots) {
     const artifactType = artifactTypeForSlot(entry);
     const contentHash = modelVisibleContentHash(entry.value);
-    const cacheKey = modelVisibleCacheKey(entry.value, artifactType, policyFingerprint);
+    const cacheKey = modelVisibleCacheKey(
+      entry.value,
+      artifactType,
+      policyFingerprint,
+      entry.objectKeyPolicyKey ||
+        (entry.sanitizeObjectKeys === false ? "values-only" : "keys-and-values")
+    );
     cacheWrites.push([cacheKey, {
       cacheKey,
       contentHash,
       artifactType,
       policyFingerprint,
-      sessionMapAdditions: relevantSessionMap(entry.value, completeMap)
+      sessionMapAdditions: relevantSessionMap(
+        entry.value,
+        completeMap,
+        entry.sanitizeObjectKeys
+      )
     }]);
     itemRecords.push({
       slotKey: slotIdentity(entry),
@@ -377,6 +392,37 @@ export function codexSessionContext(body, fallbackSessionId, headers = {}) {
 
 export function codexSessionKey(body, fallbackSessionId, headers = {}) {
   return codexSessionContext(body, fallbackSessionId, headers).sessionKey;
+}
+
+/**
+ * Function-call argument object keys are executable protocol structure, not
+ * model-visible user values. Older gateways classified those keys and could
+ * persist mappings such as [PRIVATE_VALUE_9] -> cell_id. Remove only mappings
+ * whose originals are both observed as historical argument keys and declared
+ * by a tool schema in the same request. Detectable secret-like identifiers
+ * remain protected and are never auto-migrated.
+ */
+export function pruneCodexArgumentKeyMappings(body, sessionMap = {}) {
+  const normalized = normalizeSessionMap(sessionMap);
+  const argumentKeys = new Set();
+  collectFunctionArgumentKeys(body?.input, argumentKeys);
+  if (argumentKeys.size === 0) return normalized;
+
+  const schemaKeys = collectRequestToolSchemaKeys(body);
+  if (schemaKeys.size === 0) return normalized;
+
+  const recoverable = new Set();
+  for (const key of argumentKeys) {
+    const folded = key.toLocaleLowerCase("en-US");
+    if (schemaKeys.has(folded) && isRecoverableProtocolArgumentKey(key)) {
+      recoverable.add(folded);
+    }
+  }
+  if (recoverable.size === 0) return normalized;
+
+  return Object.fromEntries(Object.entries(normalized).filter(([, original]) =>
+    !recoverable.has(original.toLocaleLowerCase("en-US"))
+  ));
 }
 
 export function sanitizeCodexMetadataHeaders(headers = {}) {
@@ -1498,6 +1544,92 @@ function collectStringField(object, key, slots, path) {
   if (typeof object?.[key] === "string") slots.push({ path: [...path, key], value: object[key] });
 }
 
+function collectFunctionArgumentKeys(items, output) {
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    if (item?.type !== "function_call" || typeof item.arguments !== "string") continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(item.arguments);
+    } catch {
+      continue;
+    }
+    collectStructuredObjectKeys(parsed, output);
+  }
+}
+
+function collectStructuredObjectKeys(value, output) {
+  if (Array.isArray(value)) {
+    value.forEach(entry => collectStructuredObjectKeys(entry, output));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    output.add(key);
+    collectStructuredObjectKeys(entry, output);
+  }
+}
+
+function collectRequestToolSchemaKeys(body) {
+  const output = new Set();
+  collectToolListSchemaKeys(body?.tools, output);
+  if (!Array.isArray(body?.input)) return output;
+  for (const item of body.input) {
+    if (item?.type === "additional_tools" || item?.type === "tool_search_output") {
+      collectToolListSchemaKeys(item.tools, output);
+    }
+  }
+  return output;
+}
+
+function collectToolListSchemaKeys(tools, output) {
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    if (tool?.type === "function" || tool?.type === "tool_search") {
+      collectSchemaPropertyKeys(tool.parameters, output);
+    } else if (tool?.type === "namespace") {
+      collectToolListSchemaKeys(tool.tools, output);
+    }
+  }
+}
+
+function collectSchemaPropertyKeys(schema, output) {
+  if (!schema || typeof schema !== "object" || Array.isArray(schema)) return;
+  if (schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)) {
+    for (const key of Object.keys(schema.properties)) {
+      output.add(key.toLocaleLowerCase("en-US"));
+    }
+  }
+  for (const value of Object.values(schema)) {
+    if (Array.isArray(value)) {
+      value.forEach(entry => collectSchemaPropertyKeys(entry, output));
+    } else {
+      collectSchemaPropertyKeys(value, output);
+    }
+  }
+}
+
+function shouldSanitizeCodexArgumentKey({ key }) {
+  return !isRecoverableProtocolArgumentKey(key);
+}
+
+function isRecoverableProtocolArgumentKey(value) {
+  const text = String(value);
+  const folded = text.toLocaleLowerCase("en-US");
+  if (!SAFE_TOOL_ARGUMENT_KEY_PATTERN.test(text) || UNSAFE_TOOL_ARGUMENT_KEYS.has(folded)) {
+    return false;
+  }
+  try {
+    assertImmutableToolString(text, {}, {
+      protectedValueError: () => new Error("protected"),
+      invalidValueError: () => new Error("invalid")
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function collectJsonStringField(object, key, slots, path) {
   if (typeof object?.[key] !== "string") {
     throw gatewayError(
@@ -1514,7 +1646,13 @@ function collectJsonStringField(object, key, slots, path) {
       "PrivacyAI blocked invalid JSON in Codex function-call arguments."
     );
   }
-  slots.push({ path: [...path, key], value: parsed, jsonString: true });
+  slots.push({
+    path: [...path, key],
+    value: parsed,
+    jsonString: true,
+    sanitizeObjectKeys: shouldSanitizeCodexArgumentKey,
+    objectKeyPolicyKey: "codex-argument-keys-v1"
+  });
 }
 
 function restoreJsonString(value, sessionMap) {
@@ -1571,11 +1709,18 @@ function renameKeyAtPath(root, parentPath, oldKey, newKey) {
   });
 }
 
-function modelVisibleCacheKey(value, artifactType, policyFingerprint) {
+function modelVisibleCacheKey(
+  value,
+  artifactType,
+  policyFingerprint,
+  objectKeyPolicyKey = "keys-and-values"
+) {
   return createHash("sha256")
     .update(String(policyFingerprint))
     .update("\0")
     .update(String(artifactType))
+    .update("\0")
+    .update(String(objectKeyPolicyKey))
     .update("\0")
     .update(JSON.stringify(value))
     .digest("hex");
@@ -1798,9 +1943,9 @@ function mergeDetectedMappings(completeMap, aggregateAdditions, additions) {
   Object.assign(aggregateAdditions, rebased.sessionMap);
 }
 
-function relevantSessionMap(value, sessionMap) {
+function relevantSessionMap(value, sessionMap, includeObjectKeys = true) {
   const strings = [];
-  collectStrings(value, strings);
+  collectStrings(value, strings, includeObjectKeys);
   const normalizedStrings = strings.map(text => text.toLocaleLowerCase("en-US"));
   return Object.fromEntries(Object.entries(sessionMap || {}).filter(([, original]) => {
     if (typeof original !== "string" || original.length === 0) return false;
@@ -1809,19 +1954,25 @@ function relevantSessionMap(value, sessionMap) {
   }));
 }
 
-function collectStrings(value, output) {
+function collectStrings(value, output, includeObjectKeys = true, path = []) {
   if (typeof value === "string") {
     output.push(value);
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach(entry => collectStrings(entry, output));
+    value.forEach((entry, index) =>
+      collectStrings(entry, output, includeObjectKeys, [...path, index])
+    );
     return;
   }
   if (!value || typeof value !== "object") return;
   for (const [key, entry] of Object.entries(value)) {
-    output.push(key);
-    collectStrings(entry, output);
+    const keyPath = [...path, key];
+    const includeKey = typeof includeObjectKeys === "function"
+      ? includeObjectKeys({ path: keyPath, key }) !== false
+      : includeObjectKeys !== false;
+    if (includeKey) output.push(key);
+    collectStrings(entry, output, includeObjectKeys, keyPath);
   }
 }
 

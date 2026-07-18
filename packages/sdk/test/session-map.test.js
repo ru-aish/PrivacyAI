@@ -410,6 +410,34 @@ test("sanitizeStructuredValue classifies private values used as object keys", as
   });
 });
 
+test("sanitizeStructuredValue preserves protocol object keys when key sanitization is disabled", async () => {
+  const privateEmail = "private-contact@example.test";
+  const calls = [];
+  const result = await sanitizeStructuredValue({
+    cell_id: "3",
+    nested: { owner: privateEmail }
+  }, {
+    sanitizeObjectKeys: false,
+    sanitizer: async text => {
+      calls.push(text);
+      const found = text.includes(privateEmail);
+      return {
+        sanitizedPrompt: found ? text.replaceAll(privateEmail, "[EMAIL_1]") : text,
+        sessionMap: found ? { "[EMAIL_1]": privateEmail } : {}
+      };
+    }
+  });
+
+  assert.equal(calls.some(text => text.includes("cell_id")), false);
+  assert.equal(calls.some(text => text.includes("nested")), false);
+  assert.equal(calls.some(text => text.includes("owner")), false);
+  assert.deepEqual(result.value, {
+    cell_id: "3",
+    nested: { owner: "[EMAIL_1]" }
+  });
+  assert.deepEqual(result.sessionMapAdditions, { "[EMAIL_1]": privateEmail });
+});
+
 test("chunk overlap contains every accepted 512-character private span", async () => {
   const secret = "S".repeat(512);
   const input = "x".repeat(1420) + secret + "y".repeat(1000);

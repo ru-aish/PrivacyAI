@@ -48,6 +48,53 @@ test("duplicate and cached artifacts avoid repeat classification while preservin
   assert.equal(second.metrics.deduplicatedCount, 0);
 });
 
+test("values-only structured slots preserve object keys and use distinct cache identities", async () => {
+  const calls = [];
+  const sanitizer = async text => {
+    calls.push(text);
+    let sanitizedPrompt = text;
+    const sessionMap = {};
+    if (text.includes("cell_id")) {
+      sanitizedPrompt = sanitizedPrompt.replaceAll("cell_id", "[PRIVATE_VALUE_9]");
+      sessionMap["[PRIVATE_VALUE_9]"] = "cell_id";
+    }
+    if (text.includes("SECRET1")) {
+      sanitizedPrompt = sanitizedPrompt.replaceAll("SECRET1", "[PRIVATE_1]");
+      sessionMap["[PRIVATE_1]"] = "SECRET1";
+    }
+    return { sanitizedPrompt, sessionMap };
+  };
+  const cache = new Map();
+  const structured = {
+    value: { cell_id: "3", note: "SECRET1" },
+    slotKey: "arguments/0",
+    artifactKey: "arguments/0",
+    artifactType: "message",
+    sanitizeObjectKeys: false
+  };
+
+  const first = await sanitizeModelVisibleArtifacts([structured], {
+    sanitizer,
+    cache: { get: key => cache.get(key) }
+  });
+  for (const [key, value] of first.cacheWrites) cache.set(key, value);
+
+  assert.equal(calls.some(text => text.includes("cell_id")), false);
+  assert.deepEqual(first.values[0], { cell_id: "3", note: "[PRIVATE_1]" });
+  assert.equal(Object.values(first.sessionMap).includes("cell_id"), false);
+
+  const second = await sanitizeModelVisibleArtifacts([
+    { ...structured, sanitizeObjectKeys: true }
+  ], {
+    sanitizer,
+    cache: { get: key => cache.get(key) }
+  });
+
+  assert.equal(calls.some(text => text.includes("cell_id")), true);
+  assert.equal(Object.hasOwn(second.values[0], "[PRIVATE_VALUE_9]"), true);
+  assert.equal(second.metrics.cacheHitCount, 0);
+});
+
 test("packing is deterministic, preserves adjacent items, and safely chunks large artifacts", async () => {
   const mock = sanitizerCalls();
   const values = Array.from({ length: 6 }, (_, index) => `SECRET${index}-${"x".repeat(260)}`);
