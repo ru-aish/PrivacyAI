@@ -75,3 +75,42 @@ test("Codex CLI sanitizes malformed diagnostic fields", async () => {
     "[PrivacyAI] Codex gateway failure: gateway (PRIVACYAI_CODEX_GATEWAY_FAILURE).\n"
   );
 });
+
+test("Codex CLI defers TUI diagnostics but keeps non-TTY output immediate", async () => {
+  const stderr = new PassThrough();
+  Object.defineProperty(stderr, "isTTY", { value: true });
+  let text = "";
+  stderr.on("data", chunk => { text += chunk.toString(); });
+  await runPrivacyAiCli(["codex"], {
+    stderr,
+    launchNativeTui: async (_flavor, _args, options) => {
+      options.onGatewayError({ code: "PRIVACYAI_CODEX_UPSTREAM_RESET", category: "upstream_reset" });
+      assert.equal(text, "");
+      return 0;
+    }
+  });
+  assert.match(text, /upstream_reset \(PRIVACYAI_CODEX_UPSTREAM_RESET\)/);
+});
+
+
+test("Codex CLI flushes deferred TUI diagnostics when the launcher fails", async () => {
+  const stderr = new PassThrough();
+  Object.defineProperty(stderr, "isTTY", { value: true });
+  let text = "";
+  stderr.on("data", chunk => { text += chunk.toString(); });
+
+  const code = await runPrivacyAiCli(["codex"], {
+    stderr,
+    launchNativeTui: async (_flavor, _args, options) => {
+      options.onGatewayError({
+        code: "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT",
+        category: "timeout"
+      });
+      throw new Error("launcher failed safely");
+    }
+  });
+
+  assert.equal(code, 1);
+  assert.match(text, /timeout \(PRIVACYAI_CODEX_UPSTREAM_TIMEOUT\)/);
+  assert.match(text, /launcher failed safely/);
+});

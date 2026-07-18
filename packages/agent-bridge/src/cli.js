@@ -15,7 +15,26 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
       case "codex": {
         const launchOptions = { ...options.launchOptions };
         if (command === "codex" && typeof launchOptions.onGatewayError !== "function") {
-          launchOptions.onGatewayError = diagnostic => writeGatewayDiagnostic(stderr, diagnostic);
+          const render = diagnostic => writeGatewayDiagnostic(stderr, diagnostic);
+          // Codex owns an alternate-screen TUI while its child is running. Do
+          // not write through that screen; flush safe, structured summaries
+          // when the launcher gives control back. Pipes stay immediately useful.
+          if (stderr.isTTY) {
+            const deferred = [];
+            launchOptions.onGatewayError = diagnostic => deferred.push(diagnostic);
+            try {
+              return await (options.launchNativeTui || launchNativeTui)(command, args, launchOptions);
+            } finally {
+              for (const diagnostic of deferred) {
+                try {
+                  render(diagnostic);
+                } catch {
+                  // Diagnostic rendering must never replace the launcher result.
+                }
+              }
+            }
+          }
+          launchOptions.onGatewayError = render;
         }
         return await (options.launchNativeTui || launchNativeTui)(command, args, launchOptions);
       }

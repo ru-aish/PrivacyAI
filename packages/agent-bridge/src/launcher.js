@@ -160,7 +160,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         onSanitizerArtifactComplete: options.onSanitizerArtifactComplete,
         chatgptUpstream: options.chatgptUpstream,
         apiUpstream: options.apiUpstream,
-        allowInsecureTestUpstream: options.allowInsecureTestUpstream
+        allowInsecureTestUpstream: options.allowInsecureTestUpstream,
+        upstreamTimeoutMs: options.upstreamTimeoutMs
       });
       const protectedArgs = buildCodexProviderArgs(gateway.baseURL, options);
 

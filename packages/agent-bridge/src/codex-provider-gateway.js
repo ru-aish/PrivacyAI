@@ -19,7 +19,7 @@ import {
 import {
   gatewayError,
   publicGatewayFailure,
-  safeGatewayDiagnostic
+  createGatewayDiagnosticReporter
 } from "./gateway-error.js";
 import { SessionVault } from "./session-vault.js";
 
@@ -70,6 +70,11 @@ export async function startCodexProviderGateway(options = {}) {
   const serial = new KeyedSerialQueue();
   const sessionCaches = new Map();
   const sockets = new Set();
+  const reportDiagnostic = createGatewayDiagnosticReporter(options.onGatewayError, {
+    maxEntries: options.diagnosticDedupMaxEntries,
+    windowMs: options.diagnosticDedupWindowMs,
+    now: options.diagnosticNow
+  });
   const server = http.createServer((request, response) => {
     const requestContext = {
       ...options,
@@ -79,10 +84,10 @@ export async function startCodexProviderGateway(options = {}) {
       verificationStore,
       policyFingerprint,
       serial,
-      sessionCaches
+      sessionCaches,
+      reportDiagnostic
     };
     handleRequest(request, response, requestContext).catch(error => {
-      if (!isCancellationError(error)) reportGatewayError(requestContext, error, "request");
       writeGatewayFailure(response, error);
     });
   });
@@ -137,11 +142,26 @@ export async function startCodexProviderGateway(options = {}) {
 
 async function handleRequest(request, response, context) {
   const lifecycle = createDownstreamLifecycle(request, response);
+  const requestContext = {
+    ...context,
+    requestSignal: lifecycle.signal,
+    isDownstreamClosed: lifecycle.downstreamClosed
+  };
   try {
-    return await handleRequestCore(request, response, {
-      ...context,
-      requestSignal: lifecycle.signal
-    });
+    return await handleRequestCore(request, response, requestContext);
+  } catch (error) {
+    const failure = lifecycle.downstreamClosed() && !isCancellationError(error)
+      ? gatewayError("PRIVACYAI_CODEX_CLIENT_DISCONNECTED", "PrivacyAI stopped the Codex request because the client disconnected.")
+      : error;
+    if (!isCancellationError(failure)) {
+      reportGatewayError(requestContext, failure, {
+        route: requestContext.route,
+        phase: requestContext.phase || "request",
+        retryCount: 0,
+        downstreamClosed: lifecycle.downstreamClosed()
+      });
+    }
+    throw failure;
   } finally {
     lifecycle.cleanup();
   }
@@ -156,6 +176,7 @@ async function handleRequestCore(request, response, context) {
   }
 
   const suffix = url.pathname.slice(prefix.length);
+  context.route = safeRouteIdentifier(suffix);
   if (suffix === "/health" && request.method === "GET") {
     return writeJson(response, 200, { ok: true });
   }
@@ -276,8 +297,11 @@ async function proxyModels(request, response, context, suffix, search) {
   const upstream = upstreamUrl(request.headers, context, suffix, search);
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
   const headers = upstreamHeaders(sanitizedHeaders, upstream, null);
+  context.phase = "upstream_connect";
   const upstreamResponse = await makeUpstreamRequest(upstream, request.method, headers, null, {
-    downstream: response
+    downstream: response,
+    isDownstreamClosed: context.isDownstreamClosed,
+    timeoutMs: context.upstreamTimeoutMs
   });
   assertIdentityResponseEncoding(upstreamResponse);
   const statusCode = upstreamResponse.statusCode || 502;
@@ -327,8 +351,11 @@ async function proxyTransformed(
   const upstream = upstreamUrl(request.headers, context, suffix, search);
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
   const headers = upstreamHeaders(sanitizedHeaders, upstream, body.length);
+  context.phase = "upstream_connect";
   const upstreamResponse = await makeUpstreamRequest(upstream, "POST", headers, body, {
-    downstream: response
+    downstream: response,
+    isDownstreamClosed: context.isDownstreamClosed,
+    timeoutMs: context.upstreamTimeoutMs
   });
 
   assertIdentityResponseEncoding(upstreamResponse);
@@ -338,6 +365,7 @@ async function proxyTransformed(
   const headerlessExpectedSse =
     expectsSse && contentType.trim() === "" && statusCode >= 200 && statusCode < 300;
   if (contentType.includes("text/event-stream") || headerlessExpectedSse) {
+    context.phase = "sse";
     await proxySseResponse(response, upstreamResponse, context, sessionMap, statusCode, {
       forceContentType: headerlessExpectedSse
     });
@@ -560,7 +588,9 @@ function makeUpstreamRequest(url, method, headers, body, options = {}) {
       if (settled) return;
       settled = true;
       cleanup();
-      reject(error);
+      reject(options.isDownstreamClosed?.()
+        ? gatewayError("PRIVACYAI_CODEX_CLIENT_DISCONNECTED", "PrivacyAI stopped the Codex request because the client disconnected.")
+        : error);
     };
     const onDownstreamClose = () => {
       if (downstream?.writableEnded || request.destroyed) return;
@@ -569,6 +599,13 @@ function makeUpstreamRequest(url, method, headers, body, options = {}) {
 
     if (downstream) downstream.once("close", onDownstreamClose);
     request.once("error", onError);
+    const timeoutMs = Number(options.timeoutMs);
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      request.setTimeout(timeoutMs, () => {
+        const error = Object.assign(new Error("PrivacyAI upstream request timed out."), { code: "ETIMEDOUT" });
+        request.destroy(error);
+      });
+    }
     request.once("response", upstreamResponse => {
       if (settled) {
         upstreamResponse.destroy();
@@ -606,8 +643,10 @@ function applyLocalResponseSecurityHeaders(response) {
 
 function createDownstreamLifecycle(request, response) {
   const controller = new AbortController();
+  let downstreamClosed = false;
   const abort = () => {
     if (controller.signal.aborted || response.writableEnded) return;
+    downstreamClosed = true;
     controller.abort(gatewayError(
       "PRIVACYAI_CODEX_CLIENT_DISCONNECTED",
       "PrivacyAI stopped the Codex request because the client disconnected."
@@ -617,6 +656,7 @@ function createDownstreamLifecycle(request, response) {
   response.once("close", abort);
   return {
     signal: controller.signal,
+    downstreamClosed: () => downstreamClosed,
     cleanup() {
       request.off("aborted", abort);
       response.off("close", abort);
@@ -720,13 +760,15 @@ function safeContentType(value) {
     : "invalid";
 }
 
-function reportGatewayError(context, error, phase) {
-  if (typeof context?.onGatewayError !== "function") return;
-  try {
-    context.onGatewayError(safeGatewayDiagnostic(error, phase));
-  } catch {
-    // Diagnostic callbacks are observational only and must not alter the boundary.
-  }
+function reportGatewayError(context, error, metadata) {
+  context?.reportDiagnostic?.(error, metadata);
+}
+
+function safeRouteIdentifier(suffix) {
+  if (suffix === "/responses") return "responses";
+  if (suffix === "/responses/compact") return "responses_compact";
+  if (suffix === "/models") return "models";
+  return "gateway";
 }
 
 function writeGatewayFailure(response, error) {

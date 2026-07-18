@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { restoreValue } from "@privacy-ai/sdk";
+import { createGatewayDiagnosticReporter, publicGatewayFailure } from "../src/gateway-error.js";
 
 import {
   CodexSseRestorer,
@@ -1091,6 +1092,7 @@ test("headerless non-SSE success fails before response commitment", async t => {
 });
 
 test("downstream disconnect cancels the active upstream SSE request", async t => {
+  const diagnostics = [];
   let closeUpstream;
   const upstreamClosed = new Promise(resolve => {
     closeUpstream = resolve;
@@ -1122,6 +1124,7 @@ test("downstream disconnect cancels the active upstream SSE request", async t =>
 
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
+    onGatewayError: diagnostic => diagnostics.push(diagnostic),
     baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-disconnect-")),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
@@ -1158,6 +1161,101 @@ test("downstream disconnect cancels the active upstream SSE request", async t =>
       setTimeout(() => reject(new Error("upstream stream remained open after client disconnect")), 1500)
     )
   ]);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(diagnostics, []);
+});
+
+test("idle loopback upstream reset is classified once without leaking endpoint details", async t => {
+  const diagnostics = [];
+  const upstream = await startServer((request, _response) => {
+    request.resume();
+    request.socket.destroy(Object.assign(new Error("private upstream endpoint"), { code: "ECONNRESET" }));
+  });
+  t.after(() => upstream.close());
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    onGatewayError: diagnostic => diagnostics.push(diagnostic),
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-idle-reset-")),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sampleRequest())
+  });
+  assert.equal(response.status, 502);
+  assert.equal((await response.json()).error.code, "PRIVACYAI_CODEX_UPSTREAM_RESET");
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(Object.keys(diagnostics[0]).sort(), [
+    "category", "code", "downstreamClosed", "networkCode", "phase", "retryCount", "route", "timestamp"
+  ]);
+  assert.equal(diagnostics[0].route, "responses");
+  assert.equal(diagnostics[0].networkCode, "ECONNRESET");
+  assert.equal(diagnostics[0].downstreamClosed, false);
+  assert.equal(JSON.stringify(diagnostics).includes("127.0.0.1"), false);
+});
+
+test("loopback upstream timeout is reported with safe timeout metadata", async t => {
+  const diagnostics = [];
+  const upstream = await startServer(request => request.resume());
+  t.after(() => upstream.close());
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    onGatewayError: value => diagnostics.push(value),
+    upstreamTimeoutMs: 20,
+    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-timeout-")),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`, allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sampleRequest())
+  });
+  assert.equal((await response.json()).error.code, "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT");
+  assert.equal(diagnostics[0].networkCode, "ETIMEDOUT");
+  assert.equal(diagnostics[0].phase, "upstream_connect");
+});
+
+test("network diagnostic codes and bounded expiry-aware deduplication remain distinct", () => {
+  assert.deepEqual(publicGatewayFailure({ code: "ETIMEDOUT" }), {
+    code: "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT", category: "timeout"
+  });
+  assert.deepEqual(publicGatewayFailure({ code: "EPIPE" }), {
+    code: "PRIVACYAI_CODEX_UPSTREAM_BROKEN_PIPE", category: "broken_pipe"
+  });
+  assert.deepEqual(publicGatewayFailure({ code: "EAI_AGAIN" }), {
+    code: "PRIVACYAI_CODEX_UPSTREAM_DNS", category: "dns"
+  });
+  let clock = 1_000;
+  const diagnostics = [];
+  const report = createGatewayDiagnosticReporter(value => diagnostics.push(value), {
+    now: () => clock, windowMs: 10, maxEntries: 2
+  });
+  assert.equal(report({ code: "ECONNRESET", message: PRIVATE_EMAIL }, { route: "responses", phase: "upstream_connect" }), true);
+  assert.equal(report({ code: "ECONNRESET" }, { route: "responses", phase: "upstream_connect" }), false);
+  assert.equal(report({ code: "ECONNRESET" }, { route: "models", phase: "upstream_connect" }), true);
+  assert.equal(report({ code: "EPIPE" }, { route: "responses", phase: "upstream_connect" }), true);
+  assert.equal(diagnostics.length, 3, "bounded eviction keeps distinct events");
+  clock += 11;
+  assert.equal(report({ code: "ECONNRESET" }, { route: "responses", phase: "upstream_connect" }), true);
+  assert.equal(diagnostics.length, 4, "expired events surface again");
+  clock -= 20;
+  assert.equal(report({ code: "ECONNRESET" }, { route: "responses", phase: "upstream_connect" }), true);
+  assert.equal(diagnostics.length, 5, "backward clocks do not suppress future diagnostics");
+  assert.equal(report({ code: "PRIVACYAI_CODEX_CLIENT_DISCONNECTED" }, { route: "responses" }), false);
+
+  for (const failingClock of [
+    () => { throw new Error("clock failure"); },
+    () => Infinity
+  ]) {
+    const fallbackDiagnostics = [];
+    const fallbackReport = createGatewayDiagnosticReporter(
+      value => fallbackDiagnostics.push(value),
+      { now: failingClock }
+    );
+    assert.doesNotThrow(() => fallbackReport({ code: "EPIPE" }, { route: "responses" }));
+    assert.equal(fallbackDiagnostics.length, 1);
+    assert.match(fallbackDiagnostics[0].timestamp, /^\d{4}-\d{2}-\d{2}T/);
+  }
 });
 
 test("downstream disconnect aborts in-flight sanitization before any upstream request", async t => {
@@ -2088,11 +2186,7 @@ test("gateway diagnostics expose only allowlisted structured fields", async t =>
   assert.equal(response.status, 502);
   const body = await response.json();
   assert.equal(body.error.code, "PRIVACYAI_CODEX_GATEWAY_FAILURE");
-  assert.deepEqual(diagnostics, [{
-    phase: "request",
-    code: "PRIVACYAI_CODEX_GATEWAY_FAILURE",
-    category: "gateway"
-  }]);
+  assertDiagnostic(diagnostics[0], "PRIVACYAI_CODEX_GATEWAY_FAILURE", "gateway");
   const serialized = JSON.stringify(diagnostics);
   assert.equal(serialized.includes(PRIVATE_EMAIL), false);
   assert.equal(serialized.includes(PRIVATE_KEY), false);
@@ -2123,11 +2217,7 @@ test("gateway categorizes local provider failures without exposing provider deta
   });
   assert.equal(response.status, 502);
   assert.equal((await response.json()).error.code, "PRIVACYAI_LOCAL_MODEL_FAILURE");
-  assert.deepEqual(diagnostics, [{
-    phase: "request",
-    code: "PRIVACYAI_LOCAL_MODEL_FAILURE",
-    category: "local_model"
-  }]);
+  assertDiagnostic(diagnostics[0], "PRIVACYAI_LOCAL_MODEL_FAILURE", "local_model");
   assert.equal(JSON.stringify(diagnostics).includes(PRIVATE_EMAIL), false);
   assert.equal(JSON.stringify(diagnostics).includes(PRIVATE_KEY), false);
 });
@@ -2158,9 +2248,16 @@ test("stream failures emit exactly one structured gateway diagnostic", async t =
   await response.text().catch(() => "");
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(diagnostics.length, 1);
-  assert.deepEqual(diagnostics[0], {
-    phase: "request",
-    code: "PRIVACYAI_CODEX_INVALID_SSE",
-    category: "upstream"
-  });
+  assertDiagnostic(diagnostics[0], "PRIVACYAI_CODEX_INVALID_SSE", "upstream", "sse");
 });
+
+function assertDiagnostic(diagnostic, code, category, phase = "request") {
+  assert.equal(diagnostic.code, code);
+  assert.equal(diagnostic.category, category);
+  assert.equal(diagnostic.phase, phase);
+  assert.match(diagnostic.timestamp, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(diagnostic.networkCode, "NONE");
+  assert.equal(diagnostic.retryCount, 0);
+  assert.equal(diagnostic.downstreamClosed, false);
+  assert.ok(["responses", "gateway"].includes(diagnostic.route));
+}
