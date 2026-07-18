@@ -3,6 +3,11 @@ import { chmod, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import {
+  resolveContextStoreBusyTimeout,
+  retryContextStoreOperation
+} from "./context-store-retry.js";
+
 const SCHEMA_VERSION = 3;
 const DEFAULT_MAX_VERIFIED_ITEMS = 10000;
 const DEFAULT_MAX_THREAD_ITEMS = 50000;
@@ -37,14 +42,30 @@ export async function openContextVerificationStore(options = {}) {
   );
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
 
+  const busyTimeoutMs = resolveContextStoreBusyTimeout(
+    options.verificationBusyTimeoutMs
+  );
   let database;
   try {
-    database = new sqlite.DatabaseSync(path);
-    database.exec("PRAGMA foreign_keys = ON");
-    database.exec("PRAGMA journal_mode = WAL");
-    database.exec("PRAGMA synchronous = FULL");
-    database.exec("PRAGMA busy_timeout = 10000");
-    initializeSchema(database);
+    database = await retryContextStoreOperation(() => {
+      let candidate;
+      try {
+        candidate = new sqlite.DatabaseSync(path);
+        candidate.exec("PRAGMA foreign_keys = ON");
+        candidate.exec("PRAGMA journal_mode = WAL");
+        candidate.exec("PRAGMA synchronous = FULL");
+        candidate.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
+        initializeSchema(candidate);
+        return candidate;
+      } catch (error) {
+        try {
+          candidate?.close();
+        } catch {
+          // Preserve the original database error.
+        }
+        throw error;
+      }
+    }, { timeoutMs: options.verificationRetryTimeoutMs });
     await chmod(path, 0o600);
   } catch (error) {
     try {

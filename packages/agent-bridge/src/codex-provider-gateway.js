@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import http from "node:http";
-import https from "node:https";
 
 import { restoreText } from "@privacy-ai/sdk";
 import { createCodexImageSanitizer } from "./codex-image-adapter.js";
@@ -14,6 +13,15 @@ import {
 } from "./codex-request-transform.js";
 import { CodexSseRestorer } from "./codex-sse-transform.js";
 import {
+  closeHttpServer,
+  listenOnHost,
+  nextHttpChunk,
+  readBoundedHttpBody,
+  requestCodexUpstream,
+  resolvePositiveDuration
+} from "./codex-http-transport.js";
+import { retryContextStoreOperation } from "./context-store-retry.js";
+import {
   openContextVerificationStore,
   verificationFingerprint
 } from "./context-verification-store.js";
@@ -26,11 +34,15 @@ import {
   commitCodexMutationHistory,
   stageCompletedCodexToolCalls
 } from "./codex-mutation-tracker.js";
+import { runCleanupSteps } from "./resource-cleanup.js";
 import { SessionVault } from "./session-vault.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 30_000;
+const DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS = 60_000;
+const DEFAULT_VERIFICATION_RETRY_TIMEOUT_MS = 2500;
 const MAX_ALIASES_PER_ORIGINAL = 8;
 const CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex";
 const API_UPSTREAM = "https://api.openai.com/v1";
@@ -48,16 +60,42 @@ const HOP_BY_HOP_HEADERS = new Set([
   "content-encoding"
 ]);
 
+export function resolveCodexGatewayTimeouts(options = {}) {
+  return Object.freeze({
+    responseHeadersMs: resolvePositiveDuration(
+      options.upstreamTimeoutMs,
+      DEFAULT_UPSTREAM_TIMEOUT_MS,
+      "Codex upstream response-header timeout"
+    ),
+    responseIdleMs: resolvePositiveDuration(
+      options.upstreamIdleTimeoutMs,
+      DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS,
+      "Codex upstream idle timeout"
+    )
+  });
+}
+
 export async function startCodexProviderGateway(options = {}) {
   if (typeof options.sanitizer !== "function") {
     throw new TypeError("Codex provider gateway requires a local sanitizer function.");
   }
 
+  const timeouts = resolveCodexGatewayTimeouts(options);
   const nonce = options.nonce || randomBytes(24).toString("hex");
   const vault = options.vault || new SessionVault(options);
   const imageSanitizer = options.imageSanitizer || createCodexImageSanitizer(options.imageSanitizerOptions);
   const ownsImageSanitizer = !options.imageSanitizer;
-  const verificationStore = await openContextVerificationStore(options);
+  let verificationStore;
+  try {
+    verificationStore = await openContextVerificationStore(options);
+  } catch (error) {
+    await closeGatewayResources({
+      imageSanitizer,
+      ownsImageSanitizer,
+      primaryError: error
+    });
+    throw error;
+  }
   const ownsVerificationStore = !options.verificationStore;
   const stablePolicyFingerprint =
     options.policyFingerprint || options.sanitizer.identity?.fingerprint;
@@ -75,24 +113,33 @@ export async function startCodexProviderGateway(options = {}) {
   const serial = new KeyedSerialQueue();
   const sessionCaches = new Map();
   const sockets = new Set();
+  const maintenance = { verificationRequestCount: 0 };
   const reportDiagnostic = createGatewayDiagnosticReporter(options.onGatewayError, {
     maxEntries: options.diagnosticDedupMaxEntries,
     windowMs: options.diagnosticDedupWindowMs,
     now: options.diagnosticNow
   });
+  const sharedContext = {
+    ...options,
+    nonce,
+    vault,
+    imageSanitizer,
+    verificationStore,
+    policyFingerprint,
+    serial,
+    sessionCaches,
+    maintenance,
+    reportDiagnostic,
+    upstreamTimeoutMs: timeouts.responseHeadersMs,
+    upstreamIdleTimeoutMs: timeouts.responseIdleMs,
+    verificationRetryTimeoutMs: resolvePositiveDuration(
+      options.verificationRetryTimeoutMs,
+      DEFAULT_VERIFICATION_RETRY_TIMEOUT_MS,
+      "context-store retry timeout"
+    )
+  };
   const server = http.createServer((request, response) => {
-    const requestContext = {
-      ...options,
-      nonce,
-      vault,
-      imageSanitizer,
-      verificationStore,
-      policyFingerprint,
-      serial,
-      sessionCaches,
-      reportDiagnostic
-    };
-    handleRequest(request, response, requestContext).catch(error => {
+    handleRequest(request, response, sharedContext).catch(error => {
       writeGatewayFailure(response, error);
     });
   });
@@ -105,45 +152,55 @@ export async function startCodexProviderGateway(options = {}) {
   });
 
   try {
-    await listen(server, options.port || 0, LOOPBACK_HOST);
+    await listenOnHost(server, options.port || 0, LOOPBACK_HOST);
   } catch (error) {
-    try {
-      if (ownsImageSanitizer) await imageSanitizer.close();
-    } finally {
-      if (ownsVerificationStore) verificationStore.close();
-    }
+    await closeGatewayResources({
+      imageSanitizer,
+      ownsImageSanitizer,
+      verificationStore,
+      ownsVerificationStore,
+      primaryError: error
+    });
     throw error;
   }
   const address = server.address();
   if (!address || typeof address === "string") {
-    await closeServer(server, sockets);
-    try {
-      if (ownsImageSanitizer) await imageSanitizer.close();
-    } finally {
-      if (ownsVerificationStore) verificationStore.close();
-    }
-    throw new Error("PrivacyAI could not determine the Codex gateway address.");
+    const error = new Error("PrivacyAI could not determine the Codex gateway address.");
+    await closeGatewayResources({
+      server,
+      sockets,
+      imageSanitizer,
+      ownsImageSanitizer,
+      verificationStore,
+      ownsVerificationStore,
+      primaryError: error
+    });
+    throw error;
   }
 
-  let closed = false;
+  let closePromise = null;
   return {
     host: LOOPBACK_HOST,
     port: address.port,
     nonce,
-    baseURL: `http://${LOOPBACK_HOST}:${address.port}/${nonce}`,
-    async close() {
-      if (closed) return;
-      closed = true;
-      sessionCaches.clear();
-      await closeServer(server, sockets);
-      try {
-        if (ownsImageSanitizer) await imageSanitizer.close();
-      } finally {
-        if (ownsVerificationStore) verificationStore.close();
-      }
+    baseURL: "http://" + LOOPBACK_HOST + ":" + address.port + "/" + nonce,
+    close() {
+      closePromise ||= (async () => {
+        sessionCaches.clear();
+        await closeGatewayResources({
+          server,
+          sockets,
+          imageSanitizer,
+          ownsImageSanitizer,
+          verificationStore,
+          ownsVerificationStore
+        });
+      })();
+      return closePromise;
     }
   };
 }
+
 
 async function handleRequest(request, response, context) {
   const lifecycle = createDownstreamLifecycle(request, response);
@@ -204,7 +261,7 @@ async function handleRequestCore(request, response, context) {
     return writeJson(response, 415, { error: "PrivacyAI requires JSON Codex provider requests." });
   }
 
-  const rawBody = await readBody(
+  const rawBody = await readBoundedHttpBody(
     request,
     Number(context.maxRequestBytes || DEFAULT_MAX_REQUEST_BYTES),
     { destroyOnLimit: false }
@@ -221,7 +278,10 @@ async function handleRequestCore(request, response, context) {
   const transformed = await context.serial.run(identity.sessionKey, async () => {
     throwIfAborted(context.requestSignal);
     const currentVault = await context.vault.load(identity.sessionKey);
-    const currentThread = context.verificationStore.loadThread(identity.sessionKey);
+    const currentThread = await runVerificationStoreOperation(
+      context,
+      () => context.verificationStore.loadThread(identity.sessionKey)
+    );
     const currentSessionMap = mergeInheritedSessionMap(
       currentVault?.sessionMap || {},
       currentThread.sessionMap || {}
@@ -229,7 +289,10 @@ async function handleRequestCore(request, response, context) {
     let sessionMap = { ...currentSessionMap };
     for (const parentSessionKey of identity.parentSessionKeys) {
       const parentVault = await context.vault.load(parentSessionKey);
-      const parentThread = context.verificationStore.loadThread(parentSessionKey);
+      const parentThread = await runVerificationStoreOperation(
+        context,
+        () => context.verificationStore.loadThread(parentSessionKey)
+      );
       if (parentVault?.sessionMap) {
         sessionMap = mergeInheritedSessionMap(sessionMap, parentVault.sessionMap);
       }
@@ -262,31 +325,37 @@ async function handleRequestCore(request, response, context) {
     if (!sessionMapsEqual(currentVault?.sessionMap || {}, completeMap)) {
       await context.vault.save(identity.sessionKey, completeMap);
     }
-    context.verificationStore.saveThread(identity.sessionKey, {
-      parentSessionKeys: identity.parentSessionKeys,
-      sessionMap: completeMap,
-      policyFingerprint: context.policyFingerprint
-    });
+    await runVerificationStoreOperation(context, () =>
+      context.verificationStore.saveThread(identity.sessionKey, {
+        parentSessionKeys: identity.parentSessionKeys,
+        sessionMap: completeMap,
+        policyFingerprint: context.policyFingerprint
+      })
+    );
     if (typeof context.onSanitizedRequest === "function") {
       await context.onSanitizedRequest(result.body, {
         sessionKey: identity.sessionKey,
         route: suffix
       });
     }
-    commitCacheWrites(
+    await runVerificationStoreOperation(context, () => commitCacheWrites(
       cache,
       result.cacheWrites,
       Number(context.maxCacheEntriesPerSession || 2048),
       context.verificationStore
-    );
+    ));
     for (const item of result.itemRecords || []) {
-      context.verificationStore.recordThreadItem({
-        ...item,
-        sessionKey: identity.sessionKey
-      });
+      await runVerificationStoreOperation(context, () =>
+        context.verificationStore.recordThreadItem({
+          ...item,
+          sessionKey: identity.sessionKey
+        })
+      );
     }
-    context.verificationRequestCount = (context.verificationRequestCount || 0) + 1;
-    if (context.verificationRequestCount % 100 === 0) context.verificationStore.prune();
+    context.maintenance.verificationRequestCount += 1;
+    if (context.maintenance.verificationRequestCount % 100 === 0) {
+      await runVerificationStoreOperation(context, () => context.verificationStore.prune());
+    }
     return {
       body: result.body,
       sessionMap: completeMap,
@@ -313,17 +382,18 @@ async function proxyModels(request, response, context, suffix, search) {
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
   const headers = upstreamHeaders(sanitizedHeaders, upstream, null);
   context.phase = "upstream_connect";
-  const upstreamResponse = await makeUpstreamRequest(upstream, request.method, headers, null, {
+  const upstreamResponse = await requestCodexUpstream(upstream, request.method, headers, null, {
     downstream: response,
     isDownstreamClosed: context.isDownstreamClosed,
     timeoutMs: context.upstreamTimeoutMs
   });
+  context.phase = "upstream_response";
   assertIdentityResponseEncoding(upstreamResponse);
   const statusCode = upstreamResponse.statusCode || 502;
-  const raw = await readBody(
+  const raw = await readBoundedHttpBody(
     upstreamResponse,
     Number(context.maxResponseBytes || DEFAULT_MAX_RESPONSE_BYTES),
-    { destroyOnLimit: true }
+    { destroyOnLimit: true, idleTimeoutMs: context.upstreamIdleTimeoutMs }
   );
 
   let responseBody;
@@ -368,11 +438,12 @@ async function proxyTransformed(
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
   const headers = upstreamHeaders(sanitizedHeaders, upstream, body.length);
   context.phase = "upstream_connect";
-  const upstreamResponse = await makeUpstreamRequest(upstream, "POST", headers, body, {
+  const upstreamResponse = await requestCodexUpstream(upstream, "POST", headers, body, {
     downstream: response,
     isDownstreamClosed: context.isDownstreamClosed,
     timeoutMs: context.upstreamTimeoutMs
   });
+  context.phase = "upstream_response";
 
   assertIdentityResponseEncoding(upstreamResponse);
 
@@ -390,10 +461,10 @@ async function proxyTransformed(
   }
 
   if (statusCode >= 400 && contentType.trim() === "") {
-    const raw = await readBody(
+    const raw = await readBoundedHttpBody(
       upstreamResponse,
       Number(context.maxResponseBytes || DEFAULT_MAX_RESPONSE_BYTES),
-      { destroyOnLimit: true }
+      { destroyOnLimit: true, idleTimeoutMs: context.upstreamIdleTimeoutMs }
     );
     forwardResponseHeaders(response, upstreamResponse.headers, true);
     response.setHeader("content-type", "text/plain; charset=utf-8");
@@ -410,10 +481,10 @@ async function proxyTransformed(
     );
   }
 
-  const raw = await readBody(
+  const raw = await readBoundedHttpBody(
     upstreamResponse,
     Number(context.maxResponseBytes || DEFAULT_MAX_RESPONSE_BYTES),
-    { destroyOnLimit: true }
+    { destroyOnLimit: true, idleTimeoutMs: context.upstreamIdleTimeoutMs }
   );
   let restoredBody;
   if (contentType.includes("application/json")) {
@@ -455,7 +526,11 @@ async function proxySseResponse(
   let done = false;
 
   while (!containsJsonSseData(staged)) {
-    const next = await iterator.next();
+    const next = await nextHttpChunk(
+      iterator,
+      upstreamResponse,
+      context.upstreamIdleTimeoutMs
+    );
     done = Boolean(next.done);
     if (done) {
       staged.push(...restorer.end());
@@ -499,7 +574,11 @@ async function proxySseResponse(
   try {
     for (const output of staged) await writeWithBackpressure(response, output);
     while (!done) {
-      const next = await iterator.next();
+      const next = await nextHttpChunk(
+        iterator,
+        upstreamResponse,
+        context.upstreamIdleTimeoutMs
+      );
       done = Boolean(next.done);
       if (!done) {
         const outputs = restorer.write(next.value);
@@ -618,54 +697,6 @@ function upstreamHeaders(source, upstream, contentLength) {
   return headers;
 }
 
-function makeUpstreamRequest(url, method, headers, body, options = {}) {
-  const client = url.protocol === "https:" ? https : http;
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const request = client.request(url, { method, headers });
-    const downstream = options.downstream;
-    const cleanup = () => {
-      downstream?.off("close", onDownstreamClose);
-    };
-    const onError = error => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(options.isDownstreamClosed?.()
-        ? gatewayError("PRIVACYAI_CODEX_CLIENT_DISCONNECTED", "PrivacyAI stopped the Codex request because the client disconnected.")
-        : error);
-    };
-    const onDownstreamClose = () => {
-      if (downstream?.writableEnded || request.destroyed) return;
-      request.destroy();
-    };
-
-    if (downstream) downstream.once("close", onDownstreamClose);
-    request.once("error", onError);
-    const timeoutMs = Number(options.timeoutMs);
-    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-      request.setTimeout(timeoutMs, () => {
-        const error = Object.assign(new Error("PrivacyAI upstream request timed out."), { code: "ETIMEDOUT" });
-        request.destroy(error);
-      });
-    }
-    request.once("response", upstreamResponse => {
-      if (settled) {
-        upstreamResponse.destroy();
-        return;
-      }
-      settled = true;
-      upstreamResponse.on("error", () => {});
-      const finish = () => cleanup();
-      upstreamResponse.once("end", finish);
-      upstreamResponse.once("close", finish);
-      resolve(upstreamResponse);
-    });
-    if (body) request.end(body);
-    else request.end();
-  });
-}
-
 function forwardResponseHeaders(response, headers, transformed) {
   for (const [name, value] of Object.entries(headers)) {
     const normalized = name.toLowerCase();
@@ -723,66 +754,6 @@ function isCancellationError(error) {
     error?.code === "PRIVACYAI_REQUEST_ABORTED" ||
     error?.code === "PRIVACYAI_CODEX_CLIENT_DISCONNECTED"
   );
-}
-
-function readBody(stream, maxBytes, options = {}) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let settled = false;
-    let ended = false;
-
-    const cleanup = () => {
-      stream.off("data", onData);
-      stream.off("end", onEnd);
-      stream.off("error", onError);
-      stream.off("aborted", onAborted);
-      stream.off("close", onClose);
-    };
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const onData = chunk => {
-      if (settled) return;
-      size += chunk.length;
-      if (size > maxBytes) {
-        finish(gatewayError(
-          "PRIVACYAI_CODEX_BODY_TOO_LARGE",
-          "PrivacyAI blocked an oversized Codex provider payload."
-        ));
-        if (options.destroyOnLimit) stream.destroy();
-        else if (typeof stream.resume === "function") stream.resume();
-        return;
-      }
-      chunks.push(chunk);
-    };
-    const onEnd = () => {
-      ended = true;
-      finish(null, Buffer.concat(chunks));
-    };
-    const onError = error => finish(error);
-    const onAborted = () => finish(gatewayError(
-      "PRIVACYAI_CODEX_BODY_ABORTED",
-      "PrivacyAI stopped an aborted Codex provider payload."
-    ));
-    const onClose = () => {
-      if (ended || settled) return;
-      finish(gatewayError(
-        "PRIVACYAI_CODEX_BODY_TRUNCATED",
-        "PrivacyAI stopped a Codex provider payload that closed before completion."
-      ));
-    };
-
-    stream.on("data", onData);
-    stream.once("end", onEnd);
-    stream.once("error", onError);
-    stream.once("aborted", onAborted);
-    stream.once("close", onClose);
-  });
 }
 
 function writeJson(response, status, value) {
@@ -874,21 +845,30 @@ function writeWithBackpressure(stream, value) {
   });
 }
 
-function listen(server, port, host) {
-  return new Promise((resolve, reject) => {
-    const onError = error => reject(error);
-    server.once("error", onError);
-    server.listen(port, host, () => {
-      server.off("error", onError);
-      resolve();
-    });
+async function closeGatewayResources(options) {
+  await runCleanupSteps([
+    {
+      name: "server",
+      run: () => options.server ? closeHttpServer(options.server, options.sockets || new Set()) : undefined
+    },
+    {
+      name: "image-sanitizer",
+      run: () => options.ownsImageSanitizer ? options.imageSanitizer?.close() : undefined
+    },
+    {
+      name: "verification-store",
+      run: () => options.ownsVerificationStore ? Promise.resolve(options.verificationStore?.close()) : undefined
+    }
+  ], {
+    primaryError: options.primaryError,
+    message: "PrivacyAI could not fully close the Codex provider gateway."
   });
 }
 
-function closeServer(server, sockets) {
-  return new Promise(resolve => {
-    for (const socket of sockets) socket.destroy();
-    server.close(() => resolve());
+function runVerificationStoreOperation(context, operation) {
+  return retryContextStoreOperation(operation, {
+    signal: context.requestSignal,
+    timeoutMs: context.verificationRetryTimeoutMs
   });
 }
 

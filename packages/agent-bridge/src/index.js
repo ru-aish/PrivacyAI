@@ -20,7 +20,7 @@ export {
   isProtectedCodexConfigOverride,
   parseCodexPrivacyMode
 } from "./codex-provider-config.js";
-export { startCodexProviderGateway } from "./codex-provider-gateway.js";
+export { resolveCodexGatewayTimeouts, startCodexProviderGateway } from "./codex-provider-gateway.js";
 export { createCodexImageSanitizer, toCodexImageError } from "./codex-image-adapter.js";
 export {
   MemoryContextVerificationStore,
@@ -28,6 +28,7 @@ export {
   openContextVerificationStore,
   verificationFingerprint
 } from "./context-verification-store.js";
+export { retryContextStoreOperation } from "./context-store-retry.js";
 export {
   commitProvenancedMutation,
   derivePrivacyPlanFromCommittedMutation,
