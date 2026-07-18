@@ -143,6 +143,25 @@ test("diagnostic metadata accepts only bounded allowlisted fields", () => {
   );
 });
 
+test("nullable compatibility options normalize without changing legacy behavior", () => {
+  const guardian = new PrivacyGuardianError("Legacy guardian failure.", undefined, null);
+  const provider = new ProviderError("Provider returned HTTP 503", { status: 503 }, null);
+
+  assert.equal(guardian.name, "PrivacyGuardianError");
+  assert.equal(guardian.code, undefined);
+  assert.equal(provider.name, "ProviderError");
+  assert.equal(provider.status, 503);
+  assert.equal(provider.retryable, true);
+  assert.throws(
+    () => createPrivacyError(null),
+    /stable PRIVACYAI_\* code/
+  );
+  assert.throws(
+    () => new PrivacyError("Invalid options.", []),
+    /options must be a plain object/
+  );
+});
+
 test("legacy guardian and provider errors retain their public surface", () => {
   const guardianDetails = { reason: "legacy" };
   const guardian = new PrivacyGuardianError("Legacy guardian failure.", guardianDetails);

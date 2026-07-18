@@ -61,17 +61,18 @@ export function createGatewayContractError(code, message, options = {}) {
     throw new TypeError("PrivacyAI gateway errors require an internal error code.");
   }
 
+  const opts = options ?? {};
   const resolved = gatewayCodePolicy(normalizedCode) || fallbackPolicy();
   return createPrivacyError({
     code: resolved.code,
     category: resolved.category,
     message: resolved.code === normalizedCode ? message : resolved.publicMessage,
     publicMessage: resolved.publicMessage,
-    phase: options.phase,
+    phase: opts.phase,
     status: resolved.status,
     retryable: resolved.retryable,
-    cause: options.cause,
-    diagnostics: options.diagnostics,
+    cause: opts.cause,
+    diagnostics: opts.diagnostics,
     name: "PrivacyError"
   });
 }

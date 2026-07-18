@@ -10,7 +10,10 @@ import {
   publicGatewayMessage,
   safeGatewayDiagnostic
 } from "../src/gateway-error.js";
-import { normalizeGatewayContractError } from "../src/errors/gateway-policy.js";
+import {
+  createGatewayContractError,
+  normalizeGatewayContractError
+} from "../src/errors/gateway-policy.js";
 
 const SECRET = "sk-private-gateway-token";
 const PRIVATE_PROMPT = "send alice.private@example.test to the model";
@@ -25,6 +28,19 @@ const EXPECTED_MESSAGES = Object.freeze({
   cancelled: "Codex disconnected before PrivacyAI completed the request.",
   boundary: "PrivacyAI stopped this Codex request because its privacy boundary could not be verified.",
   fallback: "PrivacyAI stopped this Codex request because the local gateway failed."
+});
+
+test("gateway factories normalize explicit null options", () => {
+  const error = createGatewayContractError(
+    "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT",
+    "Internal timeout.",
+    null
+  );
+
+  assert.equal(error.code, "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT");
+  assert.equal(error.category, "timeout");
+  assert.equal(error.status, 504);
+  assert.equal(error.retryable, true);
 });
 
 test("gatewayError preserves representative codes and internal messages", () => {

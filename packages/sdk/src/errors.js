@@ -53,40 +53,39 @@ const DIAGNOSTIC_FIELDS = Object.freeze({
 
 export class PrivacyError extends Error {
   constructor(message, options = {}) {
-    const requestedCategory = String(options.category || "internal");
+    const opts = normalizedOptions(options);
+    const requestedCategory = String(opts.category || "internal");
     const hasCategoryPolicy = Object.hasOwn(CATEGORY_POLICIES, requestedCategory);
     const category = hasCategoryPolicy ? requestedCategory : "internal";
     const categoryPolicy = CATEGORY_POLICIES[category];
-    const cause = options.cause;
+    const cause = opts.cause;
     super(normalizedMessage(message, categoryPolicy.publicMessage), cause === undefined ? undefined : { cause });
 
-    const contractCode = normalizedErrorCode(options.code);
-    if (options.exposeCode !== false) this.code = contractCode;
+    const contractCode = normalizedErrorCode(opts.code);
+    if (opts.exposeCode !== false) this.code = contractCode;
 
     Object.defineProperties(this, {
-      name: mutableHiddenValue(normalizedErrorName(options.name, "PrivacyError")),
+      name: mutableHiddenValue(normalizedErrorName(opts.name, "PrivacyError")),
       contractCode: hiddenValue(contractCode),
       category: hiddenValue(category),
-      phase: hiddenValue(normalizedPhase(options.phase)),
+      phase: hiddenValue(normalizedPhase(opts.phase)),
       status: hiddenValue(hasCategoryPolicy
-        ? normalizedStatus(options.status, categoryPolicy.status)
+        ? normalizedStatus(opts.status, categoryPolicy.status)
         : categoryPolicy.status),
       retryable: hiddenValue(hasCategoryPolicy
-        ? normalizedRetryable(options.retryable, categoryPolicy.retryable)
+        ? normalizedRetryable(opts.retryable, categoryPolicy.retryable)
         : categoryPolicy.retryable),
       publicMessage: hiddenValue(hasCategoryPolicy
-        ? normalizedPublicMessage(options.publicMessage, categoryPolicy.publicMessage)
+        ? normalizedPublicMessage(opts.publicMessage, categoryPolicy.publicMessage)
         : categoryPolicy.publicMessage),
-      diagnostics: hiddenValue(sanitizePrivacyDiagnostics(options.diagnostics))
+      diagnostics: hiddenValue(sanitizePrivacyDiagnostics(opts.diagnostics))
     });
   }
 }
 
 export function createPrivacyError(options = {}) {
-  if (!isPlainObject(options)) {
-    throw new TypeError("PrivacyAI error options must be a plain object.");
-  }
-  return new PrivacyError(options.message, options);
+  const opts = normalizedOptions(options);
+  return new PrivacyError(opts.message, opts);
 }
 
 export function isPrivacyError(error) {
@@ -134,13 +133,14 @@ export function serializePrivacyError(error) {
 
 export class PrivacyGuardianError extends PrivacyError {
   constructor(message, details = undefined, options = {}) {
+    const opts = normalizedOptions(options);
     super(message, {
-      ...options,
-      code: options.code || "PRIVACYAI_PRIVACY_GUARDIAN_FAILURE",
-      category: options.category || "privacy_boundary",
-      cause: options.cause === undefined ? diagnosticCause(details) : options.cause,
-      exposeCode: options.exposeCode === true,
-      name: options.name || "PrivacyGuardianError"
+      ...opts,
+      code: opts.code || "PRIVACYAI_PRIVACY_GUARDIAN_FAILURE",
+      category: opts.category || "privacy_boundary",
+      cause: opts.cause === undefined ? diagnosticCause(details) : opts.cause,
+      exposeCode: opts.exposeCode === true,
+      name: opts.name || "PrivacyGuardianError"
     });
     this.details = details;
   }
@@ -148,14 +148,15 @@ export class PrivacyGuardianError extends PrivacyError {
 
 export class ProviderError extends PrivacyGuardianError {
   constructor(message, details = undefined, options = {}) {
+    const opts = normalizedOptions(options);
     const status = providerStatus(message, details);
     super(message, details, {
-      ...options,
-      code: options.code || "PRIVACYAI_LOCAL_MODEL_FAILURE",
+      ...opts,
+      code: opts.code || "PRIVACYAI_LOCAL_MODEL_FAILURE",
       category: "local_model",
-      status: options.status ?? status ?? CATEGORY_POLICIES.local_model.status,
-      retryable: options.retryable ?? providerRetryable(message, details, status),
-      publicMessage: options.publicMessage || CATEGORY_POLICIES.local_model.publicMessage,
+      status: opts.status ?? status ?? CATEGORY_POLICIES.local_model.status,
+      retryable: opts.retryable ?? providerRetryable(message, details, status),
+      publicMessage: opts.publicMessage || CATEGORY_POLICIES.local_model.publicMessage,
       name: "ProviderError"
     });
   }
@@ -270,6 +271,14 @@ function providerRetryable(message, details, status) {
 function diagnosticCause(details) {
   if (details instanceof Error) return details;
   return details?.error instanceof Error ? details.error : undefined;
+}
+
+function normalizedOptions(value) {
+  if (value == null) return {};
+  if (!isPlainObject(value)) {
+    throw new TypeError("PrivacyAI error options must be a plain object.");
+  }
+  return value;
 }
 
 function isPlainObject(value) {
