@@ -6,16 +6,26 @@ export function redact(text, detections) {
 }
 
 export function restore(text, sessionMap) {
-  let restored = text;
-  const replacements = Object.entries(sessionMap).sort(
+  if (typeof text !== "string") return text;
+  const replacements = Object.entries(sessionMap || {}).sort(
     ([left], [right]) => right.length - left.length
   );
+  if (replacements.length === 0) return text;
 
-  for (const [dummy, value] of replacements) {
-    restored = restored.split(dummy).join(value);
-  }
+  // Restore against the provider output in one pass. A restored original may
+  // legitimately contain text that looks like another placeholder; rescanning
+  // replacement values would corrupt that literal text and make round-trips
+  // depend on placeholder lengths.
+  const values = new Map(replacements);
+  const pattern = new RegExp(
+    replacements.map(([dummy]) => escapeRegExp(dummy)).join("|"),
+    "g"
+  );
+  return text.replace(pattern, dummy => values.get(dummy));
+}
 
-  return restored;
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 export { RedactionPlan, createRedactionPlan } from "./redaction-plan.js";

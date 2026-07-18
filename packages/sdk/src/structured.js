@@ -2,6 +2,7 @@ import {
   assertNoProtectedOriginalsInValue,
   normalizeSessionMap,
   rebaseSessionAdditions,
+  replaceKnownText,
   sanitizeKnownText
 } from "./session-map.js";
 import { estimatePrivacyTokens, normalizeTokenBudget } from "./token-budget.js";
@@ -62,8 +63,7 @@ export async function sanitizeStructuredValue(value, options = {}) {
       throw contextWindowError(maxContextChars, maxContextTokens);
     }
     packedChars += rawBatchText.length;
-    const knownSafeText = sanitizeKnownText(rawBatchText, state.completeMap);
-    const shield = shieldKnownPlaceholders(knownSafeText, Object.keys(state.completeMap));
+    const shield = shieldKnownValues(rawBatchText, state.completeMap);
     const result = await options.sanitizer(shield.text, {
       identityConfidenceThreshold: options.identityConfidenceThreshold ?? 0.85,
       artifactType: options.artifactType || "structured_context",
@@ -105,7 +105,7 @@ export async function sanitizeStructuredValue(value, options = {}) {
       throw error;
     }
     const restoredMap = restoreClassifierMap(classifierMap, shield);
-    const relevantMap = filterClassifierMap(knownSafeText, restoredMap);
+    const relevantMap = filterClassifierMap(rawBatchText, restoredMap);
     mergeClassifierMap(relevantMap, state);
     if (typeof options.onBatchComplete === "function") {
       await options.onBatchComplete({
@@ -370,19 +370,12 @@ function restoreClassifierMap(classifierMap, shield) {
       error.code = "PRIVACYAI_INVALID_SANITIZED_CONTEXT";
       throw error;
     }
-    // Boundary tokens stand in for placeholders that are already protected by
-    // the existing session map. A classifier may conservatively label one
-    // complete synthetic token as private, but it is not a new private
-    // original and must never become a placeholder -> placeholder alias.
+    // A complete boundary token represents a value already covered by the
+    // current session map, so it is not a new private span. When a conservative
+    // classifier groups that token with adjacent text, recover the exact source
+    // bytes for the token occurrence and keep the combined span reversible.
     if (shield.isToken(original)) continue;
-    if (shield.containsToken(original)) {
-      const error = new Error(
-        "PrivacyAI blocked a local classifier result that mixed a reserved boundary token with an exact private span."
-      );
-      error.code = "PRIVACYAI_INVALID_CLASSIFIER_SPAN";
-      throw error;
-    }
-    entries.push([shield.restore(placeholder), shield.restore(original)]);
+    entries.push([placeholder, shield.restoreSource(original)]);
   }
   return Object.fromEntries(entries);
 }
@@ -398,23 +391,22 @@ function mergeClassifierMap(classifierMap, state) {
   Object.assign(state.additions, rebased.sessionMap);
 }
 
-function shieldKnownPlaceholders(text, placeholders) {
-  let shielded = text;
+function shieldKnownValues(text, sessionMap) {
   const replacements = [];
-  const occupied = [text, ...placeholders]
+  const occupied = [text, ...Object.keys(sessionMap), ...Object.values(sessionMap)]
     .map(value => String(value).toLocaleLowerCase("en-US"));
-  const sorted = [...new Set(placeholders.filter(Boolean))].sort((a, b) => b.length - a.length);
+  let tokenIndex = 0;
 
-  for (let index = 0; index < sorted.length; index += 1) {
-    const placeholder = sorted[index];
-    let token = `__PRIVACYAI_BOUNDARY_${index}__`;
+  const shielded = replaceKnownText(text, sessionMap, ({ match }) => {
+    let token = `__PRIVACYAI_BOUNDARY_${tokenIndex}__`;
+    tokenIndex += 1;
     while (occupied.some(value => value.includes(token.toLocaleLowerCase("en-US")))) token += "_";
     occupied.push(token.toLocaleLowerCase("en-US"));
-    shielded = shielded.split(placeholder).join(token);
-    replacements.push([token, placeholder]);
-  }
+    replacements.push({ token, source: match });
+    return token;
+  });
 
-  const foldedTokens = replacements.map(([token]) => token.toLocaleLowerCase("en-US"));
+  const foldedTokens = replacements.map(({ token }) => token.toLocaleLowerCase("en-US"));
   return {
     text: shielded,
     isToken(value) {
@@ -426,15 +418,19 @@ function shieldKnownPlaceholders(text, placeholders) {
       const folded = value.toLocaleLowerCase("en-US");
       return foldedTokens.some(token => folded.includes(token));
     },
-    restore(value) {
+    restoreSource(value) {
       if (typeof value !== "string") return value;
       let restored = value;
-      for (const [token, placeholder] of replacements) {
-        restored = restored.split(token).join(placeholder);
+      for (const { token, source } of replacements) {
+        restored = restored.replace(new RegExp(escapeRegExp(token), "gi"), () => source);
       }
       return restored;
     }
   };
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function valuesEqual(left, right) {

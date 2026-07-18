@@ -106,12 +106,21 @@ export function restoreText(text, sessionMap = {}) {
 }
 
 export function sanitizeKnownText(text, sessionMap = {}) {
+  return replaceKnownText(text, sessionMap, ({ match, candidate }) =>
+    candidate.kind === "placeholder" ? match : candidate.placeholder
+  );
+}
+
+export function replaceKnownText(text, sessionMap = {}, replacer) {
   if (typeof text !== "string") return text;
+  if (typeof replacer !== "function") {
+    throw new TypeError("replaceKnownText requires a replacement callback.");
+  }
   const replacements = Object.entries(normalizeSessionMap(sessionMap));
   if (replacements.length === 0) return text;
 
   // Replace against the original input in one pass. This prevents a later
-  // mapping from matching inside a placeholder inserted by an earlier one.
+  // mapping from matching inside text returned by the replacement callback.
   const candidates = replacementCandidates(replacements);
   const candidatesByValue = new Map(
     candidates.map(candidate => [foldSessionMapValue(candidate.value), candidate])
@@ -126,7 +135,7 @@ export function sanitizeKnownText(text, sessionMap = {}) {
     if (!candidate) {
       throw new Error("PrivacyAI could not resolve a known-value replacement.");
     }
-    return candidate.kind === "placeholder" ? match : candidate.placeholder;
+    return String(replacer({ match, candidate }));
   });
 }
 

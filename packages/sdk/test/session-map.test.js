@@ -210,24 +210,58 @@ test("sanitizeStructuredValue rejects classifier placeholders that reuse reserve
   );
 });
 
-test("sanitizeStructuredValue rejects classifier spans that mix boundary shields with real text", async () => {
-  await assert.rejects(
-    sanitizeStructuredValue(
-      { text: "Keep [EMAIL_1], redact new@example.test" },
-      {
-        sessionMap: { "[EMAIL_1]": "existing@example.test" },
-        sanitizer: async text => {
-          const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
-          assert.ok(token, "the existing placeholder should be shielded before classification");
-          const mixedSpan = token + ", redact new@example.test";
-          return {
-            sanitizedPrompt: text.replace(mixedSpan, "[PRIVATE_VALUE_1]"),
-            sessionMap: { "[PRIVATE_VALUE_1]": mixedSpan }
-          };
-        }
-      }
-    ),
-    error => error?.code === "PRIVACYAI_INVALID_CLASSIFIER_SPAN"
+test("sanitizeStructuredValue recovers classifier spans that mix boundary shields with literal placeholders", async () => {
+  const existing = { "[EMAIL_1]": "existing@example.test" };
+  const source = { text: "Keep [EMAIL_1], redact new@example.test" };
+  const result = await sanitizeStructuredValue(source, {
+    sessionMap: existing,
+    sanitizer: async text => {
+      const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
+      assert.ok(token, "the existing placeholder should be shielded before classification");
+      const mixedSpan = token.toLocaleLowerCase("en-US") + ", redact new@example.test";
+      return {
+        sanitizedPrompt: text.replace(
+          token + ", redact new@example.test",
+          "[PRIVATE_VALUE_1]"
+        ),
+        sessionMap: { "[PRIVATE_VALUE_1]": mixedSpan }
+      };
+    }
+  });
+
+  assert.deepEqual(result.value, { text: "Keep [PRIVATE_VALUE_1]" });
+  assert.deepEqual(result.sessionMapAdditions, {
+    "[PRIVATE_VALUE_1]": "[EMAIL_1], redact new@example.test"
+  });
+  assert.deepEqual(
+    restoreValue(result.value, { ...existing, ...result.sessionMapAdditions }),
+    source
+  );
+});
+
+test("sanitizeStructuredValue recovers mixed boundary spans from previously protected originals", async () => {
+  const existing = { "[EMAIL_1]": "existing@example.test" };
+  const source = { text: "Keep existing@example.test, redact new@example.test" };
+  const result = await sanitizeStructuredValue(source, {
+    sessionMap: existing,
+    sanitizer: async text => {
+      const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
+      assert.ok(token, "the known original should be shielded before classification");
+      const mixedSpan = token + ", redact new@example.test";
+      return {
+        sanitizedPrompt: text.replace(mixedSpan, "[PRIVATE_VALUE_1]"),
+        sessionMap: { "[PRIVATE_VALUE_1]": mixedSpan }
+      };
+    }
+  });
+
+  assert.deepEqual(result.value, { text: "Keep [PRIVATE_VALUE_1]" });
+  assert.deepEqual(result.sessionMapAdditions, {
+    "[PRIVATE_VALUE_1]": "existing@example.test, redact new@example.test"
+  });
+  assert.deepEqual(
+    restoreValue(result.value, { ...existing, ...result.sessionMapAdditions }),
+    source
   );
 });
 

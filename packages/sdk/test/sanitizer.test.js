@@ -61,6 +61,16 @@ test("restore replaces dummy stand-ins with original values", () => {
   assert.equal(restored, "Email a@example.com and phone 555-123-4567.");
 });
 
+test("restore does not recursively reinterpret placeholders inside restored originals", () => {
+  assert.equal(
+    restore("[PRIVATE_VALUE_1]", {
+      "[PRIVATE_VALUE_1]": "literal [EMAIL_1], redact new@example.test",
+      "[EMAIL_1]": "existing@example.test"
+    }),
+    "literal [EMAIL_1], redact new@example.test"
+  );
+});
+
 test("client ask uses local AI first, then sends safe prompt without system context", async () => {
   const calls = [];
   const provider = {
