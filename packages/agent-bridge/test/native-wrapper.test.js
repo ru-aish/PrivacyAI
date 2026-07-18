@@ -1,6 +1,7 @@
 import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -22,6 +23,7 @@ import {
   buildModelChoices,
   codexEffectiveCwd,
   consumeAllowance,
+  discoverCodexHookTrust,
   listDownloadedLanguageModels,
   listLmStudioLanguageModels,
   loadPrivacyConfig,
@@ -992,6 +994,74 @@ test("native hook declarations cover every built-in, app, plugin, and MCP tool",
   assert.match(joined, /\^\.\*\$/);
   assert.doesNotMatch(joined, /\^Bash\$/);
   assert.equal(codexEffectiveCwd(["resume", "--last", "-C", "/tmp/project"]), "/tmp/project");
+  assert.equal(
+    codexEffectiveCwd(["exec", "--", "-C", "/tmp/not-the-wrapper-cwd"], "/tmp/original"),
+    "/tmp/original"
+  );
+});
+
+test("Codex hook trust validation bounds output and removes resistant process trees", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await createTestTempDir("privacyai-hook-probe-tree-");
+  const fakeCodex = join(root, "fake-hook-codex.js");
+  const childPidPath = join(root, "child.pid");
+  const response = {
+    id: 2,
+    result: {
+      data: [{
+        hooks: [
+          { source: "sessionFlags", key: "prompt", currentHash: "hash-1", eventName: "userPromptSubmit" },
+          { source: "sessionFlags", key: "pre", currentHash: "hash-2", eventName: "preToolUse" },
+          { source: "sessionFlags", key: "post", currentHash: "hash-3", eventName: "postToolUse" }
+        ]
+      }]
+    }
+  };
+  await writeFile(fakeCodex, [
+    "#!/usr/bin/env node",
+    "const { spawn } = require('node:child_process');",
+    "const { writeFileSync } = require('node:fs');",
+    "process.on('SIGTERM', () => {});",
+    `const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' });`,
+    "child.unref();",
+    `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(response) + "\n")});`,
+    "setInterval(() => {}, 1000);"
+  ].join("\n"), { mode: 0o755 });
+  await chmod(fakeCodex, 0o755);
+
+  const result = await discoverCodexHookTrust({
+    codexPath: fakeCodex,
+    declarationArgs: [],
+    cwd: root,
+    env: process.env,
+    timeoutMs: 2000,
+    maxBytes: 4096
+  });
+  assert.equal(result.hooks.length, 3);
+  const childPid = Number(await readFile(childPidPath, "utf8"));
+  assert.equal(processExists(childPid), false);
+
+  const noisyCodex = join(root, "noisy-hook-codex.js");
+  await writeFile(noisyCodex, [
+    "#!/usr/bin/env node",
+    "process.on('SIGTERM', () => {});",
+    "process.stdout.write('x'.repeat(8192));",
+    "setInterval(() => {}, 1000);"
+  ].join("\n"), { mode: 0o755 });
+  await chmod(noisyCodex, 0o755);
+  await assert.rejects(
+    discoverCodexHookTrust({
+      codexPath: noisyCodex,
+      declarationArgs: [],
+      cwd: root,
+      env: process.env,
+      timeoutMs: 2000,
+      maxBytes: 1024
+    }),
+    /excessive output/
+  );
 });
 
 test("Unix PTY helper reinjects a pending sanitized prompt into an unchanged child TUI", async () => {
@@ -1140,6 +1210,142 @@ test("Unix PTY helper converts exact Codex session commands into private launche
   await assert.rejects(readFile(navigationActionPath, "utf8"), /ENOENT/);
 });
 
+test("Unix PTY session actions survive line editing and bracketed paste", async () => {
+  const root = await createTestTempDir("privacyai-pty-edited-actions-");
+  const cases = [
+    {
+      name: "left-delete",
+      input: "/resume --lastX" + String.fromCharCode(27) + "[D" + String.fromCharCode(27) + "[3~" + String.fromCharCode(13),
+      expected: { version: 1, action: "resume", selector: "--last" }
+    },
+    {
+      name: "home",
+      input: "resume --all" + String.fromCharCode(27) + "[H/" + String.fromCharCode(13),
+      expected: { version: 1, action: "resume", selector: "--all" }
+    },
+    {
+      name: "bracketed-paste",
+      input: String.fromCharCode(27) + "[200~/fork --last" + String.fromCharCode(27) + "[201~" + String.fromCharCode(13),
+      expected: { version: 1, action: "fork", selector: "--last" }
+    }
+  ];
+
+  for (const candidate of cases) {
+    const actionPath = join(root, `${candidate.name}.json`);
+    const result = await runProcessWithInput("python3", [
+      PTY_HELPER,
+      "--runtime-dir",
+      root,
+      "--flavor",
+      "codex",
+      "--session-action-file",
+      actionPath,
+      "--",
+      "/bin/cat"
+    ], candidate.input);
+    assert.equal(result.code, 86, candidate.name);
+    assert.deepEqual(JSON.parse(await readFile(actionPath, "utf8")), candidate.expected);
+  }
+});
+
+test("Unix PTY tolerates malformed terminal dimensions", async () => {
+  const root = await createTestTempDir("privacyai-pty-dimensions-");
+  const result = await runProcess("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--",
+    "python3",
+    "-c",
+    "print('dimension-safe', flush=True)"
+  ], {
+    env: { ...process.env, LINES: "not-a-number", COLUMNS: "also-invalid" }
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /dimension-safe/);
+  assert.doesNotMatch(result.stderr, /ValueError|Traceback/);
+});
+
+test("Unix PTY escalates wrapper signals and reaps the complete child group", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await createTestTempDir("privacyai-pty-signal-tree-");
+  const pidPath = join(root, "pids.json");
+  const fakeTui = join(root, "stubborn-tui.py");
+  await writeFile(fakeTui, [
+    "import json,os,signal,subprocess,sys,time",
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+    "child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])",
+    `open(${JSON.stringify(pidPath)},'w').write(json.dumps([os.getpid(),child.pid]))`,
+    "while True: time.sleep(1)"
+  ].join("\n"));
+
+  const wrapper = spawn("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--",
+    "python3",
+    fakeTui
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  const pids = JSON.parse(await waitForFile(pidPath));
+  const exited = once(wrapper, "exit");
+  wrapper.kill("SIGTERM");
+  const [code, signalName] = await exited;
+  assert.equal(signalName, null);
+  assert.equal(code, 143);
+  for (const pid of pids) assert.equal(processExists(pid), false);
+});
+
+test("Unix PTY treats a closed output pipe as shutdown and leaves no orphan", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await createTestTempDir("privacyai-pty-broken-pipe-");
+  const pidPath = join(root, "pids.json");
+  const fakeTui = join(root, "noisy-tui.py");
+  await writeFile(fakeTui, [
+    "import json,os,signal,subprocess,sys,time",
+    "signal.signal(signal.SIGPIPE, signal.SIG_IGN)",
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+    "child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])",
+    `open(${JSON.stringify(pidPath)},'w').write(json.dumps([os.getpid(),child.pid]))`,
+    "while True:",
+    "    print('x'*4096, flush=True)"
+  ].join("\n"));
+
+  const result = await runProcess("bash", [
+    "-o",
+    "pipefail",
+    "-c",
+    'python3 "$1" --runtime-dir "$2" --flavor codex -- python3 "$3" | head -c 1 >/dev/null',
+    "privacyai-pty-test",
+    PTY_HELPER,
+    root,
+    fakeTui
+  ]);
+  const pids = JSON.parse(await waitForFile(pidPath));
+  assert.equal(result.code, 141, result.stderr);
+  assert.doesNotMatch(result.stderr, /BrokenPipeError|Traceback/);
+  for (const pid of pids) assert.equal(processExists(pid), false);
+});
+
+async function waitForFile(path, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  throw new Error(`Timed out waiting for test file: ${path}`);
+}
+
 function jsonResponse(body, options = {}) {
   return {
     ok: options.ok ?? true,
@@ -1150,9 +1356,9 @@ function jsonResponse(body, options = {}) {
   };
 }
 
-function runProcess(command, args) {
+function runProcess(command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", chunk => {
@@ -1166,9 +1372,9 @@ function runProcess(command, args) {
   });
 }
 
-function runProcessWithInput(command, args, input) {
+function runProcessWithInput(command, args, input, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", chunk => {
@@ -1313,7 +1519,7 @@ test("Codex prompt renderer terminates its entire probe process group", {
       "#!/usr/bin/env node",
       "const { spawn } = require('node:child_process');",
       "const { writeFileSync } = require('node:fs');",
-      `const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });`,
+      `const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' });`,
       "child.unref();",
       `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
       "process.stdout.write(JSON.stringify([{ text: 'rendered' }]));"

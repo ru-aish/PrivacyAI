@@ -73,7 +73,12 @@ test("Codex TUI session interception is limited to interactive invocations", () 
   assert.equal(supportsCodexTuiSessionActions(["Explain this repository"]), true);
 
   assert.equal(supportsCodexTuiSessionActions(["exec", "echo test"]), false);
+  assert.equal(supportsCodexTuiSessionActions(["e", "echo test"]), false);
+  assert.equal(supportsCodexTuiSessionActions(["apply"]), false);
+  assert.equal(supportsCodexTuiSessionActions(["a"]), false);
   assert.equal(supportsCodexTuiSessionActions(["review"]), false);
   assert.equal(supportsCodexTuiSessionActions(["--help"]), false);
   assert.equal(supportsCodexTuiSessionActions(["resume", "--help"]), false);
+  assert.equal(supportsCodexTuiSessionActions(["--", "--help"]), true);
+  assert.equal(supportsCodexTuiSessionActions(["--", "exec"]), true);
 });

@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   MemoryContextVerificationStore,
   openContextVerificationStore,
+  retryContextStoreOperation,
   verificationFingerprint
 } from "../src/index.js";
 import { createTestTempDir } from "./test-temp-dir.js";
@@ -135,4 +136,48 @@ test("in-memory verification fallback enforces age and item bounds", async () =>
   assert.equal(store.getVerification("expiring", "memory-policy"), undefined);
   store.close();
   assert.equal(store.threads.size + store.verifications.size + store.threadItems.size, 0);
+});
+
+
+test("SQLite contention yields to the event loop and succeeds through bounded async retry", async t => {
+  const { DatabaseSync } = await import("node:sqlite");
+  const root = await createTestTempDir("privacyai-context-db-contention-");
+  const path = join(root, "context.sqlite3");
+  const store = await openContextVerificationStore({
+    verificationDbPath: path,
+    verificationBusyTimeoutMs: 20
+  });
+  const blocker = new DatabaseSync(path);
+  blocker.exec("PRAGMA busy_timeout = 0");
+  t.after(() => {
+    try { blocker.exec("ROLLBACK"); } catch {}
+    blocker.close();
+    store.close();
+  });
+  blocker.exec("BEGIN IMMEDIATE");
+
+  const record = {
+    parentSessionKeys: [],
+    sessionMap: {},
+    policyFingerprint: "contention-policy"
+  };
+  const started = Date.now();
+  assert.throws(
+    () => store.saveThread("codex-provider:blocked-direct", record),
+    error => String(error?.message || error?.cause?.message || "").includes("locked")
+  );
+  assert.ok(Date.now() - started < 250, "one synchronous attempt must not freeze the event loop");
+
+  let heartbeats = 0;
+  const heartbeat = setInterval(() => { heartbeats += 1; }, 5);
+  const release = setTimeout(() => blocker.exec("COMMIT"), 80);
+  await retryContextStoreOperation(
+    () => store.saveThread("codex-provider:retried", record),
+    { timeoutMs: 1000 }
+  );
+  clearInterval(heartbeat);
+  clearTimeout(release);
+
+  assert.ok(heartbeats > 0, "retry waits must yield to timers");
+  assert.equal(store.loadThread("codex-provider:retried").policyFingerprint, "contention-policy");
 });

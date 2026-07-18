@@ -114,3 +114,30 @@ test("Codex CLI flushes deferred TUI diagnostics when the launcher fails", async
   assert.match(text, /timeout \(PRIVACYAI_CODEX_UPSTREAM_TIMEOUT\)/);
   assert.match(text, /launcher failed safely/);
 });
+
+
+test("Codex CLI bounds deferred TUI diagnostics and reports dropped history", async () => {
+  const stderr = new PassThrough();
+  Object.defineProperty(stderr, "isTTY", { value: true });
+  let text = "";
+  stderr.on("data", chunk => { text += chunk.toString(); });
+
+  const code = await runPrivacyAiCli(["codex"], {
+    stderr,
+    maxDeferredGatewayDiagnostics: 3,
+    launchNativeTui: async (_flavor, _args, options) => {
+      for (let index = 0; index < 10; index += 1) {
+        options.onGatewayError({
+          code: "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT",
+          category: "timeout"
+        });
+      }
+      assert.equal(text, "");
+      return 0;
+    }
+  });
+
+  assert.equal(code, 0);
+  assert.equal((text.match(/Codex gateway failure/g) || []).length, 3);
+  assert.match(text, /Suppressed 7 older Codex gateway diagnostics/);
+});

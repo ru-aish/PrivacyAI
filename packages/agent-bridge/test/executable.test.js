@@ -113,6 +113,34 @@ test("native executable verification accepts a healthy binary", async t => {
   );
 });
 
+test("native executable verification removes signal-resistant descendants", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await createTestTempDir("privacyai-executable-tree-");
+  const binary = join(root, "codex");
+  const pidPath = join(root, "descendant.pid");
+  await writeFile(binary, [
+    "#!/usr/bin/env node",
+    "const { spawn } = require('node:child_process');",
+    "const { writeFileSync } = require('node:fs');",
+    "const child = spawn(process.execPath, ['-e', `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)`], { stdio: 'ignore' });",
+    "child.unref();",
+    "writeFileSync(process.env.PRIVACYAI_TEST_PID_PATH, String(child.pid));",
+    "process.stdout.write('codex-cli test\\n');"
+  ].join("\n"), { mode: 0o755 });
+  await chmod(binary, 0o755);
+
+  assert.deepEqual(
+    await verifyNativeExecutable("codex", binary, {
+      timeoutMs: 1000,
+      env: { ...process.env, PRIVACYAI_TEST_PID_PATH: pidPath }
+    }),
+    { version: "codex-cli test" }
+  );
+  const descendantPid = Number(await import("node:fs/promises").then(fs => fs.readFile(pidPath, "utf8")));
+  assert.equal(processExists(descendantPid), false);
+});
+
 test("native executable verification reports an incomplete Codex platform package", async t => {
   const root = await createTestTempDir("privacyai-executable-broken-");
   const binary = join(root, "codex");
@@ -135,3 +163,11 @@ test("native executable verification reports an incomplete Codex platform packag
       !error.message.includes(root)
   );
 });
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}

@@ -17,6 +17,7 @@ import {
   hookFileMutationId,
   parseCodexPrivacyMode,
   pruneCodexArgumentKeyMappings,
+  resolveCodexGatewayTimeouts,
   restoreResponseItem,
   sanitizeCodexMetadataHeaders,
   sanitizeCodexRequestBody,
@@ -1790,6 +1791,36 @@ test("loopback upstream timeout is reported with safe timeout metadata", async t
   assert.equal(diagnostics[0].phase, "upstream_connect");
 });
 
+test("Codex gateway terminates an upstream SSE stream that stops making progress", async t => {
+  const diagnostics = [];
+  const upstream = await startServer(async (request, response) => {
+    await readRequestJson(request);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(sse({ type: "response.created", response: { id: "idle-response" } }));
+  });
+  t.after(() => upstream.close());
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    onGatewayError: value => diagnostics.push(value),
+    upstreamIdleTimeoutMs: 30,
+    baseDir: await createTestTempDir("privacyai-codex-sse-idle-"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  await response.text().catch(() => "");
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0].networkCode, "ETIMEDOUT");
+  assert.equal(diagnostics[0].phase, "sse");
+});
+
 test("network diagnostic codes and bounded expiry-aware deduplication remain distinct", () => {
   assert.deepEqual(publicGatewayFailure({ code: "ETIMEDOUT" }), {
     code: "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT", category: "timeout"
@@ -2548,6 +2579,78 @@ test("gateway reuses persisted thread verification after restart and invalidates
   assert.equal(upstreamRequests, 2);
 });
 
+test("gateway maintenance pruning uses shared request state", async t => {
+  const records = new Map();
+  const threads = new Map();
+  let prunes = 0;
+  const verificationStore = {
+    loadThread(key) {
+      return threads.get(key) || { parentSessionKeys: [], sessionMap: {}, policyFingerprint: null };
+    },
+    saveThread(key, value) {
+      threads.set(key, value);
+    },
+    getVerification(key, policyFingerprint) {
+      const value = records.get(key);
+      return value?.policyFingerprint === policyFingerprint ? value : undefined;
+    },
+    putVerification(value) {
+      records.set(value.cacheKey, value);
+    },
+    recordThreadItem() {},
+    prune() {
+      prunes += 1;
+    },
+    close() {}
+  };
+  const upstream = await startServer(async (request, response) => {
+    await readRequestJson(request);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.output_text.delta", item_id: "maintenance", delta: "ok" }) +
+      sse({ type: "response.completed", response: { id: "maintenance", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+    verificationStore,
+    baseDir: await createTestTempDir("privacyai-gateway-maintenance-"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const body = {
+    model: "gpt-5.4-mini",
+    instructions: "public instructions",
+    input: [{
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "public request" }]
+    }],
+    tools: [],
+    tool_choice: "auto",
+    parallel_tool_calls: false,
+    reasoning: { effort: "medium", summary: "auto" },
+    store: false,
+    stream: true,
+    include: [],
+    client_metadata: { session_id: "maintenance-session", thread_id: "maintenance-thread" }
+  };
+  for (let index = 0; index < 100; index += 1) {
+    const response = await fetch(`${gateway.baseURL}/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    assert.equal(response.status, 200, `request ${index + 1}`);
+    await response.text();
+  }
+  assert.equal(prunes, 1);
+});
+
 test("Codex provider args force loopback Responses transport and disable unsupported provider-hosted tools", () => {
   const args = buildCodexProviderArgs("http://127.0.0.1:12345/nonce");
   assert.equal(args.includes('model_provider="privacyai"'), true);
@@ -2562,9 +2665,28 @@ test("Codex provider args force loopback Responses transport and disable unsuppo
   assert.throws(() => buildCodexProviderArgs("http://localhost:1234/x"), /literal IPv4 loopback/);
 });
 
+test("Codex gateway always resolves bounded upstream deadlines", () => {
+  assert.deepEqual(resolveCodexGatewayTimeouts(), {
+    responseHeadersMs: 30000,
+    responseIdleMs: 60000
+  });
+  assert.deepEqual(resolveCodexGatewayTimeouts({
+    upstreamTimeoutMs: 125,
+    upstreamIdleTimeoutMs: 250
+  }), {
+    responseHeadersMs: 125,
+    responseIdleMs: 250
+  });
+  assert.throws(() => resolveCodexGatewayTimeouts({ upstreamTimeoutMs: 0 }), /between 1/);
+});
+
 test("Codex privacy mode defaults to gateway and removes only wrapper-owned flags", () => {
   assert.deepEqual(parseCodexPrivacyMode(["exec", "hello"]), { mode: "gateway", args: ["exec", "hello"] });
   assert.deepEqual(parseCodexPrivacyMode(["--privacy-strict", "exec"]), { mode: "strict", args: ["exec"] });
+  assert.deepEqual(
+    parseCodexPrivacyMode(["exec", "--", "--privacy-strict"]),
+    { mode: "gateway", args: ["exec", "--", "--privacy-strict"] }
+  );
   assert.throws(
     () => parseCodexPrivacyMode(["--privacy-strict", "--privacy-gateway"]),
     /Choose only one/

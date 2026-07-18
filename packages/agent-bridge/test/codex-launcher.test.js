@@ -336,6 +336,89 @@ test("Codex gateway closes, releases its lock, and cleans up when spawning fails
   await lock.release();
 });
 
+test("Codex cleanup preserves the primary failure while releasing every later resource", async () => {
+  const root = await createTestTempDir("privacyai-launch-cleanup-order-");
+  const configPath = await writeTestConfig(root);
+  let runtimeDir;
+  let caught;
+
+  try {
+    await launchNativeTui("codex", [], {
+      configPath,
+      binary: "/fake/stock-codex",
+      cwd: root,
+      launchLockDir: join(root, "locks"),
+      healthOptions: { skip: true },
+      verifyNativeExecutable: async () => ({ version: "test" }),
+      sanitizer: passThroughSanitizer,
+      verificationStore: new MemoryContextVerificationStore(),
+      auditCodexStaticStartupContext: async () => ({ fileCount: 0, serializedBytes: 0 }),
+      auditCodexStartupContext: async () => ({ itemCount: 1, primedItemCount: 1 }),
+      startCodexProviderGateway: async () => ({
+        baseURL: "http://127.0.0.1:17777/test-nonce",
+        async close() {
+          throw new Error("gateway close failed");
+        }
+      }),
+      spawnInherited: async (_command, _args, options) => {
+        runtimeDir = options.env.PRIVACYAI_WRAPPER_DIR;
+        throw new Error("spawn failed first");
+      },
+      showLaunchProgress: false
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught?.message, "spawn failed first");
+  assert.equal(caught?.cleanupErrors?.[0]?.name, "gateway");
+  assert.equal(caught?.cleanupErrors?.[0]?.error?.message, "gateway close failed");
+  await assert.rejects(access(runtimeDir), /ENOENT/);
+  const lock = await acquireNativeLaunchLock("codex", root, {
+    launchLockDir: join(root, "locks")
+  });
+  await lock.release();
+});
+
+test("Codex cleanup still removes runtime state when cleanup itself is the launch failure", async () => {
+  const root = await createTestTempDir("privacyai-launch-cleanup-only-failure-");
+  const configPath = await writeTestConfig(root);
+  let runtimeDir;
+
+  await assert.rejects(
+    launchNativeTui("codex", [], {
+      configPath,
+      binary: "/fake/stock-codex",
+      cwd: root,
+      launchLockDir: join(root, "locks"),
+      healthOptions: { skip: true },
+      verifyNativeExecutable: async () => ({ version: "test" }),
+      sanitizer: passThroughSanitizer,
+      verificationStore: new MemoryContextVerificationStore(),
+      auditCodexStaticStartupContext: async () => ({ fileCount: 0, serializedBytes: 0 }),
+      auditCodexStartupContext: async () => ({ itemCount: 1, primedItemCount: 1 }),
+      startCodexProviderGateway: async () => ({
+        baseURL: "http://127.0.0.1:17777/test-nonce",
+        async close() {
+          throw new Error("gateway close failed alone");
+        }
+      }),
+      spawnInherited: async (_command, _args, options) => {
+        runtimeDir = options.env.PRIVACYAI_WRAPPER_DIR;
+        return 0;
+      },
+      showLaunchProgress: false
+    }),
+    /gateway close failed alone/
+  );
+
+  await assert.rejects(access(runtimeDir), /ENOENT/);
+  const lock = await acquireNativeLaunchLock("codex", root, {
+    launchLockDir: join(root, "locks")
+  });
+  await lock.release();
+});
+
 test("a broken Codex executable fails before static scanning or gateway startup", async () => {
   const root = await createTestTempDir("privacyai-launch-broken-codex-");
   const configPath = await writeTestConfig(root);
