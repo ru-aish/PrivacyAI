@@ -1,4 +1,3 @@
-const GATEWAY_ERROR_MARKER = Symbol("privacyai.gateway.error");
 const SAFE_CODE_PATTERN = /^PRIVACYAI_[A-Z0-9_]{1,96}$/;
 const SAFE_PHASES = new Set(["request", "upstream_connect", "upstream_response", "sse"]);
 const SAFE_ROUTES = new Set(["responses", "responses_compact", "models", "gateway"]);
@@ -10,7 +9,6 @@ export function gatewayError(code, message) {
   }
   const error = new Error(message);
   error.code = code;
-  error[GATEWAY_ERROR_MARKER] = true;
   return error;
 }
 
@@ -20,6 +18,14 @@ export function publicGatewayFailure(error) {
     code,
     category: gatewayFailureCategory(code)
   };
+}
+
+export function publicGatewayHttpStatus(error) {
+  const failure = publicGatewayFailure(error);
+  if (failure.code === "PRIVACYAI_CODEX_BODY_TOO_LARGE") return 413;
+  if (failure.category === "privacy_boundary") return 422;
+  if (failure.category === "timeout") return 504;
+  return 502;
 }
 
 export function safeGatewayDiagnostic(error, options = {}) {
@@ -65,9 +71,12 @@ export function createGatewayDiagnosticReporter(callback, options = {}) {
 }
 
 function internalGatewayCode(error) {
-  if (error?.[GATEWAY_ERROR_MARKER] !== true) return null;
-  const code = String(error.code || "");
-  return SAFE_CODE_PATTERN.test(code) ? code : null;
+  const code = String(error?.code || "");
+  if (!SAFE_CODE_PATTERN.test(code)) return null;
+  // SDK and agent-bridge errors share the PRIVACYAI_* namespace. Safe SDK
+  // boundary codes must remain observable instead of collapsing to a generic
+  // gateway diagnostic.
+  return code;
 }
 
 function providerFailureCode(error) {

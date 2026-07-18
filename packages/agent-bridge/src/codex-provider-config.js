@@ -31,11 +31,13 @@ export function buildCodexProviderArgs(baseURL, options = {}) {
     "requires_openai_auth=true",
     "supports_websockets=false"
   ];
+  // PrivacyAI owns retry policy at the gateway boundary. Letting Codex replay a
+  // transformed request hides deterministic failures behind reconnect loops and
+  // can repeat stateful tool/history processing.
   for (const [field, value] of [
-    ["request_max_retries", options.requestMaxRetries],
-    ["stream_max_retries", options.streamMaxRetries]
+    ["request_max_retries", options.requestMaxRetries ?? 0],
+    ["stream_max_retries", options.streamMaxRetries ?? 0]
   ]) {
-    if (value == null) continue;
     if (!Number.isSafeInteger(value) || value < 0 || value > 100) {
       throw new TypeError(`${field} must be an integer between 0 and 100.`);
     }

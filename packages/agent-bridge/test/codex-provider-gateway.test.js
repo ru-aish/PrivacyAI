@@ -5,7 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { restoreValue } from "@privacy-ai/sdk";
-import { createGatewayDiagnosticReporter, publicGatewayFailure } from "../src/gateway-error.js";
+import {
+  createGatewayDiagnosticReporter,
+  publicGatewayFailure,
+  publicGatewayHttpStatus
+} from "../src/gateway-error.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
 import {
@@ -1831,6 +1835,13 @@ test("network diagnostic codes and bounded expiry-aware deduplication remain dis
   assert.deepEqual(publicGatewayFailure({ code: "EAI_AGAIN" }), {
     code: "PRIVACYAI_CODEX_UPSTREAM_DNS", category: "dns"
   });
+  assert.deepEqual(publicGatewayFailure({ code: "PRIVACYAI_INVALID_CLASSIFIER_SPAN" }), {
+    code: "PRIVACYAI_INVALID_CLASSIFIER_SPAN", category: "privacy_boundary"
+  });
+  assert.equal(publicGatewayHttpStatus({ code: "PRIVACYAI_INVALID_CLASSIFIER_SPAN" }), 422);
+  assert.equal(publicGatewayHttpStatus({ code: "PRIVACYAI_CODEX_BODY_TOO_LARGE" }), 413);
+  assert.equal(publicGatewayHttpStatus({ code: "ETIMEDOUT" }), 504);
+  assert.equal(publicGatewayHttpStatus(new Error("unknown")), 502);
   let clock = 1_000;
   const diagnostics = [];
   const report = createGatewayDiagnosticReporter(value => diagnostics.push(value), {
@@ -2012,7 +2023,7 @@ test("gateway validates and restores successful compact output item-by-item", as
     headers: { "content-type": "application/json" },
     body: JSON.stringify(nonStreaming)
   });
-  assert.equal(blocked.status, 502);
+  assert.equal(blocked.status, 422);
   assert.equal((await blocked.json()).error.code, "PRIVACYAI_CODEX_STREAM_REQUIRED");
 });
 
@@ -2104,7 +2115,7 @@ test("models route allowlists headers and the client_version query", async t => 
   assert.equal(seen[0].headers["x-private-note"], undefined);
 
   const invalid = await fetch(`${gateway.baseURL}/models?private=${encodeURIComponent(PRIVATE_EMAIL)}`);
-  assert.equal(invalid.status, 502);
+  assert.equal(invalid.status, 422);
   assert.equal((await invalid.json()).error.code, "PRIVACYAI_CODEX_INVALID_MODELS_QUERY");
   assert.equal(seen.length, 1);
 });
@@ -2270,6 +2281,47 @@ test("Codex sanitization batches independent model-visible artifacts", async () 
   assert.equal(result.cacheWrites.length, 3);
   assert.equal(new Set(result.cacheWrites.map(([key]) => key)).size, 3);
   assert.equal(result.metrics.modelCallCount, 1);
+});
+
+test("Codex second-turn tool output recovers conservative classifier spans around known values", async () => {
+  const secondPrivate = "bob.private@example.test";
+  const originalOutput = `Known ${PRIVATE_EMAIL}; new ${secondPrivate}`;
+  const body = sampleRequest();
+  body.instructions = "safe instructions";
+  body.input = [{
+    type: "function_call_output",
+    call_id: "call-second-turn-boundary",
+    output: originalOutput
+  }];
+  body.tools = [];
+  body.prompt_cache_key = "safe-second-turn-cache";
+  body.client_metadata = { session_id: "second-turn-boundary" };
+
+  const result = await sanitizeCodexRequestBody(body, {
+    sessionMap: { "[EMAIL_1]": PRIVATE_EMAIL },
+    sanitizer: async text => {
+      const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
+      assert.ok(token, "the known first-turn value should be shielded");
+      const mixedSpan = `${token}; new ${secondPrivate}`;
+      assert.equal(text.includes(mixedSpan), true);
+      return {
+        sanitizedPrompt: text.replace(mixedSpan, "[PRIVATE_VALUE_1]"),
+        sessionMap: { "[PRIVATE_VALUE_1]": mixedSpan }
+      };
+    }
+  });
+
+  assert.equal(result.body.input[0].output, "Known [PRIVATE_VALUE_1]");
+  assert.deepEqual(result.sessionMapAdditions, {
+    "[PRIVATE_VALUE_1]": `${PRIVATE_EMAIL}; new ${secondPrivate}`
+  });
+  assert.equal(
+    restoreValue(result.body.input[0].output, {
+      "[EMAIL_1]": PRIVATE_EMAIL,
+      ...result.sessionMapAdditions
+    }),
+    originalOutput
+  );
 });
 
 test("Codex leak verification ignores protocol booleans while protecting matching text", async () => {
@@ -2475,7 +2527,7 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
     headers: { "content-type": "application/json" },
     body: JSON.stringify(conflictedBody)
   });
-  assert.equal(conflicted.status, 502);
+  assert.equal(conflicted.status, 422);
   assert.equal(upstreamRequests, 1);
 
   maps.set("codex-provider:alias-heavy-child", {
@@ -2494,7 +2546,7 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
     headers: { "content-type": "application/json" },
     body: JSON.stringify(aliasHeavyBody)
   });
-  assert.equal(aliasHeavy.status, 502);
+  assert.equal(aliasHeavy.status, 422);
   assert.equal(upstreamRequests, 1);
 });
 
@@ -2657,6 +2709,8 @@ test("Codex provider args force loopback Responses transport and disable unsuppo
   const provider = args.find(value => value.startsWith("model_providers.privacyai="));
   assert.match(provider, /requires_openai_auth=true/);
   assert.match(provider, /supports_websockets=false/);
+  assert.match(provider, /request_max_retries=0/);
+  assert.match(provider, /stream_max_retries=0/);
   assert.equal(args.includes('web_search="disabled"'), true);
   for (const feature of ["enable_request_compression", "responses_websockets", "apps", "image_generation"]) {
     const index = args.indexOf(feature);
@@ -2847,6 +2901,32 @@ test("custom sanitizers without stable identity never reuse persisted verificati
   });
   assert.equal(response.status, 502);
   assert.equal(secondCalls, 1);
+});
+
+
+test("deterministic privacy-boundary failures are non-retryable HTTP 422 responses", async t => {
+  const diagnostics = [];
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async () => {
+      const error = new Error("local classifier returned an invalid exact span");
+      error.code = "PRIVACYAI_INVALID_CLASSIFIER_SPAN";
+      throw error;
+    },
+    onGatewayError: diagnostic => diagnostics.push(diagnostic),
+    baseDir: await createTestTempDir("privacyai-codex-boundary-status-"),
+    apiUpstream: "http://127.0.0.1:9/v1",
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).error.code, "PRIVACYAI_INVALID_CLASSIFIER_SPAN");
+  assertDiagnostic(diagnostics[0], "PRIVACYAI_INVALID_CLASSIFIER_SPAN", "privacy_boundary");
 });
 
 

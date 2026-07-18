@@ -26,9 +26,10 @@ import {
   verificationFingerprint
 } from "./context-verification-store.js";
 import {
+  createGatewayDiagnosticReporter,
   gatewayError,
   publicGatewayFailure,
-  createGatewayDiagnosticReporter
+  publicGatewayHttpStatus
 } from "./gateway-error.js";
 import {
   commitCodexMutationHistory,
@@ -792,7 +793,7 @@ function writeGatewayFailure(response, error) {
     return;
   }
   const { code } = publicGatewayFailure(error);
-  const status = code === "PRIVACYAI_CODEX_BODY_TOO_LARGE" ? 413 : 502;
+  const status = publicGatewayHttpStatus(error);
   writeJson(response, status, {
     error: {
       type: "privacyai_gateway_error",
