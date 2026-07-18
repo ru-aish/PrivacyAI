@@ -97,12 +97,14 @@ with a stable SHA-256-derived local identifier. Workspace metadata and unknown
 client metadata are removed before forwarding.
 
 The local classifier window is independent of the target Codex model window.
-PrivacyAI groups model-visible data by owning artifact—such as one message, tool
-result, instruction block, tool definition, or output schema—then processes each
-artifact sequentially. Oversized artifacts are split into bounded overlapping
-chunks and rebuilt locally before the complete sanitized request is forwarded.
-Unrelated artifacts are never mixed into one classifier call, and an unchanged
-artifact can reuse its persisted verification without rescanning the thread.
+PrivacyAI packs uncached model-visible slots—messages, tool results,
+instructions, tool definitions, and output schemas—into bounded classifier
+requests, then rebuilds the complete request locally. Oversized values are split
+into bounded overlapping chunks. Packing reduces local-model calls, while every
+original slot keeps its own verification-cache record, so an unchanged artifact
+can still be reused without rescanning the thread. See
+[`docs/local-model-pipeline.md`](../../docs/local-model-pipeline.md) for context
+defaults, Ollama fallback behavior, and the classifier-concurrency setting.
 
 If Codex disconnects while classification or streaming is active, the abort
 propagates through the artifact loop and into the LM Studio/Ollama HTTP request.

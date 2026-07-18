@@ -44,3 +44,37 @@ test("configFromEnv defaults to strict sanitization and accepts an explicit mode
     else process.env.PRIVATE_AI_SANITIZATION_MODE = original;
   }
 });
+
+test("configFromEnv uses the shared 8192-token local context default", () => {
+  const original = process.env.PRIVATE_AI_NUM_CTX;
+  try {
+    delete process.env.PRIVATE_AI_NUM_CTX;
+    assert.equal(configFromEnv({ loadEnv: false }).numCtx, 8192);
+  } finally {
+    if (original === undefined) delete process.env.PRIVATE_AI_NUM_CTX;
+    else process.env.PRIVATE_AI_NUM_CTX = original;
+  }
+});
+
+test("configFromEnv validates local-model concurrency and Ollama keep-alive", () => {
+  const originalConcurrency = process.env.PRIVATE_AI_CLASSIFIER_CONCURRENCY;
+  const originalKeepAlive = process.env.PRIVATE_AI_OLLAMA_KEEP_ALIVE;
+  try {
+    process.env.PRIVATE_AI_CLASSIFIER_CONCURRENCY = "2";
+    process.env.PRIVATE_AI_OLLAMA_KEEP_ALIVE = "30m";
+    const config = configFromEnv({ loadEnv: false });
+    assert.equal(config.classifierConcurrency, 2);
+    assert.equal(config.keepAlive, "30m");
+
+    process.env.PRIVATE_AI_CLASSIFIER_CONCURRENCY = "3";
+    assert.throws(() => configFromEnv({ loadEnv: false }), /Classifier concurrency/);
+    process.env.PRIVATE_AI_CLASSIFIER_CONCURRENCY = "1";
+    process.env.PRIVATE_AI_OLLAMA_KEEP_ALIVE = "25h";
+    assert.throws(() => configFromEnv({ loadEnv: false }), /between 0 and 24 hours/);
+  } finally {
+    if (originalConcurrency === undefined) delete process.env.PRIVATE_AI_CLASSIFIER_CONCURRENCY;
+    else process.env.PRIVATE_AI_CLASSIFIER_CONCURRENCY = originalConcurrency;
+    if (originalKeepAlive === undefined) delete process.env.PRIVATE_AI_OLLAMA_KEEP_ALIVE;
+    else process.env.PRIVATE_AI_OLLAMA_KEEP_ALIVE = originalKeepAlive;
+  }
+});

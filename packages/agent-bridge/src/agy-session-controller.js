@@ -96,6 +96,8 @@ export async function createAgySessionController(options = {}) {
           cache,
           policyFingerprint: context.policyFingerprint,
           maxContextChars: context.maxContextChars,
+          maxContextTokens: context.maxContextTokens,
+          tokenCounter: context.tokenCounter,
           maxImagesPerRequest: context.maxImagesPerRequest,
           fallbackSessionId: requestOptions.fallbackSessionId,
           signal: requestOptions.signal,

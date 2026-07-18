@@ -117,10 +117,19 @@ PRIVATE_AI_PROVIDER=ollama
 # Optional
 PRIVATE_AI_ENV_FILE=.env
 PRIVATE_AI_TIMEOUT_MS=60000
-PRIVATE_AI_NUM_CTX=4096
+PRIVATE_AI_NUM_CTX=8192
+PRIVATE_AI_CLASSIFIER_CONCURRENCY=1
+PRIVATE_AI_OLLAMA_KEEP_ALIVE=10m
 PRIVATE_AI_LOCAL_DETECTOR_ENABLED=false
 PRIVATE_AI_LOCAL_DETECTOR_MODEL=qwen3.5:2b
 ```
+
+The fixed 8192-token context, sticky Ollama 6144 memory fallback, bounded
+classifier concurrency, token-aware batching, and cache-first packing policy are
+described in [`docs/local-model-pipeline.md`](../../docs/local-model-pipeline.md).
+PrivacyAI excludes embedding-only models from its own discovery, but it cannot
+control external embedding workloads or prevent another process from evicting a
+local runner.
 
 OpenAI-compatible aliases are also supported:
 

@@ -12,6 +12,7 @@ import {
   collectCodexJsonSchema,
   finalizeCodexJsonSchemaTrace
 } from "./codex-json-schema-policy.js";
+import { packUncachedArtifactEntries } from "./artifact-packing.js";
 
 const ALLOWED_TOP_LEVEL_FIELDS = new Set([
   "model",
@@ -141,6 +142,8 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
         sanitizer: options.sanitizer,
         sessionMap: completeMap,
         maxContextChars: options.maxContextChars,
+        maxContextTokens: options.maxContextTokens,
+        tokenCounter: options.tokenCounter,
         signal: options.signal,
         onBatchComplete: options.onBatchComplete
       });
@@ -192,7 +195,15 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   }
 
   if (uncached.length > 0) {
-    const artifacts = groupUncachedArtifacts(uncached);
+    const artifacts = packUncachedArtifactEntries(uncached, {
+      maxContextChars: options.maxContextChars,
+      maxContextTokens: options.maxContextTokens,
+      tokenCounter: options.tokenCounter
+    });
+    const originalArtifactCount = artifacts.reduce(
+      (count, pack) => count + pack.artifacts.length,
+      0
+    );
     for (let artifactIndex = 0; artifactIndex < artifacts.length; artifactIndex += 1) {
       throwIfAborted(options.signal);
       const artifact = artifacts[artifactIndex];
@@ -200,6 +211,8 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
         sanitizer: options.sanitizer,
         sessionMap: completeMap,
         maxContextChars: options.maxContextChars,
+        maxContextTokens: options.maxContextTokens,
+        tokenCounter: options.tokenCounter,
         artifactType: `codex_${artifact.artifactType}`,
         signal: options.signal,
         onBatchComplete: typeof options.onBatchComplete === "function"
@@ -232,13 +245,15 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
         }]);
       }
       if (typeof options.onArtifactComplete === "function") {
-        await options.onArtifactComplete({
-          artifactIndex,
-          artifactCount: artifacts.length,
-          artifactKey: artifact.artifactKey,
-          artifactType: artifact.artifactType,
-          slotCount: artifact.entries.length
-        });
+        for (const originalArtifact of artifact.artifacts) {
+          await options.onArtifactComplete({
+            artifactIndex: originalArtifact.artifactIndex,
+            artifactCount: originalArtifactCount,
+            artifactKey: originalArtifact.artifactKey,
+            artifactType: originalArtifact.artifactType,
+            slotCount: originalArtifact.entries.length
+          });
+        }
       }
     }
   }
@@ -1610,23 +1625,6 @@ function modelVisibleCacheKey(value, artifactType, policyFingerprint) {
 
 function modelVisibleContentHash(value) {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function groupUncachedArtifacts(entries) {
-  const groups = new Map();
-  for (const entry of entries) {
-    let group = groups.get(entry.artifactKey);
-    if (!group) {
-      group = {
-        artifactKey: entry.artifactKey,
-        artifactType: entry.artifactType,
-        entries: []
-      };
-      groups.set(entry.artifactKey, group);
-    }
-    group.entries.push(entry);
-  }
-  return [...groups.values()];
 }
 
 function artifactIdentityForSlot(entry) {

@@ -83,7 +83,7 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   assert.equal(spawned.args.includes("exec"), true);
   assert.equal(spawned.args.indexOf("exec") > spawned.args.indexOf('model_provider="privacyai"'), true);
   assert.equal(spawned.args.includes("--privacy-gateway"), false);
-  assert.equal(gatewayOptions.maxContextChars, 5120);
+  assert.equal(gatewayOptions.maxContextChars, 13312);
   assert.equal(gatewayOptions.verificationStore, verificationStore);
   await assert.rejects(access(spawned.options.env.PRIVACYAI_WRAPPER_DIR), /ENOENT/);
 });
@@ -379,10 +379,10 @@ test("native launch lock rejects a duplicate live wrapper and recovers after rel
 });
 
 test("local-model budgets derive bounded chunk and output sizes from numCtx", () => {
-  assert.equal(derivePrivacyMaxTokens({ numCtx: 4096 }), 1024);
-  assert.equal(derivePrivacyContextMaxChars({ numCtx: 4096 }), 5120);
+  assert.equal(derivePrivacyMaxTokens({ numCtx: 4096 }), 512);
+  assert.equal(derivePrivacyContextMaxChars({ numCtx: 4096 }), 5632);
   assert.equal(derivePrivacyMaxTokens({ numCtx: 2048 }), 512);
-  assert.equal(derivePrivacyContextMaxChars({ numCtx: 2048 }), 2048);
+  assert.equal(derivePrivacyContextMaxChars({ numCtx: 2048 }), 1536);
   assert.equal(
     derivePrivacyContextMaxChars({ numCtx: 4096 }, { providerContextMaxChars: 7777 }),
     7777

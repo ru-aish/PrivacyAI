@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 
 import {
+  DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
   PrivateAI,
   ProviderError,
-  STRICT_PRIVACY_SANITIZER_PROMPT
+  STRICT_PRIVACY_SANITIZER_PROMPT,
+  derivePrivacyInputTokenBudget,
+  normalizeLocalModelContextTokens,
+  normalizePrivacyOutputTokens
 } from "@privacy-ai/sdk";
 
 const DEFAULT_TRANSIENT_RETRY_COUNT = 1;
@@ -21,8 +25,11 @@ export function createPrivacySanitizer(config, options = {}) {
     apiKey: config.apiKey,
     timeoutMs: config.timeoutMs,
     numCtx: config.numCtx,
+    fallbackNumCtx: config.fallbackNumCtx,
+    keepAlive: config.keepAlive,
     fetch: options.fetch,
     privacyMaxTokens,
+    classifierConcurrency: options.classifierConcurrency ?? config.classifierConcurrency,
     sanitizationMode: "strict",
     loadEnv: false
   });
@@ -75,16 +82,22 @@ export function isTransientProviderError(error, signal) {
     error.details?.error != null;
 }
 
-export function derivePrivacyMaxTokens(config = {}, options = {}) {
-  if (options.privacyMaxTokens != null) {
-    const explicit = Number(options.privacyMaxTokens);
+export function derivePrivacyMaxTokens(_config = {}, options = {}) {
+  return normalizePrivacyOutputTokens(options.privacyMaxTokens);
+}
+
+export function derivePrivacyContextMaxTokens(config = {}, options = {}) {
+  if (options.providerContextMaxTokens != null) {
+    const explicit = Number(options.providerContextMaxTokens);
     if (!Number.isSafeInteger(explicit) || explicit <= 0) {
-      throw new TypeError("privacyMaxTokens must be a positive safe integer.");
+      throw new TypeError("providerContextMaxTokens must be a positive safe integer.");
     }
     return explicit;
   }
-  const numCtx = normalizedContextTokens(config.numCtx);
-  return Math.min(1024, Math.max(256, Math.floor(numCtx / 4)));
+  return derivePrivacyInputTokenBudget(
+    normalizedContextTokens(config.numCtx),
+    derivePrivacyMaxTokens(config, options)
+  );
 }
 
 export function derivePrivacyContextMaxChars(config = {}, options = {}) {
@@ -96,21 +109,14 @@ export function derivePrivacyContextMaxChars(config = {}, options = {}) {
     return explicit;
   }
 
-  const numCtx = normalizedContextTokens(config.numCtx);
-  const outputTokens = derivePrivacyMaxTokens(config, options);
-  const systemAndProtocolReserve = Math.max(512, Math.floor(numCtx / 8));
-  const inputTokens = Math.max(768, numCtx - outputTokens - systemAndProtocolReserve);
-  // Two characters per token is deliberately conservative for code, JSON, and
-  // identifiers, where the common four-character heuristic is unsafe.
-  return inputTokens * 2;
+  // Keep an independent hard character ceiling even though batching is token
+  // aware. This protects reconstruction memory and prevents a permissive exact
+  // tokenizer from creating giant classifier payloads.
+  return derivePrivacyContextMaxTokens(config, options) * 2;
 }
 
 function normalizedContextTokens(value) {
-  const numCtx = Number(value || 4096);
-  if (!Number.isSafeInteger(numCtx) || numCtx < 2048) {
-    throw new TypeError("PrivacyAI local-model context must be at least 2048 tokens.");
-  }
-  return numCtx;
+  return normalizeLocalModelContextTokens(value, DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS);
 }
 
 function transientRetryCount(value) {

@@ -274,7 +274,7 @@ test("AGY transport launch preserves native arguments and cleans up the runtime"
     sanitizer,
     startAgyTransportRuntime: async options => {
       assert.equal(options.sanitizer, sanitizer);
-      assert.equal(options.maxContextChars, 5120);
+      assert.equal(options.maxContextChars, 13312);
       return {
         env: {
           HTTPS_PROXY: "http://privacyai:test@127.0.0.1:1234",

@@ -3,6 +3,15 @@ import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
+import {
+  DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
+  DEFAULT_OLLAMA_KEEP_ALIVE,
+  OLLAMA_MEMORY_FALLBACK_CONTEXT_TOKENS,
+  normalizeClassifierConcurrency,
+  normalizeLocalModelContextTokens,
+  normalizeOllamaKeepAlive
+} from "@privacy-ai/sdk";
+
 const CONFIG_VERSION = 1;
 
 export function defaultConfigPath() {
@@ -52,6 +61,12 @@ export function normalizeConfig(value) {
   }
   assertLocalPrivacyEndpoint(baseURL);
 
+  const numCtx = normalizeLocalModelContextTokens(
+    value.numCtx,
+    DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS
+  );
+  const fallbackNumCtx = normalizeFallbackContext(value.fallbackNumCtx, numCtx);
+
   return {
     version: CONFIG_VERSION,
     provider,
@@ -59,9 +74,28 @@ export function normalizeConfig(value) {
     baseURL,
     apiKey: typeof value.apiKey === "string" && value.apiKey ? value.apiKey : "not-required",
     timeoutMs: Number.isFinite(Number(value.timeoutMs)) ? Number(value.timeoutMs) : 60000,
-    numCtx: Number.isFinite(Number(value.numCtx)) ? Number(value.numCtx) : 4096,
+    numCtx,
+    fallbackNumCtx,
+    keepAlive: normalizeOllamaKeepAlive(value.keepAlive, DEFAULT_OLLAMA_KEEP_ALIVE),
+    classifierConcurrency: normalizeClassifierConcurrency(value.classifierConcurrency),
     onboardedAt: value.onboardedAt || new Date().toISOString()
   };
+}
+
+
+function normalizeFallbackContext(value, numCtx) {
+  if (value != null) {
+    const fallback = normalizeLocalModelContextTokens(value);
+    if (fallback >= numCtx) {
+      throw new TypeError("fallbackNumCtx must be smaller than numCtx.");
+    }
+    return fallback;
+  }
+  if (numCtx <= 2048) return null;
+  return Math.min(
+    OLLAMA_MEMORY_FALLBACK_CONTEXT_TOKENS,
+    Math.max(2048, Math.floor(numCtx * 0.75))
+  );
 }
 
 export function assertLocalPrivacyEndpoint(baseURL, options = {}) {

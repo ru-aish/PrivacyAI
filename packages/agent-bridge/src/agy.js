@@ -21,7 +21,8 @@ import { resolveExecutable } from "./executable.js";
 import { checkPrivacyModel, privacyModelHealthError } from "./model-health.js";
 import {
   createPrivacySanitizer,
-  derivePrivacyContextMaxChars
+  derivePrivacyContextMaxChars,
+  derivePrivacyContextMaxTokens
 } from "./privacy-sanitizer.js";
 import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
 import { startAgyTransportRuntime } from "./agy-transport-runtime.js";
@@ -84,6 +85,9 @@ export async function launchAgy(userArgs = [], options = {}) {
     baseEnv,
     maxContextChars:
       options.maxContextChars ?? derivePrivacyContextMaxChars(loaded.config, options),
+    maxContextTokens:
+      options.maxContextTokens ?? derivePrivacyContextMaxTokens(loaded.config, options),
+    tokenCounter: options.tokenCounter,
     onProxyError
   });
   try {

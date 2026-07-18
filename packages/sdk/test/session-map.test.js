@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AsyncConcurrencyLimiter,
   StreamingPlaceholderRestorer,
   assertNoProtectedOriginals,
   assertNoProtectedOriginalsInValue,
+  estimatePrivacyTokens,
   findUnresolvedPlaceholders,
   normalizeSessionMap,
   rebaseSessionAdditions,
@@ -335,4 +337,66 @@ test("chunk overlap contains every accepted 512-character private span", async (
   assert.equal(containingCalls >= 1, true);
   assert.equal(result.value.includes(secret), false);
   assert.equal(restoreValue(result.value, result.sessionMapAdditions), input);
+});
+
+
+test("privacy token estimation is text-aware and accepts an exact synchronous counter", () => {
+  const prose = estimatePrivacyTokens("ordinary prose with repeated words and spacing");
+  const code = estimatePrivacyTokens("const value={token:'x',items:[1,2,3]};");
+  const unicode = estimatePrivacyTokens("秘密🔐भारत");
+  assert.equal(prose > 0, true);
+  assert.equal(code > 0, true);
+  assert.equal(unicode > 0, true);
+  assert.notEqual(prose, Math.ceil("ordinary prose with repeated words and spacing".length / 2));
+  assert.equal(estimatePrivacyTokens("anything", () => 7), 7);
+  assert.throws(() => estimatePrivacyTokens("anything", () => -1), /tokenCounter/);
+});
+
+test("structured sanitization enforces character and token budgets and reports token metadata", async () => {
+  const input = { text: "alpha beta gamma ".repeat(180) };
+  const batches = [];
+  const tokenCounter = text => Math.ceil([...text].length / 4);
+  const result = await sanitizeStructuredValue(input, {
+    maxContextChars: 1400,
+    maxContextTokens: 350,
+    tokenCounter,
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+    onBatchComplete: details => batches.push(details)
+  });
+  assert.deepEqual(result.value, input);
+  assert.equal(batches.length > 1, true);
+  assert.equal(batches.every(batch => batch.inputChars <= 1400), true);
+  assert.equal(batches.every(batch => batch.estimatedInputTokens <= 350), true);
+  assert.equal(batches.every(batch => Number.isSafeInteger(batch.estimatedInputTokens)), true);
+});
+
+test("AsyncConcurrencyLimiter caps at two and releases permits after failures", async () => {
+  assert.throws(() => new AsyncConcurrencyLimiter(3), /between 1 and 2/);
+  const limiter = new AsyncConcurrencyLimiter(2);
+  let active = 0;
+  let peak = 0;
+  const releases = [];
+  const run = (label, fail = false) => limiter.run(async () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await new Promise(resolve => releases.push(resolve));
+    active -= 1;
+    if (fail) throw new Error(label);
+    return label;
+  });
+  const first = run("first", true);
+  const second = run("second");
+  const third = run("third");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(peak, 2);
+  assert.equal(releases.length, 2);
+  releases.shift()();
+  await assert.rejects(first, /first/);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(releases.length, 2, "the queued third operation should acquire the released permit");
+  releases.shift()();
+  await second;
+  releases.shift()();
+  assert.equal(await third, "third");
+  assert.equal(active, 0);
 });

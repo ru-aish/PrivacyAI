@@ -241,6 +241,8 @@ async function handleRequestCore(request, response, context) {
       cache,
       policyFingerprint: context.policyFingerprint,
       maxContextChars: context.maxContextChars,
+      maxContextTokens: context.maxContextTokens,
+      tokenCounter: context.tokenCounter,
       headers: request.headers,
       signal: context.requestSignal,
       onBatchComplete: context.onSanitizerBatchComplete,

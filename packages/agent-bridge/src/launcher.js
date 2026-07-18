@@ -33,7 +33,8 @@ import {
 } from "./native-hooks.js";
 import {
   createPrivacySanitizer,
-  derivePrivacyContextMaxChars
+  derivePrivacyContextMaxChars,
+  derivePrivacyContextMaxTokens
 } from "./privacy-sanitizer.js";
 import { prepareAgentRuntimeIsolation } from "./runtime-isolation.js";
 import {
@@ -116,6 +117,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
 
     const sanitizer = options.sanitizer || createPrivacySanitizer(loaded.config, options);
     const providerContextMaxChars = derivePrivacyContextMaxChars(loaded.config, options);
+    const providerContextMaxTokens = derivePrivacyContextMaxTokens(loaded.config, options);
 
     if (flavor === "codex" && codexInvocation.mode === "gateway") {
       verificationStore = await openContextVerificationStore(options);
@@ -128,6 +130,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         env,
         sanitizer,
         maxContextChars: options.startupContextMaxChars ?? providerContextMaxChars,
+        maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         maxBytes: options.startupStaticMaxBytes,
         maxFiles: options.startupContextMaxFiles,
         verificationStore,
@@ -148,6 +151,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         verificationStore,
         baseDir: options.vaultDir,
         maxContextChars: providerContextMaxChars,
+        maxContextTokens: providerContextMaxTokens,
         maxRequestBytes: options.providerMaxRequestBytes,
         maxResponseBytes: options.providerMaxResponseBytes,
         maxVerifiedItems: options.maxVerifiedItems,
@@ -176,6 +180,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         timeoutMs: options.startupAuditTimeoutMs,
         maxBytes: options.startupAuditMaxBytes,
         maxContextChars: options.startupContextMaxChars ?? providerContextMaxChars,
+        maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         verificationStore,
         policyFingerprint,
         blockHighRisk: false,
@@ -225,6 +230,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         cwd,
         sanitizer,
         maxContextChars: options.startupContextMaxChars ?? providerContextMaxChars,
+        maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         maxFiles: options.startupContextMaxFiles,
         verificationStore,
         policyFingerprint
@@ -237,6 +243,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         env,
         sanitizer,
         maxContextChars: options.startupContextMaxChars ?? providerContextMaxChars,
+        maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         maxBytes: options.startupStaticMaxBytes,
         maxFiles: options.startupContextMaxFiles,
         verificationStore,
@@ -264,6 +271,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         timeoutMs: options.startupAuditTimeoutMs,
         maxBytes: options.startupAuditMaxBytes,
         maxContextChars: options.startupContextMaxChars ?? providerContextMaxChars,
+        maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         verificationStore,
         policyFingerprint,
         blockHighRisk: true

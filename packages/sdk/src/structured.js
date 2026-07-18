@@ -4,6 +4,7 @@ import {
   rebaseSessionAdditions,
   sanitizeKnownText
 } from "./session-map.js";
+import { estimatePrivacyTokens, normalizeTokenBudget } from "./token-budget.js";
 
 const DEFAULT_MAX_CONTEXT_CHARS = 200000;
 const MAX_PRIVATE_SPAN_CHARS = 512;
@@ -22,6 +23,11 @@ export async function sanitizeStructuredValue(value, options = {}) {
   if (!Number.isSafeInteger(maxContextChars) || maxContextChars <= 0) {
     throw new TypeError("maxContextChars must be a positive safe integer.");
   }
+  const maxContextTokens = normalizeTokenBudget(
+    options.maxContextTokens,
+    Math.max(2048, Math.floor(maxContextChars / 2))
+  );
+  const countTokens = text => estimatePrivacyTokens(text, options.tokenCounter);
 
   const slots = [];
   const template = describeValue(value, slots);
@@ -31,25 +37,23 @@ export async function sanitizeStructuredValue(value, options = {}) {
   if (typeof options.sanitizer !== "function") {
     throw new TypeError("Structured privacy sanitization requires a sanitizer function.");
   }
-  if (maxContextChars <= MAX_PRIVATE_SPAN_CHARS * 2 + BATCH_OVERHEAD_CHARS) {
-    const error = new Error(
-      `PrivacyAI cannot safely overlap private spans inside a ${maxContextChars}-character classifier window.`
-    );
-    error.code = "PRIVACYAI_CONTEXT_TOO_LARGE";
-    throw error;
-  }
+  assertSafeClassifierWindow(maxContextChars, maxContextTokens, countTokens);
 
   const state = {
     completeMap: { ...initialMap },
     additions: {}
   };
-  const units = buildUnits(slots, maxContextChars - BATCH_OVERHEAD_CHARS);
-  const batches = buildBatches(units, maxContextChars);
+  const units = buildUnits(slots, maxContextChars, maxContextTokens, countTokens);
+  const batches = buildBatches(units, maxContextChars, maxContextTokens);
 
   for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
     throwIfAborted(options.signal);
     const batch = batches[batchIndex];
     const rawBatchText = encodeBatch(batch);
+    const inputTokens = countTokens(rawBatchText);
+    if (rawBatchText.length > maxContextChars || inputTokens > maxContextTokens) {
+      throw contextWindowError(maxContextChars, maxContextTokens);
+    }
     const knownSafeText = sanitizeKnownText(rawBatchText, state.completeMap);
     const shield = shieldKnownPlaceholders(knownSafeText, Object.keys(state.completeMap));
     const result = await options.sanitizer(shield.text, {
@@ -83,7 +87,8 @@ export async function sanitizeStructuredValue(value, options = {}) {
         batchIndex,
         batchCount: batches.length,
         unitCount: batch.length,
-        inputChars: rawBatchText.length
+        inputChars: rawBatchText.length,
+        estimatedInputTokens: inputTokens
       });
     }
   }
@@ -122,9 +127,6 @@ function describeValue(value, slots, options = {}) {
 
   const entries = [];
   for (const [key, entry] of Object.entries(value)) {
-    // Object keys are model-visible data too. Always classify them; otherwise
-    // identifier-shaped credentials can bypass scanning simply by appearing as
-    // a key rather than a value.
     const keyDescriptor = describeValue(key, slots, { kind: "key" });
     entries.push({ key: keyDescriptor, value: describeValue(entry, slots) });
   }
@@ -162,29 +164,48 @@ function rebuildValue(template, resolved) {
   }
 }
 
-function buildUnits(slots, maxChunkChars) {
+function assertSafeClassifierWindow(maxChars, maxTokens, countTokens) {
+  if (maxChars <= MAX_PRIVATE_SPAN_CHARS * 2 + BATCH_OVERHEAD_CHARS) {
+    throw contextWindowError(maxChars, maxTokens);
+  }
+  const probe = `${unitHeader({ slotIndex: 0, chunkIndex: 0 })}${"!".repeat(MAX_PRIVATE_SPAN_CHARS * 2)}`;
+  if (countTokens(probe) > maxTokens) throw contextWindowError(maxChars, maxTokens);
+}
+
+function buildUnits(slots, maxChars, maxTokens, countTokens) {
   const units = [];
   slots.forEach((slot, slotIndex) => {
-    splitText(slot.value, maxChunkChars).forEach((text, chunkIndex) => {
-      units.push({ slotIndex, chunkIndex, text });
+    splitText(slot.value, slotIndex, maxChars, maxTokens, countTokens).forEach((text, chunkIndex) => {
+      const unit = { slotIndex, chunkIndex, text };
+      unit.encodedChars = encodedUnitLength(unit);
+      unit.estimatedTokens = countTokens(`${unitHeader(unit)}${unit.text}`);
+      if (unit.encodedChars > maxChars || unit.estimatedTokens > maxTokens) {
+        throw contextWindowError(maxChars, maxTokens);
+      }
+      units.push(unit);
     });
   });
   return units;
 }
 
-function buildBatches(units, maxContextChars) {
+function buildBatches(units, maxContextChars, maxContextTokens) {
   const batches = [];
   let current = [];
   let currentLength = 0;
+  let currentTokens = 0;
   for (const unit of units) {
-    const encodedLength = encodedUnitLength(unit);
-    if (current.length > 0 && currentLength + encodedLength > maxContextChars) {
+    if (current.length > 0 && (
+      currentLength + unit.encodedChars > maxContextChars ||
+      currentTokens + unit.estimatedTokens > maxContextTokens
+    )) {
       batches.push(current);
       current = [];
       currentLength = 0;
+      currentTokens = 0;
     }
     current.push(unit);
-    currentLength += encodedLength;
+    currentLength += unit.encodedChars;
+    currentTokens += unit.estimatedTokens;
   }
   if (current.length > 0) batches.push(current);
   return batches;
@@ -202,35 +223,73 @@ function unitHeader(unit) {
   return `\n__PRIVACYAI_SLOT_${unit.slotIndex}_${unit.chunkIndex}__\n`;
 }
 
-function splitText(text, maxChars) {
-  if (text.length <= maxChars) return [text];
-  // A private span accepted at MAX_PRIVATE_SPAN_CHARS must be wholly present
-  // in at least one adjacent chunk. The minimum configured window guarantees
-  // maxChars is large enough for this overlap.
-  const overlap = Math.min(
-    MAX_CHUNK_OVERLAP,
-    MAX_PRIVATE_SPAN_CHARS,
-    Math.floor(maxChars / 2)
-  );
+function splitText(text, slotIndex, maxChars, maxTokens, countTokens) {
   const chunks = [];
   let start = 0;
-  while (start < text.length) {
-    let end = Math.min(text.length, start + maxChars);
-    if (end < text.length) end = preferredBoundary(text, start, end, maxChars);
-    chunks.push(text.slice(start, end));
+  let chunkIndex = 0;
+  while (start < text.length || (text.length === 0 && chunkIndex === 0)) {
+    const header = unitHeader({ slotIndex, chunkIndex });
+    const hardCharEnd = Math.min(text.length, start + Math.max(1, maxChars - header.length));
+    let end = largestFittingEnd(text, start, hardCharEnd, header, maxTokens, countTokens);
+    if (end <= start && text.length > 0) throw contextWindowError(maxChars, maxTokens);
+    if (end < text.length) {
+      const bounded = preferredBoundary(text, start, end, Math.max(1, end - start));
+      if (bounded > start) end = bounded;
+    }
+    end = avoidBrokenSurrogate(text, start, end);
+    const chunk = text.slice(start, end);
+    if (header.length + chunk.length > maxChars || countTokens(`${header}${chunk}`) > maxTokens) {
+      throw contextWindowError(maxChars, maxTokens);
+    }
+    chunks.push(chunk);
+    chunkIndex += 1;
     if (end >= text.length) break;
+    const overlap = Math.min(
+      MAX_CHUNK_OVERLAP,
+      MAX_PRIVATE_SPAN_CHARS,
+      Math.floor((end - start) / 2)
+    );
     start = Math.max(start + 1, end - overlap);
   }
   return chunks;
 }
 
-function preferredBoundary(text, start, hardEnd, maxChars) {
-  const minimum = start + Math.floor(maxChars * 0.65);
+function largestFittingEnd(text, start, hardEnd, header, maxTokens, countTokens) {
+  let low = start;
+  let high = hardEnd;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (countTokens(`${header}${text.slice(start, middle)}`) <= maxTokens) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
+function avoidBrokenSurrogate(text, start, end) {
+  if (end <= start || end >= text.length) return end;
+  const previous = text.charCodeAt(end - 1);
+  const next = text.charCodeAt(end);
+  if (previous >= 0xd800 && previous <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+    return end - 1;
+  }
+  return end;
+}
+
+function preferredBoundary(text, start, hardEnd, span) {
+  const minimum = start + Math.floor(span * 0.65);
   const window = text.slice(minimum, hardEnd);
   const newline = window.lastIndexOf("\n");
   if (newline !== -1) return minimum + newline + 1;
   const whitespace = Math.max(window.lastIndexOf(" "), window.lastIndexOf("\t"));
   return whitespace === -1 ? hardEnd : minimum + whitespace + 1;
+}
+
+function contextWindowError(maxChars, maxTokens) {
+  const error = new Error(
+    `PrivacyAI cannot safely overlap private spans inside a ${maxChars}-character/${maxTokens}-token classifier window.`
+  );
+  error.code = "PRIVACYAI_CONTEXT_TOO_LARGE";
+  return error;
 }
 
 function filterClassifierMap(inputText, sessionMap) {

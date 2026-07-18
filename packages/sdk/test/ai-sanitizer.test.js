@@ -45,6 +45,102 @@ test("strict sanitizer accepts compact exact-span output without reproducing the
   assert.equal(result.sanitizedText.includes("private.person@example.test"), false);
 });
 
+test("strict sanitizer retries once with a larger output only after explicit truncation", async () => {
+  const requested = [];
+  const provider = {
+    async chat(request) {
+      requested.push(request.maxTokens);
+      return {
+        text: JSON.stringify({ spans: [{ value: "secret@example.test", type: "EMAIL" }] }),
+        raw: { done_reason: "length" },
+        provider: {}
+      };
+    }
+  };
+  const result = await new AiSanitizer({ provider, privacyMaxTokens: 256 }).sanitize("secret@example.test");
+  assert.deepEqual(requested, [256, 512]);
+  assert.equal(result.sanitizedText.includes("secret@example.test"), false);
+});
+
+test("strict sanitizer does not increase its output budget for malformed output", async () => {
+  const requested = [];
+  const provider = {
+    async chat(request) {
+      requested.push(request.maxTokens);
+      return { text: "not json", raw: { done_reason: "stop" }, provider: {} };
+    }
+  };
+  await new AiSanitizer({ provider, privacyMaxTokens: 256 }).sanitize("safe input");
+  assert.deepEqual(requested, [256, 256], "the normal repair may retry, but never with a larger budget");
+});
+
+test("AiSanitizer bounds concurrent local-model calls and removes cancelled queued work", async () => {
+  const started = [];
+  const releases = [];
+  const provider = {
+    chat(request) {
+      started.push(request.messages.at(-1).content);
+      return new Promise(resolve => releases.push(() => resolve({
+        text: JSON.stringify({ spans: [] }), raw: { done_reason: "stop" }, provider: {}
+      })));
+    }
+  };
+  const sanitizer = new AiSanitizer({ provider, classifierConcurrency: 1 });
+  const first = sanitizer.sanitize("first");
+  const controller = new AbortController();
+  const cancelled = sanitizer.sanitize("cancelled", { signal: controller.signal });
+  const third = sanitizer.sanitize("third");
+
+  await settle();
+  assert.deepEqual(started, ["first"]);
+  const cancellation = Object.assign(new Error("cancelled"), { code: "PRIVACYAI_REQUEST_ABORTED" });
+  controller.abort(cancellation);
+  await assert.rejects(cancelled, error => error === cancellation);
+  releases.shift()();
+  await first;
+  await settle();
+  assert.deepEqual(started, ["first", "third"]);
+  releases.shift()();
+  await third;
+});
+
+test("Ollama retains the model and falls back from 8192 to 6144 only for memory errors", async () => {
+  const bodies = [];
+  const provider = new OllamaProvider({
+    fetch: async (_url, request) => {
+      bodies.push(JSON.parse(request.body));
+      if (bodies.length === 1) return new Response("requires more system memory", { status: 500 });
+      return new Response(JSON.stringify({ message: { content: "ok" }, done_reason: "stop" }), { status: 200 });
+    }
+  });
+  const result = await provider.chat({ messages: [{ role: "user", content: "test" }] });
+  await provider.chat({ messages: [{ role: "user", content: "test again" }] });
+  assert.equal(result.text, "ok");
+  assert.deepEqual(bodies.map(body => body.options.num_ctx), [8192, 6144, 6144]);
+  assert.equal(bodies[0].keep_alive, "10m");
+});
+
+test("Ollama does not lower an explicit context or retry non-memory failures", async () => {
+  const bodies = [];
+  const provider = new OllamaProvider({
+    fetch: async (_url, request) => {
+      bodies.push(JSON.parse(request.body));
+      return new Response("upstream unavailable", { status: 503 });
+    }
+  });
+  await assert.rejects(
+    provider.chat({ messages: [], numCtx: 4096 }),
+    /HTTP 503/
+  );
+  assert.deepEqual(bodies.map(body => body.options.num_ctx), [4096]);
+});
+
+test("Ollama validates local-model limits instead of silently accepting invalid values", () => {
+  assert.throws(() => new OllamaProvider({ numCtx: 0, fetch: async () => {} }), /Local-model context/);
+  assert.throws(() => new OllamaProvider({ keepAlive: "forever", fetch: async () => {} }), /keepAlive/);
+  assert.doesNotThrow(() => new OllamaProvider({ numCtx: 4096, fetch: async () => {} }));
+});
+
 test("span parser rejects values that are not exact input substrings", () => {
   assert.equal(
     parseSanitizerSpans(
@@ -54,6 +150,10 @@ test("span parser rejects values that are not exact input substrings", () => {
     null
   );
 });
+
+function settle() {
+  return new Promise(resolve => setImmediate(resolve));
+}
 
 test("strict fallback ignores low-confidence capitalized documentation phrases", async () => {
   const provider = {

@@ -1,6 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import {
+  DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
+  DEFAULT_OLLAMA_KEEP_ALIVE,
+  normalizeClassifierConcurrency,
+  normalizeLocalModelContextTokens,
+  normalizeOllamaKeepAlive
+} from "./local-model-policy.js";
+
 const ENV_KEY_MAP = {
   apiKey: ["PRIVATE_AI_API_KEY", "OPENAI_API_KEY"],
   baseURL: ["PRIVATE_AI_BASE_URL", "OPENAI_BASE_URL"],
@@ -8,6 +16,8 @@ const ENV_KEY_MAP = {
   provider: ["PRIVATE_AI_PROVIDER"],
   timeoutMs: ["PRIVATE_AI_TIMEOUT_MS", "OPENAI_TIMEOUT_MS"],
   numCtx: ["PRIVATE_AI_NUM_CTX"],
+  classifierConcurrency: ["PRIVATE_AI_CLASSIFIER_CONCURRENCY"],
+  keepAlive: ["PRIVATE_AI_OLLAMA_KEEP_ALIVE"],
   localDetectorEnabled: ["PRIVATE_AI_LOCAL_DETECTOR_ENABLED"],
   localDetectorModel: ["PRIVATE_AI_LOCAL_DETECTOR_MODEL"],
   sanitizationMode: ["PRIVATE_AI_SANITIZATION_MODE"]
@@ -59,7 +69,17 @@ export function configFromEnv(options = {}) {
     model: firstValue(merged, ENV_KEY_MAP.model) || "qwen3.5:2b",
     provider: firstValue(merged, ENV_KEY_MAP.provider) || "openai-compatible",
     timeoutMs: Number(firstValue(merged, ENV_KEY_MAP.timeoutMs) || 60000),
-    numCtx: Number(firstValue(merged, ENV_KEY_MAP.numCtx) || 4096),
+    numCtx: normalizeLocalModelContextTokens(
+      firstValue(merged, ENV_KEY_MAP.numCtx),
+      DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS
+    ),
+    classifierConcurrency: normalizeClassifierConcurrency(
+      firstValue(merged, ENV_KEY_MAP.classifierConcurrency)
+    ),
+    keepAlive: normalizeOllamaKeepAlive(
+      firstValue(merged, ENV_KEY_MAP.keepAlive),
+      DEFAULT_OLLAMA_KEEP_ALIVE
+    ),
     localDetectorEnabled: parseBoolean(firstValue(merged, ENV_KEY_MAP.localDetectorEnabled)),
     localDetectorModel: firstValue(merged, ENV_KEY_MAP.localDetectorModel),
     sanitizationMode: firstValue(merged, ENV_KEY_MAP.sanitizationMode) || "strict"

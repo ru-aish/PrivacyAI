@@ -93,6 +93,8 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
           sanitizer: options.sanitizer,
           sessionMap: completeSessionMap,
           maxContextChars: options.maxContextChars,
+          maxContextTokens: options.maxContextTokens,
+          tokenCounter: options.tokenCounter,
           signal: options.signal,
           onBatchComplete: options.onBatchComplete
         });
@@ -144,6 +146,8 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
         cache: options.cache,
         policyFingerprint: options.policyFingerprint,
         maxContextChars: options.maxContextChars,
+          maxContextTokens: options.maxContextTokens,
+          tokenCounter: options.tokenCounter,
         artifactTypePrefix: "agy",
         signal: options.signal,
         onBatchComplete: options.onBatchComplete,

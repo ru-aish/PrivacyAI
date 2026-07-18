@@ -7,6 +7,7 @@ import {
   sanitizeKnownValue,
   sanitizeStructuredValue
 } from "@privacy-ai/sdk";
+import { packUncachedArtifactEntries } from "./artifact-packing.js";
 
 /**
  * Sanitize a protocol adapter's model-visible slots while reusing persistent
@@ -52,7 +53,12 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
     uncached.push({ ...entry, index, cacheKey, contentHash });
   }
 
-  const groups = groupArtifacts(uncached);
+  const groups = packUncachedArtifactEntries(uncached, {
+    maxContextChars: options.maxContextChars,
+    maxContextTokens: options.maxContextTokens,
+    tokenCounter: options.tokenCounter
+  });
+  const originalArtifactCount = groups.reduce((count, pack) => count + pack.artifacts.length, 0);
   for (let artifactIndex = 0; artifactIndex < groups.length; artifactIndex += 1) {
     throwIfAborted(options.signal);
     const artifact = groups[artifactIndex];
@@ -62,6 +68,8 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
         sanitizer: options.sanitizer,
         sessionMap: completeMap,
         maxContextChars: options.maxContextChars,
+        maxContextTokens: options.maxContextTokens,
+        tokenCounter: options.tokenCounter,
         artifactType: `${options.artifactTypePrefix || "model"}_${artifact.artifactType}`,
         signal: options.signal,
         onBatchComplete: typeof options.onBatchComplete === "function"
@@ -104,13 +112,15 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
     }
 
     if (typeof options.onArtifactComplete === "function") {
-      await options.onArtifactComplete({
-        artifactIndex,
-        artifactCount: groups.length,
-        artifactKey: artifact.artifactKey,
-        artifactType: artifact.artifactType,
-        slotCount: artifact.entries.length
-      });
+      for (const originalArtifact of artifact.artifacts) {
+        await options.onArtifactComplete({
+          artifactIndex: originalArtifact.artifactIndex,
+          artifactCount: originalArtifactCount,
+          artifactKey: originalArtifact.artifactKey,
+          artifactType: originalArtifact.artifactType,
+          slotCount: originalArtifact.entries.length
+        });
+      }
     }
   }
 
@@ -152,24 +162,6 @@ function requiredLabel(value, label) {
   const normalized = String(value || "");
   if (!normalized) throw new TypeError(`Model-visible ${label} must be non-empty.`);
   return normalized;
-}
-
-function groupArtifacts(entries) {
-  const groups = new Map();
-  for (const entry of entries) {
-    const key = `${entry.artifactType}\0${entry.artifactKey}`;
-    let group = groups.get(key);
-    if (!group) {
-      group = {
-        artifactKey: entry.artifactKey,
-        artifactType: entry.artifactType,
-        entries: []
-      };
-      groups.set(key, group);
-    }
-    group.entries.push(entry);
-  }
-  return [...groups.values()];
 }
 
 function verificationKey(value, artifactType, policyFingerprint) {

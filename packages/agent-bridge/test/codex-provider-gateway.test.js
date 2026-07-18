@@ -1625,8 +1625,9 @@ test("gateway chooses ChatGPT or API upstream and strips forwarding headers", as
   }
 });
 
-test("Codex sanitization isolates independent model-visible artifacts", async () => {
+test("Codex sanitization packs uncached model-visible artifacts while retaining separate cache records", async () => {
   const seen = [];
+  const completedArtifacts = [];
   const body = {
     model: "gpt-5.4-mini",
     instructions: "INSTRUCTIONS_ARTIFACT",
@@ -1651,19 +1652,20 @@ test("Codex sanitization isolates independent model-visible artifacts", async ()
     sanitizer: async text => {
       seen.push(text);
       return { sanitizedPrompt: text, sessionMap: {} };
-    }
+    },
+    onArtifactComplete: details => completedArtifacts.push(details)
   });
 
   assert.deepEqual(result.body, body);
-  assert.equal(seen.length, 3);
-  for (const text of seen) {
-    const artifacts = [
-      "INSTRUCTIONS_ARTIFACT",
-      "MESSAGE_ARTIFACT",
-      "TOOL_OUTPUT_ARTIFACT"
-    ].filter(marker => text.includes(marker));
-    assert.equal(artifacts.length, 1, `classifier batch mixed artifacts: ${artifacts.join(",")}`);
-  }
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].includes("INSTRUCTIONS_ARTIFACT"), true);
+  assert.equal(seen[0].includes("MESSAGE_ARTIFACT"), true);
+  assert.equal(seen[0].includes("TOOL_OUTPUT_ARTIFACT"), true);
+  assert.equal(result.cacheWrites.length, 3);
+  assert.equal(new Set(result.cacheWrites.map(([key]) => key)).size, 3);
+  assert.equal(completedArtifacts.length, 3);
+  assert.equal(new Set(completedArtifacts.map(item => item.artifactKey)).size, 3);
+  assert.equal(completedArtifacts.some(item => item.artifactType === "packed_uncached"), false);
 });
 
 test("Codex leak verification ignores protocol booleans while protecting matching text", async () => {
@@ -1933,7 +1935,7 @@ test("gateway reuses persisted thread verification after restart and invalidates
     body: JSON.stringify(body)
   });
   assert.equal(response.status, 200, await response.text());
-  assert.equal(sanitizerCalls > 1, true, "independent artifacts should be classified separately");
+  assert.equal(sanitizerCalls, 1, "uncached artifacts should be packed into one classifier request");
   await first.close();
 
   const cachedOnly = async () => {
@@ -2134,7 +2136,7 @@ test("custom sanitizers without stable identity never reuse persisted verificati
     body: JSON.stringify(sampleRequest())
   });
   assert.equal(response.status, 200, await response.text());
-  assert.equal(firstCalls > 1, true, "independent artifacts should be classified separately");
+  assert.equal(firstCalls, 1, "uncached artifacts should be packed into one classifier request");
   await first.close();
 
   const second = await startCodexProviderGateway({

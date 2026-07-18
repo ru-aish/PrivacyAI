@@ -10,6 +10,12 @@ import {
 import { PrivacyGuardianError } from "./errors.js";
 import { parseAndApplyTextEdits } from "./text-edits.js";
 import { sanitizeKnownText } from "./session-map.js";
+import { AsyncConcurrencyLimiter } from "./concurrency-limiter.js";
+import {
+  DEFAULT_PRIVACY_OUTPUT_TOKENS,
+  TRUNCATED_PRIVACY_OUTPUT_TOKENS,
+  normalizePrivacyOutputTokens
+} from "./local-model-policy.js";
 
 export const SANITIZATION_MODES = Object.freeze({
   STRICT: "strict",
@@ -44,11 +50,22 @@ export class AiSanitizer {
       options.sanitizationMode || options.privacyMode || SANITIZATION_MODES.STRICT
     );
     this.systemPrompt = options.privacySystemPrompt || promptForMode(this.sanitizationMode);
-    this.privacyMaxTokens = options.privacyMaxTokens;
+    this.privacyMaxTokens = normalizePrivacyOutputTokens(
+      options.privacyMaxTokens,
+      DEFAULT_PRIVACY_OUTPUT_TOKENS
+    );
+    this.truncatedPrivacyMaxTokens = Number.isSafeInteger(Number(options.truncatedPrivacyMaxTokens))
+      ? Math.max(this.privacyMaxTokens, Math.min(Number(options.truncatedPrivacyMaxTokens), TRUNCATED_PRIVACY_OUTPUT_TOKENS))
+      : TRUNCATED_PRIVACY_OUTPUT_TOKENS;
+    this.classifierLimiter = new AsyncConcurrencyLimiter(options.classifierConcurrency);
     this.fallbackDetector = createDetectorPipeline({ ...options, localDetectorEnabled: false });
   }
 
   async sanitize(text, options = {}) {
+    return this.classifierLimiter.run(() => this.#sanitize(text, options), options.signal);
+  }
+
+  async #sanitize(text, options = {}) {
     if (typeof text !== "string") {
       throw new TypeError("AiSanitizer.sanitize expects a string prompt.");
     }
@@ -73,13 +90,26 @@ export class AiSanitizer {
 
     messages.push({ role: "user", content: text });
 
+    const maxTokens = optionsMaxTokens(this);
     let response = await this.provider.chat({
       model: this.model,
       messages,
       temperature: 0,
-      maxTokens: optionsMaxTokens(this),
+      maxTokens,
       signal: options.signal
     });
+    // Retrying a larger output is useful only when the provider explicitly
+    // says generation was truncated. Other malformed output follows the
+    // normal repair path and must not silently increase local-model work.
+    if (isTruncatedOutput(response)) {
+      response = await this.provider.chat({
+        model: this.model,
+        messages,
+        temperature: 0,
+        maxTokens: Math.min(maxTokens * 2, this.truncatedPrivacyMaxTokens),
+        signal: options.signal
+      });
+    }
     throwIfAborted(options.signal);
 
     if (this.sanitizationMode === SANITIZATION_MODES.STRICT) {
@@ -179,7 +209,12 @@ function normalizeSanitizationMode(value) {
 }
 
 function optionsMaxTokens(sanitizer) {
-  return sanitizer.privacyMaxTokens || (sanitizer.sanitizationMode === SANITIZATION_MODES.STRICT ? 1024 : 2048);
+  return sanitizer.privacyMaxTokens;
+}
+
+function isTruncatedOutput(response) {
+  const reason = response?.raw?.done_reason ?? response?.raw?.choices?.[0]?.finish_reason;
+  return /^(?:length|max_tokens)$/i.test(String(reason || ""));
 }
 
 function buildRepairMessages(originalText, previousOutput, mode) {

@@ -84,6 +84,7 @@ export {
 export {
   createPrivacySanitizer,
   derivePrivacyContextMaxChars,
+  derivePrivacyContextMaxTokens,
   derivePrivacyMaxTokens,
   normalizeSanitizerResult
 } from "./privacy-sanitizer.js";

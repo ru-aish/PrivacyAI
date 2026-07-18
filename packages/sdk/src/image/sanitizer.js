@@ -35,6 +35,8 @@ export function createImageSanitizer(options = {}) {
         sanitizer: context.sanitizer,
         sessionMap: context.sessionMap,
         maxContextChars: context.maxContextChars,
+        maxContextTokens: context.maxContextTokens,
+        tokenCounter: context.tokenCounter,
         artifactType: context.artifactType || "image_ocr",
         signal: context.signal,
         onBatchComplete: context.onBatchComplete
