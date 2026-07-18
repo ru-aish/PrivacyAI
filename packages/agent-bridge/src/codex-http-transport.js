@@ -1,9 +1,37 @@
+import dns from "node:dns";
 import http from "node:http";
 import https from "node:https";
 
 import { gatewayError } from "./gateway-error.js";
 
 const MAX_DURATION_MS = 30 * 60 * 1000;
+const UPSTREAM_HTTP_AGENT = new http.Agent({ keepAlive: true, timeout: 0 });
+const UPSTREAM_HTTPS_AGENT = new https.Agent({ keepAlive: true, timeout: 0 });
+
+export function selectPreferredAddress(addresses, preferredFamily = 4) {
+  if (!Array.isArray(addresses)) return null;
+  const valid = addresses.filter(entry =>
+    entry && typeof entry.address === "string" && (entry.family === 4 || entry.family === 6)
+  );
+  return valid.find(entry => entry.family === preferredFamily) || valid[0] || null;
+}
+
+function lookupPreferredAddress(hostname, _options, callback) {
+  dns.lookup(hostname, { all: true }, (error, addresses) => {
+    if (error) {
+      callback(error);
+      return;
+    }
+    const selected = selectPreferredAddress(addresses, 4);
+    if (!selected) {
+      const missing = new Error(`No IP address found for ${hostname}.`);
+      missing.code = "ENOTFOUND";
+      callback(missing);
+      return;
+    }
+    callback(null, selected.address, selected.family);
+  });
+}
 
 export function resolvePositiveDuration(value, fallback, label) {
   const normalized = value == null ? fallback : Number(value);
@@ -23,11 +51,22 @@ export function requestCodexUpstream(url, method, headers, body, options = {}) {
 
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false;
-    const request = client.request(url, { method, headers });
+    let deadlineTimer = null;
+    const requestOptions = {
+      method,
+      headers,
+      agent: url.protocol === "https:" ? UPSTREAM_HTTPS_AGENT : UPSTREAM_HTTP_AGENT
+    };
+    if (url.protocol === "https:") {
+      requestOptions.autoSelectFamily = false;
+      requestOptions.lookup = lookupPreferredAddress;
+    }
+    const request = client.request(url, requestOptions);
     const downstream = options.downstream;
 
     const cleanup = () => {
       downstream?.off("close", onDownstreamClose);
+      if (deadlineTimer) clearTimeout(deadlineTimer);
       request.setTimeout(0);
     };
     const finishError = error => {
@@ -51,6 +90,9 @@ export function requestCodexUpstream(url, method, headers, body, options = {}) {
 
     if (downstream) downstream.once("close", onDownstreamClose);
     request.once("error", finishError);
+    deadlineTimer = setTimeout(() => {
+      request.destroy(codexUpstreamTimeoutError("response headers"));
+    }, timeoutMs);
     request.setTimeout(timeoutMs, () => {
       request.destroy(codexUpstreamTimeoutError("response headers"));
     });

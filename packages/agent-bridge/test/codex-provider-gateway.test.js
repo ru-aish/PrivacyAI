@@ -8,8 +8,10 @@ import { restoreValue } from "@privacy-ai/sdk";
 import {
   createGatewayDiagnosticReporter,
   publicGatewayFailure,
-  publicGatewayHttpStatus
+  publicGatewayHttpStatus,
+  publicGatewayMessage
 } from "../src/gateway-error.js";
+import { selectPreferredAddress } from "../src/codex-http-transport.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
 import {
@@ -1312,6 +1314,30 @@ test("Codex SSE handles CRLF, multiline data, DONE flushing, and malformed endin
   assert.equal(parseSse(reasoningOutput.join(""))[0].text, `Owner ${PRIVATE_EMAIL}`);
   assert.deepEqual(reasoningDone.end(), []);
 
+  const reasoningTextDone = new CodexSseRestorer(sessionMap);
+  const reasoningTextOutput = reasoningTextDone.write(Buffer.from(sse({
+    type: "response.reasoning_text.done",
+    item_id: "reasoning-2",
+    content_index: 0,
+    text: "Owner [EMAIL_1]"
+  })));
+  assert.equal(parseSse(reasoningTextOutput.join(""))[0].text, `Owner ${PRIVATE_EMAIL}`);
+  assert.deepEqual(reasoningTextDone.end(), []);
+
+  const annotationAdded = new CodexSseRestorer(sessionMap);
+  const annotationOutput = annotationAdded.write(Buffer.from(sse({
+    type: "response.output_text.annotation.added",
+    item_id: "message-annotation",
+    content_index: 0,
+    annotation_index: 0,
+    annotation: { type: "text_annotation", text: "Owner [EMAIL_1]" }
+  })));
+  assert.equal(
+    parseSse(annotationOutput.join(""))[0].annotation.text,
+    `Owner ${PRIVATE_EMAIL}`
+  );
+  assert.deepEqual(annotationAdded.end(), []);
+
   const unknown = new CodexSseRestorer(sessionMap);
   assert.throws(
     () => unknown.write(Buffer.from(sse({ type: "response.future_tool.delta", private: "[EMAIL_1]" }))),
@@ -1790,7 +1816,10 @@ test("loopback upstream timeout is reported with safe timeout metadata", async t
   const response = await fetch(`${gateway.baseURL}/responses`, {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sampleRequest())
   });
-  assert.equal((await response.json()).error.code, "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT");
+  assert.equal(response.status, 504);
+  const body = await response.json();
+  assert.equal(body.error.code, "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT");
+  assert.equal(body.error.message, "PrivacyAI timed out waiting for the upstream Codex service.");
   assert.equal(diagnostics[0].networkCode, "ETIMEDOUT");
   assert.equal(diagnostics[0].phase, "upstream_connect");
 });
@@ -1838,10 +1867,25 @@ test("network diagnostic codes and bounded expiry-aware deduplication remain dis
   assert.deepEqual(publicGatewayFailure({ code: "PRIVACYAI_INVALID_CLASSIFIER_SPAN" }), {
     code: "PRIVACYAI_INVALID_CLASSIFIER_SPAN", category: "privacy_boundary"
   });
+  assert.deepEqual(publicGatewayFailure({ code: "PRIVACYAI_CODEX_UNSUPPORTED_SSE_EVENT" }), {
+    code: "PRIVACYAI_CODEX_UNSUPPORTED_SSE_EVENT", category: "protocol"
+  });
   assert.equal(publicGatewayHttpStatus({ code: "PRIVACYAI_INVALID_CLASSIFIER_SPAN" }), 422);
   assert.equal(publicGatewayHttpStatus({ code: "PRIVACYAI_CODEX_BODY_TOO_LARGE" }), 413);
   assert.equal(publicGatewayHttpStatus({ code: "ETIMEDOUT" }), 504);
   assert.equal(publicGatewayHttpStatus(new Error("unknown")), 502);
+  assert.equal(
+    publicGatewayMessage({ code: "ETIMEDOUT" }),
+    "PrivacyAI timed out waiting for the upstream Codex service."
+  );
+  assert.equal(
+    publicGatewayMessage({ code: "PRIVACYAI_INVALID_CLASSIFIER_SPAN" }),
+    "PrivacyAI stopped this Codex request because its privacy boundary could not be verified."
+  );
+  assert.equal(
+    publicGatewayMessage({ code: "PRIVACYAI_CODEX_UNSUPPORTED_SSE_EVENT" }),
+    "PrivacyAI could not safely process the upstream Codex response protocol."
+  );
   let clock = 1_000;
   const diagnostics = [];
   const report = createGatewayDiagnosticReporter(value => diagnostics.push(value), {
@@ -2719,10 +2763,22 @@ test("Codex provider args force loopback Responses transport and disable unsuppo
   assert.throws(() => buildCodexProviderArgs("http://localhost:1234/x"), /literal IPv4 loopback/);
 });
 
+test("Codex upstream address selection prefers IPv4 and supports IPv6-only hosts", () => {
+  assert.deepEqual(selectPreferredAddress([
+    { address: "2001:db8::1", family: 6 },
+    { address: "192.0.2.1", family: 4 }
+  ]), { address: "192.0.2.1", family: 4 });
+  assert.deepEqual(
+    selectPreferredAddress([{ address: "2001:db8::1", family: 6 }]),
+    { address: "2001:db8::1", family: 6 }
+  );
+  assert.equal(selectPreferredAddress([]), null);
+});
+
 test("Codex gateway always resolves bounded upstream deadlines", () => {
   assert.deepEqual(resolveCodexGatewayTimeouts(), {
-    responseHeadersMs: 30000,
-    responseIdleMs: 60000
+    responseHeadersMs: 600000,
+    responseIdleMs: 600000
   });
   assert.deepEqual(resolveCodexGatewayTimeouts({
     upstreamTimeoutMs: 125,
@@ -3026,7 +3082,7 @@ test("stream failures emit exactly one structured gateway diagnostic", async t =
   await response.text().catch(() => "");
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(diagnostics.length, 1);
-  assertDiagnostic(diagnostics[0], "PRIVACYAI_CODEX_INVALID_SSE", "upstream", "sse");
+  assertDiagnostic(diagnostics[0], "PRIVACYAI_CODEX_INVALID_SSE", "protocol", "sse");
 });
 
 function assertDiagnostic(diagnostic, code, category, phase = "request") {

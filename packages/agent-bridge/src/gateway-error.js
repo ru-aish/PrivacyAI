@@ -28,6 +28,32 @@ export function publicGatewayHttpStatus(error) {
   return 502;
 }
 
+export function publicGatewayMessage(error) {
+  const { category } = publicGatewayFailure(error);
+  switch (category) {
+    case "timeout":
+      return "PrivacyAI timed out waiting for the upstream Codex service.";
+    case "dns":
+      return "PrivacyAI could not resolve the upstream Codex service.";
+    case "upstream_reset":
+    case "broken_pipe":
+    case "upstream":
+      return "PrivacyAI lost its connection to the upstream Codex service.";
+    case "protocol":
+      return "PrivacyAI could not safely process the upstream Codex response protocol.";
+    case "local_model":
+      return "PrivacyAI could not complete local privacy classification.";
+    case "request_limit":
+      return "PrivacyAI blocked an oversized Codex request.";
+    case "client_cancelled":
+      return "Codex disconnected before PrivacyAI completed the request.";
+    case "privacy_boundary":
+      return "PrivacyAI stopped this Codex request because its privacy boundary could not be verified.";
+    default:
+      return "PrivacyAI stopped this Codex request because the local gateway failed.";
+  }
+}
+
 export function safeGatewayDiagnostic(error, options = {}) {
   const failure = publicGatewayFailure(error);
   return {
@@ -101,7 +127,8 @@ function gatewayFailureCategory(code) {
   if (code === "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT") return "timeout";
   if (code === "PRIVACYAI_CODEX_UPSTREAM_BROKEN_PIPE") return "broken_pipe";
   if (code === "PRIVACYAI_CODEX_UPSTREAM_DNS") return "dns";
-  if (/_(?:UPSTREAM|SSE|RESPONSE)/.test(code)) return "upstream";
+  if (code.includes("_SSE")) return "protocol";
+  if (/_(?:UPSTREAM|RESPONSE)/.test(code)) return "upstream";
   if (/(?:DISCONNECTED|ABORTED|CANCELLED)/.test(code)) return "client_cancelled";
   if (code === "PRIVACYAI_CODEX_GATEWAY_FAILURE") return "gateway";
   return "privacy_boundary";

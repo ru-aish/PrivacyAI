@@ -25,10 +25,12 @@ const FORWARDED_EVENT_TYPES = new Set([
   "response.output_item.added",
   "response.output_item.done",
   "response.output_text.delta",
+  "response.output_text.annotation.added",
   "response.custom_tool_call_input.delta",
   "response.reasoning_summary_text.delta",
   "response.reasoning_summary_text.done",
   "response.reasoning_text.delta",
+  "response.reasoning_text.done",
   "response.reasoning_summary_part.added"
 ]);
 
@@ -336,6 +338,12 @@ export function restoreEvent(event, sessionMap = {}) {
   if (restored.item) restoreResponseItem(restored.item, sessionMap);
   if (typeof restored.text === "string") restored.text = restoreValue(restored.text, sessionMap);
   if (typeof restored.delta === "string") restored.delta = restoreValue(restored.delta, sessionMap);
+  if (restored.part && typeof restored.part === "object") {
+    restored.part = restoreValue(restored.part, sessionMap);
+  }
+  if (restored.annotation && typeof restored.annotation === "object") {
+    restored.annotation = restoreValue(restored.annotation, sessionMap);
+  }
   if (restored.response?.error?.message && typeof restored.response.error.message === "string") {
     restored.response.error.message = restoreValue(restored.response.error.message, sessionMap);
   }

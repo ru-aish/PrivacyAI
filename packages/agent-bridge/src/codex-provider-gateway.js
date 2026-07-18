@@ -29,7 +29,8 @@ import {
   createGatewayDiagnosticReporter,
   gatewayError,
   publicGatewayFailure,
-  publicGatewayHttpStatus
+  publicGatewayHttpStatus,
+  publicGatewayMessage
 } from "./gateway-error.js";
 import {
   commitCodexMutationHistory,
@@ -41,8 +42,8 @@ import { SessionVault } from "./session-vault.js";
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
-const DEFAULT_UPSTREAM_TIMEOUT_MS = 30_000;
-const DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS = 60_000;
+const DEFAULT_UPSTREAM_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_VERIFICATION_RETRY_TIMEOUT_MS = 2500;
 const MAX_ALIASES_PER_ORIGINAL = 8;
 const CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex";
@@ -798,7 +799,7 @@ function writeGatewayFailure(response, error) {
     error: {
       type: "privacyai_gateway_error",
       code,
-      message: "PrivacyAI stopped this Codex request because its privacy boundary could not be verified."
+      message: publicGatewayMessage(error)
     }
   });
 }
