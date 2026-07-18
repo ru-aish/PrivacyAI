@@ -127,7 +127,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       env.PRIVACYAI_POLICY_FINGERPRINT = policyFingerprint;
       env.PRIVACYAI_TOOL_POLICY = "gateway";
 
-      await reportLaunchProgress(options, "static-scan", "Sanitizing local Codex startup files before launch");
+      await reportLaunchProgress(options, "static-scan", "Checking local Codex startup-file cache");
       const staticAudit = await (options.auditCodexStaticStartupContext || auditCodexStaticStartupContext)({
         cwd,
         env,
@@ -145,7 +145,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       await reportLaunchProgress(
         options,
         "static-scan-complete",
-        `Sanitized ${staticAudit.fileCount} local startup file(s)`
+        codexStaticAuditProgressMessage(staticAudit)
       );
 
       await reportLaunchProgress(options, "gateway", "Starting the protected localhost gateway");
@@ -173,7 +173,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       });
       const protectedArgs = buildCodexProviderArgs(gateway.baseURL, options);
 
-      await reportLaunchProgress(options, "prompt-render", "Rendering the exact Codex startup prompt");
+      await reportLaunchProgress(options, "prompt-render", "Checking exact Codex startup-prompt cache");
       const renderedAudit = await (options.auditCodexStartupContext || auditCodexStartupContext)({
         codexPath: binary,
         args: protectedArgs,
@@ -194,7 +194,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       await reportLaunchProgress(
         options,
         "prompt-verified",
-        `Verified and cached ${renderedAudit.primedItemCount} rendered startup item(s)`
+        codexRenderedAuditProgressMessage(renderedAudit)
       );
       await reportLaunchProgress(options, "launch", "Startup context is safe; launching Codex");
 
@@ -426,6 +426,29 @@ async function startupRenderFingerprint({ binary, executableProbe, cwd, staticAu
     executable: { path: binary, stat, version: executableProbe?.version || executableProbe || null },
     renderContractVersion: 1
   });
+}
+
+function codexStaticAuditProgressMessage(audit) {
+  const fileCount = Number(audit?.fileCount || 0);
+  const sanitizerCalls = Number(audit?.counters?.sanitizerCalls);
+  if (Number.isFinite(sanitizerCalls)) {
+    if (sanitizerCalls === 0) {
+      return `Reused cached privacy decisions for ${fileCount} local startup file(s)`;
+    }
+    const reused = Math.max(0, fileCount - sanitizerCalls);
+    if (reused > 0) {
+      return `Sanitized ${sanitizerCalls} changed startup file(s); reused ${reused} cached file(s)`;
+    }
+    return `Sanitized ${sanitizerCalls} local startup file(s)`;
+  }
+  return `Verified ${fileCount} local startup file(s)`;
+}
+
+function codexRenderedAuditProgressMessage(audit) {
+  if (audit?.cache?.hit === true) {
+    return "Reused cached Codex startup-prompt verification; skipped prompt rendering";
+  }
+  return `Rendered, verified, and cached ${Number(audit?.primedItemCount || 0)} startup item(s)`;
 }
 
 async function reportLaunchProgress(options, stage, message) {

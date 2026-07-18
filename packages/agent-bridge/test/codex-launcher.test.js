@@ -33,6 +33,7 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   const codexHome = join(root, "normal-codex-home");
   const verificationStore = new MemoryContextVerificationStore();
   const events = [];
+  const progress = [];
   let closed = 0;
   let gatewayOptions;
   let spawned;
@@ -44,13 +45,19 @@ test("Codex gateway preflights static and rendered context before spawning", asy
     env: { CODEX_HOME: codexHome },
     launchLockDir: join(root, "locks"),
     healthOptions: { skip: true },
+    onLaunchProgress: event => progress.push(event),
     verifyNativeExecutable: async () => ({ version: "test" }),
     sanitizer: passThroughSanitizer,
     verificationStore,
     auditCodexStaticStartupContext: async options => {
       events.push("static");
       assert.equal(options.env.CODEX_HOME, codexHome);
-      return { fileCount: 2, serializedBytes: 100, sessionMapAdditions: {} };
+      return {
+        fileCount: 2,
+        serializedBytes: 100,
+        sessionMapAdditions: {},
+        counters: { sanitizerCalls: 0 }
+      };
     },
     startCodexProviderGateway: async options => {
       events.push("gateway");
@@ -66,7 +73,12 @@ test("Codex gateway preflights static and rendered context before spawning", asy
       events.push("render");
       assert.equal(options.primeRequestCache, true);
       assert.equal(options.verificationStore, verificationStore);
-      return { itemCount: 4, primedItemCount: 3, serializedBytes: 200 };
+      return {
+        itemCount: 4,
+        primedItemCount: 3,
+        serializedBytes: 200,
+        cache: { hit: true }
+      };
     },
     spawnInherited: async (command, args, options) => {
       events.push("spawn");
@@ -85,6 +97,16 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   assert.equal(spawned.args.includes("--privacy-gateway"), false);
   assert.equal(gatewayOptions.maxContextChars, 13312);
   assert.equal(gatewayOptions.verificationStore, verificationStore);
+  assert.equal(
+    progress.some(event => event.message ===
+      "Reused cached privacy decisions for 2 local startup file(s)"),
+    true
+  );
+  assert.equal(
+    progress.some(event => event.message ===
+      "Reused cached Codex startup-prompt verification; skipped prompt rendering"),
+    true
+  );
   await assert.rejects(access(spawned.options.env.PRIVACYAI_WRAPPER_DIR), /ENOENT/);
 });
 
