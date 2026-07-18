@@ -74,14 +74,8 @@ export async function sanitizeStructuredValue(value, options = {}) {
       throw new TypeError("Context privacy sanitizer did not return sanitizedPrompt.");
     }
 
-    const restoredMap = Object.fromEntries(
-      Object.entries(normalizeSessionMap(result.sessionMap)).map(([placeholder, original]) => [
-        shield.restore(placeholder),
-        shield.restore(original)
-      ])
-    );
-    const relevantMap = filterClassifierMap(knownSafeText, restoredMap);
-    const expected = sanitizeKnownText(shield.text, normalizeSessionMap(result.sessionMap));
+    const classifierMap = normalizeSessionMap(result.sessionMap);
+    const expected = sanitizeKnownText(shield.text, classifierMap);
     if (result.sanitizedPrompt !== expected) {
       const error = new Error(
         "PrivacyAI blocked structured context because the local sanitizer changed text outside exact private spans."
@@ -89,6 +83,8 @@ export async function sanitizeStructuredValue(value, options = {}) {
       error.code = "PRIVACYAI_INVALID_SANITIZED_CONTEXT";
       throw error;
     }
+    const restoredMap = restoreClassifierMap(classifierMap, shield);
+    const relevantMap = filterClassifierMap(knownSafeText, restoredMap);
     mergeClassifierMap(relevantMap, state);
     if (typeof options.onBatchComplete === "function") {
       await options.onBatchComplete({
@@ -327,6 +323,33 @@ function filterClassifierMap(inputText, sessionMap) {
   return filtered;
 }
 
+function restoreClassifierMap(classifierMap, shield) {
+  const entries = [];
+  for (const [placeholder, original] of Object.entries(classifierMap)) {
+    if (shield.containsToken(placeholder)) {
+      const error = new Error(
+        "PrivacyAI blocked a local classifier result that reused a reserved boundary token."
+      );
+      error.code = "PRIVACYAI_INVALID_SANITIZED_CONTEXT";
+      throw error;
+    }
+    // Boundary tokens stand in for placeholders that are already protected by
+    // the existing session map. A classifier may conservatively label one
+    // complete synthetic token as private, but it is not a new private
+    // original and must never become a placeholder -> placeholder alias.
+    if (shield.isToken(original)) continue;
+    if (shield.containsToken(original)) {
+      const error = new Error(
+        "PrivacyAI blocked a local classifier result that mixed a reserved boundary token with an exact private span."
+      );
+      error.code = "PRIVACYAI_INVALID_CLASSIFIER_SPAN";
+      throw error;
+    }
+    entries.push([shield.restore(placeholder), shield.restore(original)]);
+  }
+  return Object.fromEntries(entries);
+}
+
 function mergeClassifierMap(classifierMap, state) {
   if (Object.keys(classifierMap).length === 0) return;
   const rebased = rebaseSessionAdditions(
@@ -341,20 +364,31 @@ function mergeClassifierMap(classifierMap, state) {
 function shieldKnownPlaceholders(text, placeholders) {
   let shielded = text;
   const replacements = [];
-  const occupied = new Set([text, ...placeholders]);
+  const occupied = [text, ...placeholders]
+    .map(value => String(value).toLocaleLowerCase("en-US"));
   const sorted = [...new Set(placeholders.filter(Boolean))].sort((a, b) => b.length - a.length);
 
   for (let index = 0; index < sorted.length; index += 1) {
     const placeholder = sorted[index];
     let token = `__PRIVACYAI_BOUNDARY_${index}__`;
-    while ([...occupied].some(value => value.includes(token))) token += "_";
-    occupied.add(token);
+    while (occupied.some(value => value.includes(token.toLocaleLowerCase("en-US")))) token += "_";
+    occupied.push(token.toLocaleLowerCase("en-US"));
     shielded = shielded.split(placeholder).join(token);
     replacements.push([token, placeholder]);
   }
 
+  const foldedTokens = replacements.map(([token]) => token.toLocaleLowerCase("en-US"));
   return {
     text: shielded,
+    isToken(value) {
+      if (typeof value !== "string") return false;
+      return foldedTokens.includes(value.toLocaleLowerCase("en-US"));
+    },
+    containsToken(value) {
+      if (typeof value !== "string") return false;
+      const folded = value.toLocaleLowerCase("en-US");
+      return foldedTokens.some(token => folded.includes(token));
+    },
     restore(value) {
       if (typeof value !== "string") return value;
       let restored = value;

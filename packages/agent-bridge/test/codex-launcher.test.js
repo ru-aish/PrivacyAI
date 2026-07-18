@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -108,6 +108,67 @@ test("Codex gateway preflights static and rendered context before spawning", asy
     true
   );
   await assert.rejects(access(spawned.options.env.PRIVACYAI_WRAPPER_DIR), /ENOENT/);
+});
+
+test("Codex launcher survives classifier false positives on its synthetic startup shield", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-boundary-false-positive-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const configPath = await writeTestConfig(root);
+  const codexHome = join(root, "empty-codex-home");
+  const markerPath = join(root, "launched.txt");
+  const fakeCodex = join(root, "fake-codex.mjs");
+  await writeFile(fakeCodex, [
+    "#!/usr/bin/env node",
+    "import { writeFileSync } from 'node:fs';",
+    "const args = process.argv.slice(2);",
+    "const debugIndex = args.lastIndexOf('debug');",
+    "if (debugIndex >= 0 && args[debugIndex + 1] === 'prompt-input') {",
+    "  const prompt = args[debugIndex + 2];",
+    "  process.stdout.write(JSON.stringify([{ type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] }]));",
+    "} else {",
+    "  writeFileSync(process.env.PRIVACYAI_FAKE_LAUNCH_MARKER, 'launched');",
+    "}"
+  ].join("\n"));
+  await chmod(fakeCodex, 0o755);
+
+  let sawBoundaryFalsePositive = false;
+  let gatewayClosed = false;
+  const result = await launchNativeTui("codex", ["exec", "hello"], {
+    configPath,
+    binary: fakeCodex,
+    cwd: root,
+    env: {
+      CODEX_HOME: codexHome,
+      PRIVACYAI_FAKE_LAUNCH_MARKER: markerPath
+    },
+    launchLockDir: join(root, "locks"),
+    healthOptions: { skip: true },
+    policyFingerprint: "sha256:boundary-false-positive-policy",
+    verifyNativeExecutable: async () => ({ version: "test" }),
+    sanitizer: async text => {
+      const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__+/)?.[0];
+      if (!token) return { sanitizedPrompt: text, sessionMap: {} };
+      sawBoundaryFalsePositive = true;
+      return {
+        sanitizedPrompt: text.replaceAll(token, "[PRIVATE_VALUE_1]"),
+        sessionMap: { "[PRIVATE_VALUE_1]": token }
+      };
+    },
+    verificationStore: new MemoryContextVerificationStore(),
+    startCodexProviderGateway: async () => ({
+      baseURL: "http://127.0.0.1:17777/test-nonce",
+      async close() {
+        gatewayClosed = true;
+      }
+    }),
+    enableTuiSessionActions: false,
+    showLaunchProgress: false
+  });
+
+  assert.equal(result, 0);
+  assert.equal(sawBoundaryFalsePositive, true);
+  assert.equal(gatewayClosed, true);
+  await access(markerPath);
 });
 
 test("a warm Codex gateway launch proves the startup fingerprint and skips prompt capture", async () => {

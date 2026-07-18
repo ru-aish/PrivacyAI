@@ -774,6 +774,30 @@ test("Codex startup audit captures serialized model input and verifies the local
   assert.equal(audit.serializedBytes > 0, true);
 });
 
+test("Codex startup audit ignores classifier false positives on synthetic canary shields", async () => {
+  let sawBoundaryToken = false;
+  const audit = await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    canaryOriginal: "raw-provider-canary-secret",
+    canaryPlaceholder: "[PRIVACYAI_PROVIDER_CANARY_TEST]",
+    capture: async ({ prompt }) => [{ prompt, instructions: "safe startup" }],
+    sanitizer: async text => {
+      const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
+      if (!token) return { sanitizedPrompt: text, sessionMap: {} };
+      sawBoundaryToken = true;
+      return {
+        sanitizedPrompt: text.replaceAll(token, "[PRIVATE_VALUE_1]"),
+        sessionMap: { "[PRIVATE_VALUE_1]": token }
+      };
+    },
+    blockHighRisk: false
+  });
+
+  assert.equal(sawBoundaryToken, true);
+  assert.deepEqual(audit.sessionMapAdditions, {});
+});
+
 test("Codex startup audit reuses a verified static manifest across canary rotations", async () => {
   const verificationStore = new MemoryContextVerificationStore();
   let sanitizerCalls = 0;

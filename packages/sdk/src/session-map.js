@@ -5,6 +5,7 @@ const DEFAULT_PLACEHOLDER_PATTERN = new RegExp(
   String.raw`(?:\[[A-Z][A-Z0-9_]*_\d+\]|${GENERATED_DUMMY_PATTERN_SOURCE})`,
   "gi"
 );
+const UNSAFE_SESSION_MAP_PLACEHOLDERS = new Set(["__proto__", "prototype", "constructor"]);
 
 export function normalizeSessionMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -16,8 +17,20 @@ export function normalizeSessionMap(value) {
       original.length > 0 &&
       placeholder !== original
   );
+  assertSafeSessionMapPlaceholders(entries);
   assertUnambiguousSessionMap(entries);
   return Object.fromEntries(entries);
+}
+
+function assertSafeSessionMapPlaceholders(entries) {
+  for (const [placeholder] of entries) {
+    if (!UNSAFE_SESSION_MAP_PLACEHOLDERS.has(foldSessionMapValue(placeholder))) {
+      continue;
+    }
+    const error = new Error("PrivacyAI blocked an unsafe session-map placeholder.");
+    error.code = "PRIVACYAI_INVALID_SESSION_MAP";
+    throw error;
+  }
 }
 
 function assertUnambiguousSessionMap(entries) {

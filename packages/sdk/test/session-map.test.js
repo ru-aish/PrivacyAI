@@ -151,6 +151,86 @@ test("sanitizeStructuredValue shields existing placeholders and rebases new coll
   assert.deepEqual(result.sessionMapAdditions, { "[EMAIL_2]": "new@example.test" });
 });
 
+test("sanitizeStructuredValue allocates boundary shields case-insensitively", async () => {
+  const literalBoundary = "__privacyai_boundary_0__";
+  const result = await sanitizeStructuredValue(
+    { text: `${literalBoundary} and [EMAIL_1]` },
+    {
+      sessionMap: { "[EMAIL_1]": "existing@example.test" },
+      sanitizer: async text => {
+        const generated = text.match(/__PRIVACYAI_BOUNDARY_0___+/)?.[0];
+        assert.ok(generated, "the generated shield should avoid the lowercase literal collision");
+        assert.notEqual(generated.toLocaleLowerCase("en-US"), literalBoundary);
+        return { sanitizedPrompt: text, sessionMap: {} };
+      }
+    }
+  );
+
+  assert.deepEqual(result.value, { text: `${literalBoundary} and [EMAIL_1]` });
+});
+
+test("sanitizeStructuredValue ignores classifier mappings derived from reserved boundary shields", async () => {
+  const existing = { "[EMAIL_1]": "existing@example.test" };
+  const result = await sanitizeStructuredValue(
+    { text: "Keep [EMAIL_1]" },
+    {
+      sessionMap: existing,
+      sanitizer: async text => {
+        const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
+        assert.ok(token, "the existing placeholder should be shielded before classification");
+        return {
+          sanitizedPrompt: text.replace(new RegExp(token, "gi"), "[PRIVATE_VALUE_1]"),
+          sessionMap: { "[PRIVATE_VALUE_1]": token.toLocaleLowerCase("en-US") }
+        };
+      }
+    }
+  );
+
+  assert.deepEqual(result.value, { text: "Keep [EMAIL_1]" });
+  assert.deepEqual(result.sessionMapAdditions, {});
+});
+
+test("sanitizeStructuredValue rejects classifier placeholders that reuse reserved boundary shields", async () => {
+  await assert.rejects(
+    sanitizeStructuredValue(
+      { text: "Keep [EMAIL_1], redact new@example.test" },
+      {
+        sessionMap: { "[EMAIL_1]": "existing@example.test" },
+        sanitizer: async text => {
+          const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
+          assert.ok(token, "the existing placeholder should be shielded before classification");
+          return {
+            sanitizedPrompt: text.replace("new@example.test", token),
+            sessionMap: { [token]: "new@example.test" }
+          };
+        }
+      }
+    ),
+    error => error?.code === "PRIVACYAI_INVALID_SANITIZED_CONTEXT"
+  );
+});
+
+test("sanitizeStructuredValue rejects classifier spans that mix boundary shields with real text", async () => {
+  await assert.rejects(
+    sanitizeStructuredValue(
+      { text: "Keep [EMAIL_1], redact new@example.test" },
+      {
+        sessionMap: { "[EMAIL_1]": "existing@example.test" },
+        sanitizer: async text => {
+          const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
+          assert.ok(token, "the existing placeholder should be shielded before classification");
+          const mixedSpan = token + ", redact new@example.test";
+          return {
+            sanitizedPrompt: text.replace(mixedSpan, "[PRIVATE_VALUE_1]"),
+            sessionMap: { "[PRIVATE_VALUE_1]": mixedSpan }
+          };
+        }
+      }
+    ),
+    error => error?.code === "PRIVACYAI_INVALID_CLASSIFIER_SPAN"
+  );
+});
+
 test("sanitizeStructuredValue rejects malformed structured output and invalid limits", async () => {
   await assert.rejects(
     sanitizeStructuredValue({ private: "alice.private@example.test" }, {
@@ -266,6 +346,18 @@ test("normalizeSessionMap rejects ambiguous case-insensitive aliases", () => {
         error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP" &&
         !error.message.includes("first") &&
         !error.message.includes("Alice")
+    );
+  }
+});
+
+test("normalizeSessionMap rejects prototype-control placeholders", () => {
+  for (const placeholder of ["__proto__", "Prototype", "CONSTRUCTOR"]) {
+    const candidate = JSON.parse(JSON.stringify({ placeholder, original: "private-value" }));
+    const sessionMap = Object.fromEntries([[candidate.placeholder, candidate.original]]);
+    assert.throws(
+      () => normalizeSessionMap(sessionMap),
+      error => error?.code === "PRIVACYAI_INVALID_SESSION_MAP" &&
+        !error.message.includes("private-value")
     );
   }
 });
