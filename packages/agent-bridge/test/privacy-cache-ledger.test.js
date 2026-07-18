@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { MemoryContextVerificationStore, openContextVerificationStore } from "../src/context-verification-store.js";
 import { stageProvenancedMutation } from "../src/mutation-provenance.js";
+import { createTestTempDir } from "./test-temp-dir.js";
 
 const id = value => `sha256:${value}`;
 
 async function store(t, options = {}) {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-ledger-"));
+  const root = await createTestTempDir("privacyai-ledger-");
   const value = await openContextVerificationStore({ verificationDbPath: join(root, "ledger.sqlite3"), ...options });
   t.after(() => value.close());
   return value;
@@ -25,7 +25,7 @@ function seed(store) {
 test("migrates a v1 context database and retains existing records", async t => {
   let sqlite;
   try { sqlite = await import("node:sqlite"); } catch { t.skip("node:sqlite unavailable"); return; }
-  const root = await mkdtemp(join(tmpdir(), "privacyai-ledger-migration-"));
+  const root = await createTestTempDir("privacyai-ledger-migration-");
   const path = join(root, "ledger.sqlite3");
   const db = new sqlite.DatabaseSync(path);
   db.exec("CREATE TABLE privacyai_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE threads (session_key TEXT PRIMARY KEY,parent_keys_json TEXT NOT NULL,session_map_json TEXT NOT NULL,policy_fingerprint TEXT NOT NULL,updated_at INTEGER NOT NULL); INSERT INTO privacyai_meta VALUES ('schema_version','1'); INSERT INTO threads VALUES ('old','[]','{}','policy',1)");
@@ -38,7 +38,7 @@ test("migrates a v1 context database and retains existing records", async t => {
 
 test("migrates v2 mutations to v3 child geometry tables", async t => {
   let sqlite; try { sqlite = await import("node:sqlite"); } catch { t.skip("node:sqlite unavailable"); return; }
-  const root = await mkdtemp(join(tmpdir(), "privacyai-ledger-v2-migration-")); const path = join(root, "ledger.sqlite3");
+  const root = await createTestTempDir("privacyai-ledger-v2-migration-"); const path = join(root, "ledger.sqlite3");
   const db = new sqlite.DatabaseSync(path);
   db.exec("CREATE TABLE privacyai_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO privacyai_meta VALUES ('schema_version','2'); CREATE TABLE ledger_file_mutations (mutation_id TEXT PRIMARY KEY,worktree_id TEXT NOT NULL,path_hash TEXT NOT NULL,expected_content_hash TEXT NOT NULL,next_content_hash TEXT NOT NULL,manifest_hash TEXT,status TEXT NOT NULL,opaque_reference TEXT NOT NULL,committed_reference TEXT,created_at INTEGER NOT NULL,last_used_at INTEGER NOT NULL);"); db.close();
   const value = await openContextVerificationStore({ verificationDbPath: path }); t.after(() => value.close());

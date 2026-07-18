@@ -1,7 +1,7 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, mkdir, rename, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
@@ -22,7 +22,7 @@ test("startup verification keys isolate content and policy identities", () => {
 });
 
 test("startup byte limits reject oversized files before any content read", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-limit-"));
+  const root = await createTestTempDir("privacyai-startup-limit-");
   t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "AGENTS.md");
   await writeFile(file, "oversized");
@@ -43,7 +43,7 @@ test("startup byte limits reject oversized files before any content read", async
 });
 
 test("startup file-count limits stop before reading the excess file", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-file-limit-"));
+  const root = await createTestTempDir("privacyai-startup-file-limit-");
   t.after(() => rm(root, { recursive: true, force: true }));
   const first = join(root, "AGENTS.md");
   const second = join(root, "CLAUDE.md");
@@ -66,7 +66,7 @@ test("startup file-count limits stop before reading the excess file", async t =>
 });
 
 test("stable startup reads reject stale metadata and stale content identities", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-stable-read-"));
+  const root = await createTestTempDir("privacyai-startup-stable-read-");
   t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "AGENTS.md");
   await writeFile(file, "first");
@@ -97,7 +97,7 @@ test("stable startup reads reject stale metadata and stale content identities", 
 });
 
 test("startup file metadata hit performs zero reads and sanitizer calls", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-cache-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await createTestTempDir("privacyai-startup-cache-"); t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "AGENTS.md"); await writeFile(file, "hello");
   const store = new MemoryContextVerificationStore(); const calls = { count: 0 };
   const first = await resolveStartupFileManifest([file], { cwd: root, verificationStore: store });
@@ -108,7 +108,7 @@ test("startup file metadata hit performs zero reads and sanitizer calls", async 
 });
 
 test("first-time startup sanitization persists opaque private spans", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-plan-"));
+  const root = await createTestTempDir("privacyai-startup-plan-");
   t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "AGENTS.md");
   await writeFile(file, "owner=private@example.test\n");
@@ -127,7 +127,7 @@ test("first-time startup sanitization persists opaque private spans", async t =>
 });
 
 test("metadata change with same bytes hashes then reuses per-file result; manifests detect mutations", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-cache-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await createTestTempDir("privacyai-startup-cache-"); t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "AGENTS.md"); await writeFile(file, "same");
   const store = new MemoryContextVerificationStore(); const calls = { count: 0 };
   let manifest = await resolveStartupFileManifest([file], { cwd: root, verificationStore: store }); await sanitizeStartupFiles(manifest, { verificationStore: store, policyFingerprint: policy, sanitizer: sanitizer(calls) });
@@ -139,7 +139,7 @@ test("metadata change with same bytes hashes then reuses per-file result; manife
 });
 
 test("linked worktrees reuse Git blob identities and non-Git directories work", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-git-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const root = await createTestTempDir("privacyai-startup-git-"); t.after(() => rm(root, { recursive: true, force: true }));
   await execFile("git", ["init", root]); await execFile("git", ["-C", root, "config", "user.email", "test@example.com"]); await execFile("git", ["-C", root, "config", "user.name", "Test"]);
   await writeFile(join(root, "AGENTS.md"), "shared"); await execFile("git", ["-C", root, "add", "AGENTS.md"]); await execFile("git", ["-C", root, "commit", "-m", "init"]);
   const other = join(root, "other"); await execFile("git", ["-C", root, "worktree", "add", other, "-b", "other"]);
@@ -165,7 +165,7 @@ test("linked worktrees reuse Git blob identities and non-Git directories work", 
   assert.equal(reused.counters.gitBlobReuses, 1);
   assert.equal(sharedDecision.sanitizerCalls, 0);
   assert.equal(calls.count, 1);
-  const nongit = await mkdtemp(join(tmpdir(), "privacyai-startup-nongit-")); t.after(() => rm(nongit, { recursive: true, force: true })); await writeFile(join(nongit, "CLAUDE.md"), "ok");
+  const nongit = await createTestTempDir("privacyai-startup-nongit-"); t.after(() => rm(nongit, { recursive: true, force: true })); await writeFile(join(nongit, "CLAUDE.md"), "ok");
   assert.equal((await resolveStartupFileManifest([join(nongit, "CLAUDE.md")], { cwd: nongit, verificationStore: store })).repo.isGit, false);
 });
 
@@ -180,7 +180,7 @@ test("rendered startup proof skips capture and misses on every identity change",
 });
 
 test("dirty tracked files never reuse a stale Git index blob", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-dirty-git-"));
+  const root = await createTestTempDir("privacyai-startup-dirty-git-");
   t.after(() => rm(root, { recursive: true, force: true }));
   await execFile("git", ["init", root]);
   await execFile("git", ["-C", root, "config", "user.email", "test@example.com"]);

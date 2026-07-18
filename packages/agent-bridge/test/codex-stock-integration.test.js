@@ -1,8 +1,8 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile } from "node:fs/promises";
+import { access, readFile, rm } from "node:fs/promises";
 import http from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -19,9 +19,14 @@ test("installed stock Codex executes its native command through the provider gat
   const codex = await resolveExecutable("codex");
   if (!codex) return t.skip("Codex is not installed");
 
-  const workspace = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-workspace-"));
-  const codexHome = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-home-"));
-  const vaultDir = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-vault-"));
+  const workspace = await createTestTempDir("privacyai-stock-codex-workspace-");
+  const codexHome = await createTestTempDir("privacyai-stock-codex-home-");
+  const vaultDir = await createTestTempDir("privacyai-stock-codex-vault-");
+  t.after(() => Promise.all([
+    rm(workspace, { recursive: true, force: true }),
+    rm(codexHome, { recursive: true, force: true }),
+    rm(vaultDir, { recursive: true, force: true })
+  ]));
   const captured = [];
   let turn = 0;
 
@@ -118,9 +123,14 @@ test("installed stock Codex preserves custom Lark grammar under a false-positive
   const codex = await resolveExecutable("codex");
   if (!codex) return t.skip("Codex is not installed");
 
-  const workspace = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-grammar-workspace-"));
-  const codexHome = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-grammar-home-"));
-  const vaultDir = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-grammar-vault-"));
+  const workspace = await createTestTempDir("privacyai-stock-codex-grammar-workspace-");
+  const codexHome = await createTestTempDir("privacyai-stock-codex-grammar-home-");
+  const vaultDir = await createTestTempDir("privacyai-stock-codex-grammar-vault-");
+  t.after(() => Promise.all([
+    rm(workspace, { recursive: true, force: true }),
+    rm(codexHome, { recursive: true, force: true }),
+    rm(vaultDir, { recursive: true, force: true })
+  ]));
   const sanitizerInputs = [];
   let captured;
 

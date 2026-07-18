@@ -1,7 +1,7 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -119,7 +119,7 @@ test("AGY pre-tool hook isolates clean tool calls even when the prompt map is em
 });
 
 test("AGY global hook installation merges existing hooks and restores exact bytes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-hooks-"));
+  const root = await createTestTempDir("privacyai-agy-hooks-");
   const hooksPath = join(root, "config", "hooks.json");
   const mapPath = join(root, "map.json");
   const original = '{\n  "existing": {"enabled": false}\n}\n';
@@ -149,7 +149,7 @@ test("AGY global hook installation merges existing hooks and restores exact byte
 });
 
 test("AGY hook cleanup preserves concurrent external hook changes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-hook-change-"));
+  const root = await createTestTempDir("privacyai-agy-hook-change-");
   const hooksPath = join(root, "hooks.json");
   const mapPath = join(root, "map.json");
   await writeFile(hooksPath, '{"existing":{}}\n');
@@ -174,7 +174,7 @@ test("AGY hook cleanup preserves concurrent external hook changes", async () => 
 });
 
 test("AGY hook installation recovers a lock owned by a dead process", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-stale-lock-"));
+  const root = await createTestTempDir("privacyai-agy-stale-lock-");
   const hooksPath = join(root, "hooks.json");
   const lockPath = join(root, "hook.lock");
   const mapPath = join(root, "map.json");
@@ -197,7 +197,7 @@ test(
   "AGY hook installation recovers a recycled-PID lock on Linux",
   { skip: process.platform !== "linux" },
   async () => {
-    const root = await mkdtemp(join(tmpdir(), "privacyai-agy-recycled-lock-"));
+    const root = await createTestTempDir("privacyai-agy-recycled-lock-");
     const hooksPath = join(root, "hooks.json");
     const lockPath = join(root, "hook.lock");
     const mapPath = join(root, "map.json");
@@ -227,7 +227,7 @@ test(
 );
 
 test("AGY cleanup preserves a replacement lock owner", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-lock-owner-"));
+  const root = await createTestTempDir("privacyai-agy-lock-owner-");
   const hooksPath = join(root, "hooks.json");
   const lockPath = join(root, "hook.lock");
   const mapPath = join(root, "map.json");
@@ -248,7 +248,7 @@ test("AGY cleanup preserves a replacement lock owner", async () => {
 });
 
 test("AGY transport launch preserves native arguments and cleans up the runtime", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-transport-launch-"));
+  const root = await createTestTempDir("privacyai-agy-transport-launch-");
   const stderr = new PassThrough();
   let warning = "";
   stderr.on("data", chunk => { warning += chunk; });
@@ -303,7 +303,7 @@ test("AGY transport launch preserves native arguments and cleans up the runtime"
 });
 
 test("AGY strict launch sanitizes the prompt before spawning and keeps the guard installed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-launch-"));
+  const root = await createTestTempDir("privacyai-agy-launch-");
   const hooksPath = join(root, "hooks.json");
   const stderr = new PassThrough();
   let warning = "";
@@ -349,7 +349,7 @@ test("AGY strict launch sanitizes the prompt before spawning and keeps the guard
 });
 
 test("AGY strict launch removes its runtime directory when map serialization fails", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-serialization-failure-"));
+  const root = await createTestTempDir("privacyai-agy-serialization-failure-");
   let hookCalls = 0;
 
   await assert.rejects(
@@ -384,7 +384,7 @@ test("AGY strict launch removes its runtime directory when map serialization fai
 });
 
 test("AGY strict launch removes its runtime directory when hook cleanup fails", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-cleanup-failure-"));
+  const root = await createTestTempDir("privacyai-agy-cleanup-failure-");
   const cleanupError = new Error("hook cleanup failed");
   let runtimeDir;
 
@@ -431,7 +431,7 @@ test("AGY hook executable ignores unrelated AGY processes before reading the ses
 });
 
 test("AGY hook executable enforces the map only for its scoped process", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-hook-scope-"));
+  const root = await createTestTempDir("privacyai-agy-hook-scope-");
   const mapPath = join(root, "map.json");
   await writeFile(
     mapPath,

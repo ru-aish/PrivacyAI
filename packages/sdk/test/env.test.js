@@ -5,8 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { configFromEnv, loadEnvFile } from "../src/index.js";
 
-test("loadEnvFile reads quoted values", () => {
+test("loadEnvFile reads quoted values", t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "privacy-ai-env-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, ".env");
   fs.writeFileSync(file, 'PRIVATE_AI_BASE_URL="http://localhost:11434/v1"\nPRIVATE_AI_MODEL=qwen3.5:2b\n');
 
@@ -16,8 +17,9 @@ test("loadEnvFile reads quoted values", () => {
   assert.equal(env.PRIVATE_AI_MODEL, "qwen3.5:2b");
 });
 
-test("configFromEnv prefers PRIVATE_AI aliases", () => {
+test("configFromEnv prefers PRIVATE_AI aliases", t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "privacy-ai-env-"));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   fs.writeFileSync(
     path.join(dir, ".env"),
     "PRIVATE_AI_BASE_URL=http://local.test/v1\nPRIVATE_AI_API_KEY=test-key\nPRIVATE_AI_MODEL=test-model\n"

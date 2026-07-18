@@ -1,10 +1,10 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   chmod,
   copyFile,
   mkdir,
-  mkdtemp,
   readFile,
   rm,
   stat,
@@ -93,7 +93,7 @@ test(
     const sourceCliDir = join(sourceGeminiDir, "antigravity-cli");
     await stat(join(sourceCliDir, "antigravity-oauth-token"));
 
-    const root = await mkdtemp(join(tmpdir(), "privacyai-agy-image-live-"));
+    const root = await createTestTempDir("privacyai-agy-image-live-");
     const geminiDir = join(root, ".gemini");
     const cliDir = join(geminiDir, "antigravity-cli");
     const configDir = join(geminiDir, "config");

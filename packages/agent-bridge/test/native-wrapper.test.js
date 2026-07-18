@@ -1,7 +1,7 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -39,7 +39,7 @@ import {
 const PTY_HELPER = fileURLToPath(new URL("../bin/privacyai-pty.py", import.meta.url));
 
 test("prompt submission blocks raw text, stores the map, and allows only the reinjected prompt", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-prompt-flow-"));
+  const root = await createTestTempDir("privacyai-prompt-flow-");
   const runtimeDir = join(root, "runtime");
   const vault = new SessionVault({ baseDir: join(root, "vault") });
   await mkdir(runtimeDir, { mode: 0o700 });
@@ -98,7 +98,7 @@ test("prompt submission blocks raw text, stores the map, and allows only the rei
 });
 
 test("clean prompts do not create empty session-vault records", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-clean-prompt-"));
+  const root = await createTestTempDir("privacyai-clean-prompt-");
   const runtimeDir = join(root, "runtime");
   const vault = new SessionVault({ baseDir: join(root, "vault") });
   await mkdir(runtimeDir, { mode: 0o700 });
@@ -121,7 +121,7 @@ test("clean prompts do not create empty session-vault records", async () => {
 });
 
 test("prompt flow fails closed when a sanitizer mapping leaves its original in provider text", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-prompt-leak-"));
+  const root = await createTestTempDir("privacyai-prompt-leak-");
   const runtimeDir = join(root, "runtime");
   const vault = new SessionVault({ baseDir: join(root, "vault") });
   await mkdir(runtimeDir, { mode: 0o700 });
@@ -152,7 +152,7 @@ test("prompt flow fails closed when a sanitizer mapping leaves its original in p
 });
 
 test("known values from earlier turns cannot pass through a later no-op sanitizer result", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-known-prompt-leak-"));
+  const root = await createTestTempDir("privacyai-known-prompt-leak-");
   const runtimeDir = join(root, "runtime");
   const vault = new SessionVault({ baseDir: join(root, "vault") });
   await mkdir(runtimeDir, { mode: 0o700 });
@@ -269,8 +269,9 @@ test("Claude environment guards reject hook-disabling modes", () => {
   assert.doesNotThrow(() => validateNativeEnvironment("codex", { CLAUDE_CODE_SIMPLE: "1" }));
 });
 
-test("only non-contextual native slash commands bypass prompt sanitization", async () => {
-  const runtimeDir = await mkdtemp(join(tmpdir(), "privacyai-slash-"));
+test("only non-contextual native slash commands bypass prompt sanitization", async t => {
+  const runtimeDir = await createTestTempDir("privacyai-slash-");
+  t.after(() => rm(runtimeDir, { recursive: true, force: true }));
   const result = await processPromptSubmission(
     {
       hook_event_name: "UserPromptSubmit",
@@ -415,7 +416,7 @@ test("a downloaded LM Studio Ministral outranks an unavailable Ollama default", 
 });
 
 test("onboarding shows Ollama and LM Studio models in one numbered menu", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-multi-provider-"));
+  const root = await createTestTempDir("privacyai-onboard-multi-provider-");
   const configPath = join(root, "config.json");
   const output = new PassThrough();
   let text = "";
@@ -465,7 +466,7 @@ test("onboarding shows Ollama and LM Studio models in one numbered menu", async 
 });
 
 test("LM Studio-only onboarding works when Ollama is not installed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-lm-only-"));
+  const root = await createTestTempDir("privacyai-onboard-lm-only-");
   const configPath = join(root, "config.json");
 
   await runOnboarding({
@@ -486,7 +487,7 @@ test("LM Studio-only onboarding works when Ollama is not installed", async () =>
 });
 
 test("onboarding recommends Ministral 3 3B and shows every downloaded language model", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-"));
+  const root = await createTestTempDir("privacyai-onboard-");
   const configPath = join(root, "config", "config.json");
   const output = new PassThrough();
   let text = "";
@@ -526,7 +527,7 @@ test("onboarding recommends Ministral 3 3B and shows every downloaded language m
 });
 
 test("onboarding pulls the recommended Ministral model when it is not downloaded", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-default-pull-"));
+  const root = await createTestTempDir("privacyai-onboard-default-pull-");
   const configPath = join(root, "config.json");
   const output = new PassThrough();
   let text = "";
@@ -556,7 +557,7 @@ test("onboarding pulls the recommended Ministral model when it is not downloaded
 });
 
 test("onboarding can select a downloaded model by number without pulling it", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-choice-"));
+  const root = await createTestTempDir("privacyai-onboard-choice-");
   const configPath = join(root, "config.json");
   const commands = [];
 
@@ -580,7 +581,7 @@ test("onboarding can select a downloaded model by number without pulling it", as
 });
 
 test("onboarding pulls a model name that is not downloaded", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-custom-"));
+  const root = await createTestTempDir("privacyai-onboard-custom-");
   const configPath = join(root, "config.json");
   const commands = [];
 
@@ -604,7 +605,7 @@ test("onboarding pulls a model name that is not downloaded", async () => {
 
 
 test("runtime isolation copies only credential material into private agent homes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-runtime-isolation-"));
+  const root = await createTestTempDir("privacyai-runtime-isolation-");
   const runtimeDir = join(root, "runtime");
   const codexSource = join(root, "codex-source");
   const claudeSource = join(root, "claude-source");
@@ -647,7 +648,7 @@ test("runtime isolation copies only credential material into private agent homes
 });
 
 test("Codex startup capture drains UTF-8 output before parsing", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-capture-"));
+  const root = await createTestTempDir("privacyai-codex-capture-");
   const fakeCodex = join(root, "fake-codex.js");
   await writeFile(
     fakeCodex,
@@ -679,7 +680,7 @@ test("Codex startup capture drains UTF-8 output before parsing", async () => {
 });
 
 test("Codex startup capture reports an incomplete platform package", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-capture-broken-"));
+  const root = await createTestTempDir("privacyai-codex-capture-broken-");
   const fakeCodex = join(root, "fake-codex.js");
   await writeFile(
     fakeCodex,
@@ -709,7 +710,7 @@ test("Codex startup capture reports an incomplete platform package", async () =>
 });
 
 test("Codex startup capture timeout follows configured MCP startup budgets", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-capture-timeout-"));
+  const root = await createTestTempDir("privacyai-codex-capture-timeout-");
   const codexHome = join(root, "codex-home");
   await mkdir(join(root, ".git"), { recursive: true });
   await mkdir(codexHome, { recursive: true });
@@ -864,7 +865,7 @@ test("Codex startup audit blocks high-risk values already present in implicit co
 });
 
 test("Claude startup audit scans project instructions, skills, commands, agents, and plugins", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-claude-startup-"));
+  const root = await createTestTempDir("privacyai-claude-startup-");
   await mkdir(join(root, ".git"), { recursive: true });
   await mkdir(join(root, ".claude", "skills", "private-skill"), { recursive: true });
   await writeFile(join(root, "CLAUDE.md"), "Safe project instructions\n");
@@ -886,7 +887,7 @@ test("Claude startup audit scans project instructions, skills, commands, agents,
 });
 
 test("Claude startup audit reuses unchanged files without reads or sanitizer calls", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-claude-startup-cache-"));
+  const root = await createTestTempDir("privacyai-claude-startup-cache-");
   await mkdir(join(root, ".git"), { recursive: true });
   const instructions = join(root, "CLAUDE.md");
   await writeFile(instructions, "Safe project instructions\n");
@@ -925,7 +926,7 @@ test("Claude startup audit reuses unchanged files without reads or sanitizer cal
 });
 
 test("startup directory traversal is bounded even when directories contain no files", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-startup-traversal-limit-"));
+  const root = await createTestTempDir("privacyai-startup-traversal-limit-");
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, ".git"), { recursive: true });
   const claudeSkills = join(root, ".claude", "skills");
@@ -973,7 +974,7 @@ test("provider-bound assertion never includes the protected value in diagnostics
 });
 
 test("native hook declarations cover every built-in, app, plugin, and MCP tool", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-all-tool-hooks-"));
+  const root = await createTestTempDir("privacyai-all-tool-hooks-");
   const settingsPath = join(root, "claude-settings.json");
   const settings = await writeClaudeSettings(settingsPath, { nodePath: "/usr/bin/node" });
   assert.equal(settings.disableAllHooks, false);
@@ -994,7 +995,7 @@ test("native hook declarations cover every built-in, app, plugin, and MCP tool",
 });
 
 test("Unix PTY helper reinjects a pending sanitized prompt into an unchanged child TUI", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-pty-"));
+  const root = await createTestTempDir("privacyai-pty-");
   const pendingDir = join(root, "pending");
   await mkdir(pendingDir, { mode: 0o700 });
   const id = "12345678-1234-1234-1234-123456789abc";
@@ -1036,7 +1037,7 @@ test("Unix PTY helper reinjects a pending sanitized prompt into an unchanged chi
 });
 
 test("Unix PTY helper converts exact Codex session commands into private launcher actions", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-pty-session-action-"));
+  const root = await createTestTempDir("privacyai-pty-session-action-");
   const actionPath = join(root, "action.json");
   const input = "/resume --last" + String.fromCharCode(13);
 
@@ -1184,7 +1185,7 @@ function runProcessWithInput(command, args, input) {
 
 
 test("Codex static preflight detects home and project startup files without spawning Codex or the AI sanitizer", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-static-preflight-"));
+  const root = await createTestTempDir("privacyai-codex-static-preflight-");
   const codexHome = join(root, "codex-home");
   await mkdir(join(root, ".git"), { recursive: true });
   await mkdir(join(codexHome, "skills", "private-skill"), { recursive: true });
@@ -1303,7 +1304,7 @@ test("rendered Codex startup audit primes exact gateway item verification", asyn
 test("Codex prompt renderer terminates its entire probe process group", {
   skip: process.platform === "win32"
 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-probe-tree-"));
+  const root = await createTestTempDir("privacyai-codex-probe-tree-");
   const fakeCodex = join(root, "fake-codex-tree.js");
   const childPidPath = join(root, "child.pid");
   await writeFile(

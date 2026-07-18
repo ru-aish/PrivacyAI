@@ -1,6 +1,6 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
-import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, chmod, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -28,7 +28,7 @@ function passThroughSanitizer(text) {
 }
 
 test("Codex gateway preflights static and rendered context before spawning", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-gateway-"));
+  const root = await createTestTempDir("privacyai-launch-gateway-");
   const configPath = await writeTestConfig(root);
   const codexHome = join(root, "normal-codex-home");
   const verificationStore = new MemoryContextVerificationStore();
@@ -111,7 +111,7 @@ test("Codex gateway preflights static and rendered context before spawning", asy
 });
 
 test("Codex launcher survives classifier false positives on its synthetic startup shield", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-boundary-false-positive-"));
+  const root = await createTestTempDir("privacyai-launch-boundary-false-positive-");
   t.after(() => rm(root, { recursive: true, force: true }));
   const configPath = await writeTestConfig(root);
   const codexHome = join(root, "empty-codex-home");
@@ -172,7 +172,7 @@ test("Codex launcher survives classifier false positives on its synthetic startu
 });
 
 test("a warm Codex gateway launch proves the startup fingerprint and skips prompt capture", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-render-cache-"));
+  const root = await createTestTempDir("privacyai-launch-render-cache-");
   const configPath = await writeTestConfig(root);
   const verificationStore = new MemoryContextVerificationStore();
   let captures = 0;
@@ -200,7 +200,7 @@ test("a warm Codex gateway launch proves the startup fingerprint and skips promp
 });
 
 test("Codex gateway relaunches protected resume and fork actions requested inside the TUI", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-session-action-"));
+  const root = await createTestTempDir("privacyai-launch-session-action-");
   const configPath = await writeTestConfig(root);
   const launches = [];
   let closed = 0;
@@ -258,7 +258,7 @@ test("Codex gateway relaunches protected resume and fork actions requested insid
 });
 
 test("Windows keeps interactive Codex on the direct protected gateway launch path", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-windows-gateway-"));
+  const root = await createTestTempDir("privacyai-launch-windows-gateway-");
   const configPath = await writeTestConfig(root);
   let spawned;
   let closed = 0;
@@ -297,7 +297,7 @@ test("Windows keeps interactive Codex on the direct protected gateway launch pat
 });
 
 test("Codex gateway closes, releases its lock, and cleans up when spawning fails", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-failure-"));
+  const root = await createTestTempDir("privacyai-launch-failure-");
   const configPath = await writeTestConfig(root);
   let closed = 0;
   let runtimeDir;
@@ -337,7 +337,7 @@ test("Codex gateway closes, releases its lock, and cleans up when spawning fails
 });
 
 test("a broken Codex executable fails before static scanning or gateway startup", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-broken-codex-"));
+  const root = await createTestTempDir("privacyai-launch-broken-codex-");
   const configPath = await writeTestConfig(root);
   let staticScanStarted = false;
   let gatewayStarted = false;
@@ -368,7 +368,7 @@ test("a broken Codex executable fails before static scanning or gateway startup"
 });
 
 test("a failed static preflight prevents gateway and Codex startup", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-preflight-failure-"));
+  const root = await createTestTempDir("privacyai-launch-preflight-failure-");
   const configPath = await writeTestConfig(root);
   let gatewayStarted = false;
   let rendererStarted = false;
@@ -409,7 +409,7 @@ test("a failed static preflight prevents gateway and Codex startup", async () =>
 });
 
 test("explicit strict mode preflights before trust discovery and never starts a gateway", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-strict-"));
+  const root = await createTestTempDir("privacyai-launch-strict-");
   const configPath = await writeTestConfig(root);
   const events = [];
   let gatewayStarted = false;
@@ -467,7 +467,7 @@ test("explicit strict mode preflights before trust discovery and never starts a 
 });
 
 test("native launch lock rejects a duplicate live wrapper and recovers after release", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-lock-"));
+  const root = await createTestTempDir("privacyai-launch-lock-");
   const options = { launchLockDir: join(root, "locks") };
   const first = await acquireNativeLaunchLock("codex", root, options);
 
@@ -502,7 +502,7 @@ test("local-model budgets derive bounded chunk and output sizes from numCtx", ()
 
 
 test("Codex launch distinguishes a missing configured model from a temporary readiness failure", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-model-health-"));
+  const root = await createTestTempDir("privacyai-launch-model-health-");
   const configPath = await writeTestConfig(root);
 
   await assert.rejects(
@@ -542,7 +542,7 @@ test("Codex launch distinguishes a missing configured model from a temporary rea
 });
 
 test("strict Codex launches always render because no live gateway can verify dynamic startup context", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-launch-strict-render-"));
+  const root = await createTestTempDir("privacyai-launch-strict-render-");
   const configPath = await writeTestConfig(root);
   const verificationStore = new MemoryContextVerificationStore();
   let captures = 0;

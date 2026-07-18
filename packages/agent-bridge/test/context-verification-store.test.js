@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -9,9 +8,10 @@ import {
   openContextVerificationStore,
   verificationFingerprint
 } from "../src/index.js";
+import { createTestTempDir } from "./test-temp-dir.js";
 
 test("SQLite verification store persists thread maps and verified items across restart", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-context-db-"));
+  const root = await createTestTempDir("privacyai-context-db-");
   const path = join(root, "context.sqlite3");
   const policyFingerprint = verificationFingerprint({ model: "local-test", prompt: "span-v2" });
   const record = {
@@ -48,7 +48,7 @@ test("SQLite verification store persists thread maps and verified items across r
 });
 
 test("SQLite verification store supports separate writers without losing thread records", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-context-db-writers-"));
+  const root = await createTestTempDir("privacyai-context-db-writers-");
   const path = join(root, "context.sqlite3");
   const left = await openContextVerificationStore({ verificationDbPath: path });
   const right = await openContextVerificationStore({ verificationDbPath: path });
@@ -61,8 +61,8 @@ test("SQLite verification store supports separate writers without losing thread 
   assert.equal(left.loadThread("right").sessionMap["[EMAIL_1]"], "right@example.test");
 });
 
-test("corrupt context database fails closed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-context-db-corrupt-"));
+test("corrupt context database fails closed", async t => {
+  const root = await createTestTempDir("privacyai-context-db-corrupt-");
   const path = join(root, "context.sqlite3");
   await writeFile(path, "not a sqlite database", { mode: 0o600 });
   await assert.rejects(
@@ -73,7 +73,7 @@ test("corrupt context database fails closed", async () => {
 
 
 test("SQLite verification entries expire before they can be touched again", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-context-db-age-"));
+  const root = await createTestTempDir("privacyai-context-db-age-");
   const path = join(root, "context.sqlite3");
   const store = await openContextVerificationStore({
     verificationDbPath: path,

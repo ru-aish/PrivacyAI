@@ -1,8 +1,8 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -509,7 +509,7 @@ test("agent hook executable fails closed before processing events without a sess
 });
 
 test("agent hook executable restores Claude tool inputs and sanitizes arbitrary outputs", async t => {
-  const baseDir = await mkdtemp(join(tmpdir(), "privacyai-all-tool-hook-"));
+  const baseDir = await createTestTempDir("privacyai-all-tool-hook-");
   const provider = await startMockOllamaSanitizer();
   const configPath = join(baseDir, "privacy-config.json");
   await writeFile(configPath, `${JSON.stringify({
@@ -578,7 +578,7 @@ test("agent hook executable restores Claude tool inputs and sanitizes arbitrary 
 });
 
 test("agent hook executable persists structured Write provenance across processes", async t => {
-  const baseDir = await mkdtemp(join(tmpdir(), "privacyai-file-hook-exec-"));
+  const baseDir = await createTestTempDir("privacyai-file-hook-exec-");
   const project = join(baseDir, "project");
   const vaultDir = join(baseDir, "vault");
   const dbPath = join(baseDir, "context.sqlite3");
@@ -639,7 +639,7 @@ test("agent hook executable persists structured Write provenance across processe
 });
 
 test("SessionVault hashes session ids and writes private files", async () => {
-  const baseDir = await mkdtemp(join(tmpdir(), "privacyai-agent-vault-"));
+  const baseDir = await createTestTempDir("privacyai-agent-vault-");
   const vault = new SessionVault({ baseDir });
   const saved = await vault.save("../../unsafe/session", sessionMap);
 
@@ -653,7 +653,7 @@ test("SessionVault hashes session ids and writes private files", async () => {
 
 
 test("SessionVault serializes concurrent map extensions without losing updates", async () => {
-  const baseDir = await mkdtemp(join(tmpdir(), "privacyai-agent-vault-race-"));
+  const baseDir = await createTestTempDir("privacyai-agent-vault-race-");
   const vault = new SessionVault({ baseDir });
   const sessionId = "parallel-session";
 
@@ -674,7 +674,7 @@ test(
   "SessionVault recovers a recycled-PID lock on Linux",
   { skip: process.platform !== "linux" },
   async () => {
-    const baseDir = await mkdtemp(join(tmpdir(), "privacyai-agent-vault-pid-reuse-"));
+    const baseDir = await createTestTempDir("privacyai-agent-vault-pid-reuse-");
     const vault = new SessionVault({ baseDir });
     const sessionId = "recycled-pid-session";
     const lockPath = `${vault.pathForSession(sessionId)}.lock`;
@@ -699,7 +699,7 @@ test(
 );
 
 test("SessionVault release preserves a replacement lock owned by another process", async () => {
-  const baseDir = await mkdtemp(join(tmpdir(), "privacyai-agent-vault-owner-"));
+  const baseDir = await createTestTempDir("privacyai-agent-vault-owner-");
   const vault = new SessionVault({ baseDir });
   const sessionId = "owner-session";
   let resumeUpdater;

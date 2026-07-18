@@ -1,11 +1,12 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   chmod,
   copyFile,
   mkdir,
-  mkdtemp,
   readFile,
+  rm,
   stat,
   writeFile
 } from "node:fs/promises";
@@ -36,7 +37,8 @@ test(
     const sourceHome = process.env.CODEX_HOME || join(homedir(), ".codex");
     await stat(join(sourceHome, "auth.json"));
 
-    const root = await mkdtemp(join(tmpdir(), "privacyai-codex-live-"));
+    const root = await createTestTempDir("privacyai-codex-live-");
+    t.after(() => rm(root, { recursive: true, force: true }));
     const workspace = join(root, "workspace");
     const codexHome = join(root, "codex-home");
     const vaultDir = join(root, "vault");

@@ -1,8 +1,8 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import tls from "node:tls";
@@ -306,7 +306,7 @@ test("AGY request cache reuses unchanged history and tools after session-map gro
 });
 
 test("AGY controller stages function calls and commits matching next-turn responses", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-mutation-"));
+  const root = await createTestTempDir("privacyai-agy-mutation-");
   const target = join(root, "owner.txt");
   const vaultDir = join(root, "vault");
   await writeFile(target, "before\n");
@@ -368,7 +368,7 @@ test("AGY controller stages function calls and commits matching next-turn respon
 });
 
 test("AGY session controllers atomically merge concurrent mappings", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-session-race-"));
+  const root = await createTestTempDir("privacyai-agy-session-race-");
   const sessionId = "shared-concurrent-session";
   const firstOriginal = "first.concurrent@example.test";
   const secondOriginal = "second.concurrent@example.test";
@@ -414,7 +414,7 @@ test("AGY session controllers atomically merge concurrent mappings", async t => 
 });
 
 test("AGY controller keeps image dependencies lazy and closes owned image workers", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-image-lifecycle-"));
+  const root = await createTestTempDir("privacyai-agy-image-lifecycle-");
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
   });
@@ -467,7 +467,7 @@ test("AGY controller keeps image dependencies lazy and closes owned image worker
 });
 
 test("AGY controller drains accepted transformations before closing dependencies", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-controller-drain-"));
+  const root = await createTestTempDir("privacyai-agy-controller-drain-");
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
   });
@@ -531,7 +531,7 @@ test("AGY controller drains accepted transformations before closing dependencies
 });
 
 test("AGY controller retries only an owned dependency whose close failed", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-controller-close-retry-"));
+  const root = await createTestTempDir("privacyai-agy-controller-close-retry-");
   t.after(async () => {
     await rm(root, { recursive: true, force: true });
   });
@@ -778,7 +778,7 @@ test("AGY upstream headers preserve opaque encodings and normalize transformed m
 });
 
 test("AGY transport proxy sanitizes a real CONNECT request and restores streamed output", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-transport-"));
+  const root = await createTestTempDir("privacyai-agy-transport-");
   const mutationTarget = join(root, "owner.txt");
   await writeFile(mutationTarget, "before\n");
   const nativeToolName = "stealth-browser/browser_status";
@@ -968,7 +968,7 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
 });
 
 test("AGY transport proxy forwards the audited metrics route opaquely", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-metrics-route-"));
+  const root = await createTestTempDir("privacyai-agy-metrics-route-");
   const observed = {};
   const runtime = await startAgyTransportRuntime({
     sanitizer: deterministicSanitizer,
@@ -1018,7 +1018,7 @@ test("AGY transport proxy forwards the audited metrics route opaquely", async t 
 });
 
 test("AGY opaque forwarding cancels upstream work after downstream disconnect", { timeout: 5000 }, async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-opaque-cancel-"));
+  const root = await createTestTempDir("privacyai-agy-opaque-cancel-");
   let upstreamRequest;
   let upstreamResponse;
   let markResponseReady;
@@ -1085,7 +1085,7 @@ test("AGY opaque forwarding cancels upstream work after downstream disconnect", 
 });
 
 test("ephemeral AGY authority removes only its owned child directory", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-authority-root-"));
+  const root = await createTestTempDir("privacyai-agy-authority-root-");
   const marker = join(root, "caller-owned.txt");
   await writeFile(marker, "keep\n");
   try {
@@ -1103,7 +1103,7 @@ test("ephemeral AGY authority removes only its owned child directory", async () 
 });
 
 test("ephemeral AGY authority shares failed closes and remains retryable", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-authority-retry-"));
+  const root = await createTestTempDir("privacyai-agy-authority-retry-");
   let removeCalls = 0;
   let markRemovalStarted;
   const removalStarted = new Promise(resolve => { markRemovalStarted = resolve; });
@@ -1146,7 +1146,7 @@ test("ephemeral AGY authority shares failed closes and remains retryable", async
 });
 
 test("ephemeral AGY authority preserves a child-specific CA bundle", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-agy-authority-ca-"));
+  const root = await createTestTempDir("privacyai-agy-authority-ca-");
   const customBundle = join(root, "enterprise-ca.pem");
   const marker = "CUSTOM-ENTERPRISE-CA-BUNDLE";
   await writeFile(customBundle, `${marker}\n`);

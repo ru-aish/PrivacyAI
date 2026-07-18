@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 
 import { resolveExecutable, verifyNativeExecutable } from "../src/index.js";
+import { createTestTempDir } from "./test-temp-dir.js";
 
 const linuxPlatform = process.arch === "x64"
   ? {
@@ -75,8 +75,8 @@ async function createCodexInstall(root, name, options = {}) {
 
 test("Codex resolution skips an incomplete npm platform package and uses the next healthy install", {
   skip: process.platform !== "linux" || !linuxPlatform
-}, async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-resolution-"));
+}, async t => {
+  const root = await createTestTempDir("privacyai-codex-resolution-");
   const broken = await createCodexInstall(root, "broken", { complete: false });
   const healthy = await createCodexInstall(root, "healthy");
 
@@ -92,8 +92,8 @@ test("Codex resolution skips an incomplete npm platform package and uses the nex
   );
 });
 
-test("Codex resolution preserves non-npm custom executables", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-custom-codex-"));
+test("Codex resolution preserves non-npm custom executables", async t => {
+  const root = await createTestTempDir("privacyai-custom-codex-");
   const binary = join(root, "codex");
   await writeFile(binary, "#!/bin/sh\nprintf 'custom codex\\n'\n", { mode: 0o755 });
   await chmod(binary, 0o755);
@@ -101,8 +101,8 @@ test("Codex resolution preserves non-npm custom executables", async () => {
   assert.equal(await resolveExecutable("codex", { path: root }), binary);
 });
 
-test("native executable verification accepts a healthy binary", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-executable-healthy-"));
+test("native executable verification accepts a healthy binary", async t => {
+  const root = await createTestTempDir("privacyai-executable-healthy-");
   const binary = join(root, "codex");
   await writeFile(binary, "#!/bin/sh\nprintf 'codex-cli 0.144.5\\n'\n", { mode: 0o755 });
   await chmod(binary, 0o755);
@@ -113,8 +113,8 @@ test("native executable verification accepts a healthy binary", async () => {
   );
 });
 
-test("native executable verification reports an incomplete Codex platform package", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-executable-broken-"));
+test("native executable verification reports an incomplete Codex platform package", async t => {
+  const root = await createTestTempDir("privacyai-executable-broken-");
   const binary = join(root, "codex");
   await writeFile(
     binary,

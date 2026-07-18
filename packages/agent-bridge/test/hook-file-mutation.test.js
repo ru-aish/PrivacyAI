@@ -1,6 +1,6 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -20,7 +20,7 @@ const policyFingerprint = "sha256:hook-file-policy";
 const sessionMap = { "[LOCATION_1]": "private-workspace-name" };
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-hook-mutation-"));
+  const root = await createTestTempDir("privacyai-hook-mutation-");
   await mkdir(join(root, ".git"), { recursive: true });
   return { root, store: new MemoryContextVerificationStore() };
 }
@@ -84,7 +84,7 @@ test("structured Write stages, verifies, and seeds exact startup reuse", async (
 });
 
 test("mutation plan reuse keeps private originals out of SQLite and WAL", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-hook-ledger-private-"));
+  const root = await createTestTempDir("privacyai-hook-ledger-private-");
   const workspace = join(root, "workspace");
   const dbPath = join(root, "context.sqlite3");
   const secret = "mutation-private-value-DO-NOT-PERSIST";

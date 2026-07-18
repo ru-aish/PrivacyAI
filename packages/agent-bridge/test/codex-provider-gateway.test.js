@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { restoreValue } from "@privacy-ai/sdk";
 import { createGatewayDiagnosticReporter, publicGatewayFailure } from "../src/gateway-error.js";
+import { createTestTempDir } from "./test-temp-dir.js";
 
 import {
   CodexSseRestorer,
@@ -704,7 +704,7 @@ test("protected tool-search names use reversible provider-safe aliases", async (
 
 test("provider identifier aliases survive repeated gateway turns", async t => {
   const privateToolName = "browser_toggle_visibility";
-  const root = await mkdtemp(join(tmpdir(), "privacyai-identifier-alias-"));
+  const root = await createTestTempDir("privacyai-identifier-alias-");
   const seenNames = [];
   const upstream = await startServer(async (request, response) => {
     const body = await readRequestJson(request);
@@ -1344,7 +1344,7 @@ test("localhost gateway sanitizes outbound requests and restores fragmented SSE 
   });
   t.after(() => upstream.close());
 
-  const vaultDir = await mkdtemp(join(tmpdir(), "privacyai-codex-gateway-test-"));
+  const vaultDir = await createTestTempDir("privacyai-codex-gateway-test-");
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
     baseDir: vaultDir,
@@ -1403,7 +1403,7 @@ test("Codex gateway prunes legacy function-argument key mappings before schema v
     sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
     verificationStore: store,
     policyFingerprint: "fixed-policy",
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-key-cleanup-")),
+    baseDir: await createTestTempDir("privacyai-codex-key-cleanup-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1461,7 +1461,7 @@ test("Codex gateway prunes legacy function-argument key mappings before schema v
 });
 
 test("Codex gateway stages apply_patch and commits it from next-turn tool history", async t => {
-  const project = await mkdtemp(join(tmpdir(), "privacyai-codex-mutation-project-"));
+  const project = await createTestTempDir("privacyai-codex-mutation-project-");
   await mkdir(join(project, ".git"), { recursive: true });
   const target = join(project, "owner.txt");
   await writeFile(target, "before\n");
@@ -1500,7 +1500,7 @@ test("Codex gateway stages apply_patch and commits it from next-turn tool histor
     sanitizer: deterministicSanitizer,
     verificationStore: store,
     cwd: project,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-mutation-vault-")),
+    baseDir: await createTestTempDir("privacyai-codex-mutation-vault-"),
     policyFingerprint: "sha256:codex-mutation-policy",
     apiUpstream: "http://127.0.0.1:" + upstream.port + "/v1",
     allowInsecureTestUpstream: true
@@ -1572,7 +1572,7 @@ test("localhost gateway forwards only SDK-sanitized image and synchronized promp
         };
       }
     },
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-image-gateway-")),
+    baseDir: await createTestTempDir("privacyai-codex-image-gateway-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1626,7 +1626,7 @@ test("gateway safely probes the real headerless SSE response shape", async t => 
   t.after(() => upstream.close());
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-headerless-sse-")),
+    baseDir: await createTestTempDir("privacyai-codex-headerless-sse-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1651,7 +1651,7 @@ test("headerless non-SSE success fails before response commitment", async t => {
   t.after(() => upstream.close());
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-headerless-invalid-")),
+    baseDir: await createTestTempDir("privacyai-codex-headerless-invalid-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1700,7 +1700,7 @@ test("downstream disconnect cancels the active upstream SSE request", async t =>
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
     onGatewayError: diagnostic => diagnostics.push(diagnostic),
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-disconnect-")),
+    baseDir: await createTestTempDir("privacyai-codex-disconnect-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1750,7 +1750,7 @@ test("idle loopback upstream reset is classified once without leaking endpoint d
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
     onGatewayError: diagnostic => diagnostics.push(diagnostic),
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-idle-reset-")),
+    baseDir: await createTestTempDir("privacyai-codex-idle-reset-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1778,7 +1778,7 @@ test("loopback upstream timeout is reported with safe timeout metadata", async t
     sanitizer: deterministicSanitizer,
     onGatewayError: value => diagnostics.push(value),
     upstreamTimeoutMs: 20,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-timeout-")),
+    baseDir: await createTestTempDir("privacyai-codex-timeout-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`, allowInsecureTestUpstream: true
   });
   t.after(() => gateway.close());
@@ -1865,7 +1865,7 @@ test("downstream disconnect aborts in-flight sanitization before any upstream re
         options.signal?.addEventListener("abort", abort, { once: true });
       });
     },
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-sanitizer-disconnect-")),
+    baseDir: await createTestTempDir("privacyai-codex-sanitizer-disconnect-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1903,7 +1903,7 @@ test("gateway protects compact requests and passes upstream status codes without
   t.after(() => upstream.close());
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-compact-")),
+    baseDir: await createTestTempDir("privacyai-codex-compact-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1948,7 +1948,7 @@ test("gateway validates and restores successful compact output item-by-item", as
 
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-compact-success-")),
+    baseDir: await createTestTempDir("privacyai-codex-compact-success-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -1993,7 +1993,7 @@ test("gateway fails closed for wrong nonce, compression, oversized bodies, and s
   });
   t.after(() => upstream.close());
   const baseOptions = {
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-fail-")),
+    baseDir: await createTestTempDir("privacyai-codex-fail-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   };
@@ -2024,7 +2024,7 @@ test("gateway fails closed for wrong nonce, compression, oversized bodies, and s
 
   const failing = await startCodexProviderGateway({
     ...baseOptions,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-fail-sanitizer-")),
+    baseDir: await createTestTempDir("privacyai-codex-fail-sanitizer-"),
     sanitizer: async () => {
       throw new Error(`classifier failed around ${PRIVATE_EMAIL}`);
     }
@@ -2051,7 +2051,7 @@ test("models route allowlists headers and the client_version query", async t => 
   t.after(() => upstream.close());
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-models-")),
+    baseDir: await createTestTempDir("privacyai-codex-models-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -2086,7 +2086,7 @@ test("models route rejects malformed successful catalogs", async t => {
   t.after(() => upstream.close());
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-models-invalid-")),
+    baseDir: await createTestTempDir("privacyai-codex-models-invalid-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -2120,7 +2120,7 @@ test("gateway returns clean failures for compressed, malformed, and binary upstr
   t.after(() => upstream.close());
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-upstream-fail-")),
+    baseDir: await createTestTempDir("privacyai-codex-upstream-fail-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true,
     allowTestQueryParameters: true
@@ -2162,7 +2162,7 @@ test("gateway chooses ChatGPT or API upstream and strips forwarding headers", as
 
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-routing-")),
+    baseDir: await createTestTempDir("privacyai-codex-routing-"),
     apiUpstream: `http://127.0.0.1:${api.port}/v1`,
     chatgptUpstream: `http://127.0.0.1:${chatgpt.port}/backend-api/codex`,
     allowInsecureTestUpstream: true
@@ -2468,7 +2468,7 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
 });
 
 test("gateway reuses persisted thread verification after restart and invalidates changed policy/content", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-gateway-persistent-cache-"));
+  const root = await createTestTempDir("privacyai-gateway-persistent-cache-");
   const verificationDbPath = join(root, "context.sqlite3");
   let upstreamRequests = 0;
   const upstream = await startServer(async (request, response) => {
@@ -2668,7 +2668,7 @@ function escapeRegExp(value) {
 
 
 test("custom sanitizers without stable identity never reuse persisted verification across restart", async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-gateway-ephemeral-policy-"));
+  const root = await createTestTempDir("privacyai-gateway-ephemeral-policy-");
   const verificationDbPath = join(root, "context.sqlite3");
   const upstream = await startServer(async (request, response) => {
     await readRequestJson(request);
@@ -2748,7 +2748,7 @@ test("gateway diagnostics expose only allowlisted structured fields", async t =>
       diagnostics.push(diagnostic);
       throw new Error("diagnostic sink failure must remain observational");
     },
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-safe-diagnostic-")),
+    baseDir: await createTestTempDir("privacyai-codex-safe-diagnostic-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -2780,7 +2780,7 @@ test("gateway categorizes local provider failures without exposing provider deta
       throw error;
     },
     onGatewayError: diagnostic => diagnostics.push(diagnostic),
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-provider-diagnostic-")),
+    baseDir: await createTestTempDir("privacyai-codex-provider-diagnostic-"),
     apiUpstream: "http://127.0.0.1:9/v1",
     allowInsecureTestUpstream: true
   });
@@ -2810,7 +2810,7 @@ test("stream failures emit exactly one structured gateway diagnostic", async t =
   const gateway = await startCodexProviderGateway({
     sanitizer: deterministicSanitizer,
     onGatewayError: diagnostic => diagnostics.push(diagnostic),
-    baseDir: await mkdtemp(join(tmpdir(), "privacyai-codex-single-diagnostic-")),
+    baseDir: await createTestTempDir("privacyai-codex-single-diagnostic-"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });

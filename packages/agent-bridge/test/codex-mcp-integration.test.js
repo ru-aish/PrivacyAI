@@ -1,12 +1,12 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
-  mkdtemp,
   readFile,
+  rm,
   writeFile
 } from "node:fs/promises";
 import http from "node:http";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -27,7 +27,8 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
   const codex = await resolveExecutable("codex");
   if (!codex) return t.skip("Codex is not installed");
 
-  const root = await mkdtemp(join(tmpdir(), "privacyai-stock-codex-mcp-"));
+  const root = await createTestTempDir("privacyai-stock-codex-mcp-");
+  t.after(() => rm(root, { recursive: true, force: true }));
   const workspace = join(root, "workspace");
   const codexHome = join(root, "codex-home");
   const vaultDir = join(root, "vault");
