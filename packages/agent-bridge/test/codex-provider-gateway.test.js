@@ -240,7 +240,10 @@ test("Codex drops schema-identifier false positives learned from prose", async (
     strict: true,
     parameters: {
       type: "object",
-      properties: { cell_id: { type: "string" } },
+      properties: {
+        cell_id: { type: "string" },
+        internal_customer_field: { type: "string" }
+      },
       required: ["cell_id"]
     }
   }];
@@ -367,7 +370,11 @@ test("Codex prunes only safe schema-declared argument-key mappings from poisoned
     type: "function_call",
     call_id: "wait-call",
     name: "wait",
-    arguments: JSON.stringify({ cell_id: "3", unrelated_key: "kept" })
+    arguments: JSON.stringify({
+      cell_id: "3",
+      unrelated_key: "kept",
+      internal_customer_field: "private"
+    })
   }];
   body.tools = [{
     type: "function",
@@ -384,11 +391,13 @@ test("Codex prunes only safe schema-declared argument-key mappings from poisoned
   const poisoned = {
     "[PRIVATE_VALUE_9]": "cell_id",
     "[PRIVATE_VALUE_10]": "unrelated_key",
+    "[PRIVATE_VALUE_11]": "internal_customer_field",
     "[EMAIL_1]": PRIVATE_EMAIL
   };
   const pruned = pruneCodexArgumentKeyMappings(body, poisoned);
   assert.equal(Object.values(pruned).includes("cell_id"), false);
   assert.equal(pruned["[PRIVATE_VALUE_10]"], "unrelated_key");
+  assert.equal(pruned["[PRIVATE_VALUE_11]"], "internal_customer_field");
   assert.equal(pruned["[EMAIL_1]"], PRIVATE_EMAIL);
 
   const noSchema = { ...body, tools: [] };
@@ -826,7 +835,7 @@ test("Codex function-call arguments sanitize values without classifying protocol
     type: "function_call",
     call_id: "call-wait",
     name: "wait",
-    arguments: JSON.stringify({ cell_id: "3", note: PRIVATE_EMAIL })
+    arguments: JSON.stringify({ cell_id: "3", yield_time_ms: 10000, note: PRIVATE_EMAIL })
   }];
 
   const result = await sanitizeCodexRequestBody(body, {
@@ -839,7 +848,7 @@ test("Codex function-call arguments sanitize values without classifying protocol
 
   assert.equal(calls.some(text => text.includes("cell_id")), false);
   assert.equal(calls.some(text => text.includes("yield_time_ms")), false);
-  assert.deepEqual(args, { cell_id: "3", note: "[EMAIL_1]" });
+  assert.deepEqual(args, { cell_id: "3", yield_time_ms: 10000, note: "[EMAIL_1]" });
   assert.equal(result.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
   assert.equal(Object.values(result.sessionMapAdditions).includes("cell_id"), false);
 });
@@ -1020,19 +1029,23 @@ test("Codex schema policy fails closed for detectable or known protected immutab
     error => error?.code === "PRIVACYAI_CODEX_SCHEMA_IMMUTABLE_PROTECTED_VALUE" && !error.message.includes(PRIVATE_EMAIL)
   );
 
-  const knownPrivateIdentifier = "internal-customer-field";
-  body.tools[0].parameters = {
-    type: "object",
-    properties: { [knownPrivateIdentifier]: { type: "string" } }
-  };
-  await assert.rejects(
-    sanitizeCodexRequestBody(body, {
-      sanitizer: deterministicSanitizer,
-      sessionMap: { "[PRIVATE_VALUE_99]": knownPrivateIdentifier }
-    }),
-    error => error?.code === "PRIVACYAI_CODEX_SCHEMA_IMMUTABLE_PROTECTED_VALUE" &&
-      !error.message.includes(knownPrivateIdentifier)
-  );
+  for (const knownPrivateIdentifier of [
+    "internal-customer-field",
+    "internal_customer_field"
+  ]) {
+    body.tools[0].parameters = {
+      type: "object",
+      properties: { [knownPrivateIdentifier]: { type: "string" } }
+    };
+    await assert.rejects(
+      sanitizeCodexRequestBody(body, {
+        sanitizer: deterministicSanitizer,
+        sessionMap: { "[PRIVATE_VALUE_99]": knownPrivateIdentifier }
+      }),
+      error => error?.code === "PRIVACYAI_CODEX_SCHEMA_IMMUTABLE_PROTECTED_VALUE" &&
+        !error.message.includes(knownPrivateIdentifier)
+    );
+  }
   for (const malformedSchema of [
     [],
     { type: "object", properties: [] },

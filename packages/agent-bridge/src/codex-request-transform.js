@@ -79,6 +79,9 @@ const PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH = 64;
 const DEFAULT_MAX_IMAGES_PER_REQUEST = 8;
 const SAFE_TOOL_ARGUMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const UNSAFE_TOOL_ARGUMENT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const LEGACY_CODEX_PROTOCOL_KEYS = new Map([
+  ["wait", new Set(["cell_id", "yield_time_ms", "max_tokens"])]
+]);
 
 export async function sanitizeCodexRequestBody(body, options = {}) {
   throwIfAborted(options.signal);
@@ -273,7 +276,7 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
   }
 
   const transformed = deepClone(body);
-  const recoverableProtocolKeys = collectRecoverableToolSchemaKeys(transformed);
+  const recoverableProtocolKeys = collectLegacyCodexProtocolKeys(transformed);
   const completeMap = pruneCodexArgumentKeyMappings(transformed, sessionMap);
   const { slots } = collectModelVisibleSlots(transformed, completeMap);
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
@@ -404,15 +407,14 @@ export function codexSessionKey(body, fallbackSessionId, headers = {}) {
 }
 
 /**
- * Tool-schema property names are executable protocol structure, not private
- * user values. Older gateways could persist false-positive mappings such as
- * [PRIVATE_VALUE_9] -> cell_id. Remove only conservative code-style schema
- * identifiers that are not detected as secret-like values; known private,
- * hyphenated, or otherwise unusual identifiers continue to fail closed.
+ * Older gateways could persist false-positive mappings for immutable Codex
+ * protocol keys such as wait.cell_id. Migrate only allowlisted stock-Codex
+ * fields that are both present in the matching tool schema and observed in a
+ * historical call. Arbitrary application schema identifiers remain protected.
  */
 export function pruneCodexArgumentKeyMappings(body, sessionMap = {}) {
   const normalized = normalizeSessionMap(sessionMap);
-  const recoverable = collectRecoverableToolSchemaKeys(body);
+  const recoverable = collectLegacyCodexProtocolKeys(body);
   if (recoverable.size === 0) return normalized;
   return filterRecoverableProtocolMappings(normalized, recoverable);
 }
@@ -1536,6 +1538,66 @@ function collectStringField(object, key, slots, path) {
   if (typeof object?.[key] === "string") slots.push({ path: [...path, key], value: object[key] });
 }
 
+function collectLegacyCodexProtocolKeys(body) {
+  const declaredByTool = new Map();
+  collectLegacyToolSchemaKeys(body?.tools, declaredByTool);
+  if (Array.isArray(body?.input)) {
+    for (const item of body.input) {
+      if (item?.type === "additional_tools" || item?.type === "tool_search_output") {
+        collectLegacyToolSchemaKeys(item.tools, declaredByTool);
+      }
+    }
+  }
+
+  const observedByTool = new Map();
+  for (const item of body?.input || []) {
+    if (item?.type !== "function_call" || typeof item.name !== "string" || typeof item.arguments !== "string") {
+      continue;
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(item.arguments);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const observed = observedByTool.get(item.name) || new Set();
+    for (const key of Object.keys(parsed)) observed.add(key);
+    observedByTool.set(item.name, observed);
+  }
+
+  const output = new Set();
+  for (const [toolName, allowlist] of LEGACY_CODEX_PROTOCOL_KEYS) {
+    const declared = declaredByTool.get(toolName);
+    const observed = observedByTool.get(toolName);
+    if (!declared || !observed) continue;
+    for (const key of allowlist) {
+      if (declared.has(key) && observed.has(key)) output.add(key.toLocaleLowerCase("en-US"));
+    }
+  }
+  return output;
+}
+
+function collectLegacyToolSchemaKeys(tools, output) {
+  if (!Array.isArray(tools)) return;
+  for (const tool of tools) {
+    if (tool?.type === "namespace") {
+      collectLegacyToolSchemaKeys(tool.tools, output);
+      continue;
+    }
+    if (tool?.type !== "function" || typeof tool.name !== "string") continue;
+    const allowlist = LEGACY_CODEX_PROTOCOL_KEYS.get(tool.name);
+    if (!allowlist) continue;
+    const properties = tool.parameters?.properties;
+    if (!properties || typeof properties !== "object" || Array.isArray(properties)) continue;
+    const declared = output.get(tool.name) || new Set();
+    for (const key of Object.keys(properties)) {
+      if (allowlist.has(key)) declared.add(key);
+    }
+    output.set(tool.name, declared);
+  }
+}
+
 function collectRecoverableToolSchemaKeys(body) {
   const candidates = new Map();
   collectToolListSchemaKeys(body?.tools, candidates);
@@ -1591,7 +1653,7 @@ function filterRecoverableProtocolMappings(sessionMap, recoverable) {
 
 function createProtocolKeyVerificationCache(cache, body) {
   if (!cache || typeof cache.get !== "function") return cache;
-  const recoverable = collectRecoverableToolSchemaKeys(body);
+  const recoverable = collectLegacyCodexProtocolKeys(body);
   if (recoverable.size === 0) return cache;
   return {
     get(cacheKey, policyFingerprint) {
@@ -1634,8 +1696,15 @@ function createProtocolKeyClassifierNormalizer(body) {
   };
 }
 
-function shouldSanitizeCodexArgumentKey({ key }) {
-  return !isRecoverableProtocolArgumentKey(key);
+function codexArgumentKeyPolicy(toolName) {
+  const trusted = LEGACY_CODEX_PROTOCOL_KEYS.get(String(toolName || ""));
+  return {
+    sanitizeObjectKeys: ({ key }) =>
+      !(trusted?.has(key) || isRecoverableProtocolArgumentKey(key)),
+    objectKeyPolicyKey: trusted
+      ? `codex-argument-keys-v2:${String(toolName)}`
+      : "codex-argument-keys-v2:generic"
+  };
 }
 
 function isRecoverableProtocolArgumentKey(value) {
@@ -1671,12 +1740,12 @@ function collectJsonStringField(object, key, slots, path) {
       "PrivacyAI blocked invalid JSON in Codex function-call arguments."
     );
   }
+  const keyPolicy = codexArgumentKeyPolicy(object.name);
   slots.push({
     path: [...path, key],
     value: parsed,
     jsonString: true,
-    sanitizeObjectKeys: shouldSanitizeCodexArgumentKey,
-    objectKeyPolicyKey: "codex-argument-keys-v1"
+    ...keyPolicy
   });
 }
 
