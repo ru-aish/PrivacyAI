@@ -3,6 +3,8 @@ import { constants } from "node:fs";
 import { access, readFile, realpath } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 
+import { BoundedTextBuffer, detachedProcessOptions, terminateProcessTree } from "./process-supervisor.js";
+
 const DEFAULT_EXECUTABLE_PROBE_TIMEOUT_MS = 10000;
 const DEFAULT_EXECUTABLE_PROBE_MAX_BYTES = 64 * 1024;
 
@@ -57,13 +59,13 @@ export function verifyNativeExecutable(flavor, binary, options = {}) {
   );
 
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(binary, ["--version"], {
+    const child = spawn(binary, ["--version"], detachedProcessOptions({
       cwd: options.cwd,
       env: options.env,
       stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = "";
-    let stderr = "";
+    }));
+    const stdout = new BoundedTextBuffer(maxBytes, "executable probe stdout");
+    const stderr = new BoundedTextBuffer(maxBytes, "executable probe stderr");
     let outputBytes = 0;
     let settled = false;
 
@@ -71,20 +73,20 @@ export function verifyNativeExecutable(flavor, binary, options = {}) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (!child.killed) child.kill("SIGKILL");
-      if (error) rejectPromise(error);
-      else resolvePromise(value);
+      terminateProcessTree(child, { graceMs: 250, killWaitMs: 750 }).then(
+        () => error ? rejectPromise(error) : resolvePromise(value),
+        cleanupError => rejectPromise(error || cleanupError)
+      );
     };
-    const append = (current, chunk) => {
+    const append = (buffer, chunk) => {
+      if (settled) return;
       outputBytes += chunk.length;
-      if (outputBytes > maxBytes) {
+      if (outputBytes > maxBytes || !buffer.append(chunk)) {
         finish(brokenExecutableError(
           flavor,
           "produced excessive diagnostic output during its startup check"
         ));
-        return current;
       }
-      return current + chunk.toString("utf8");
     };
     const timer = setTimeout(() => {
       finish(brokenExecutableError(
@@ -96,19 +98,15 @@ export function verifyNativeExecutable(flavor, binary, options = {}) {
     child.on("error", () => {
       finish(brokenExecutableError(flavor, "could not be started"));
     });
-    child.stdout.on("data", chunk => {
-      stdout = append(stdout, chunk);
-    });
-    child.stderr.on("data", chunk => {
-      stderr = append(stderr, chunk);
-    });
+    child.stdout.on("data", chunk => append(stdout, chunk));
+    child.stderr.on("data", chunk => append(stderr, chunk));
     child.on("close", (code, signal) => {
       if (settled) return;
       if (code === 0) {
-        finish(null, { version: stdout.trim() || stderr.trim() || null });
+        finish(null, { version: stdout.text().trim() || stderr.text().trim() || null });
         return;
       }
-      finish(codexExecutableFailure(flavor, stderr, code, signal));
+      finish(codexExecutableFailure(flavor, stderr.text(), code, signal));
     });
   });
 }

@@ -1,4 +1,5 @@
 import { launchAgy } from "./agy.js";
+import { BoundedQueue } from "./bounded-queue.js";
 import { loadPrivacyConfig } from "./config-store.js";
 import { launchNativeTui } from "./launcher.js";
 import { checkPrivacyModel } from "./model-health.js";
@@ -20,14 +21,24 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
           // not write through that screen; flush safe, structured summaries
           // when the launcher gives control back. Pipes stay immediately useful.
           if (stderr.isTTY) {
-            const deferred = [];
+            const deferred = new BoundedQueue(
+              positiveQueueCapacity(options.maxDeferredGatewayDiagnostics, 128),
+              "deferred gateway diagnostics"
+            );
             launchOptions.onGatewayError = diagnostic => deferred.push(diagnostic);
             try {
               return await (options.launchNativeTui || launchNativeTui)(command, args, launchOptions);
             } finally {
-              for (const diagnostic of deferred) {
+              for (const diagnostic of deferred.drain()) {
                 try {
                   render(diagnostic);
+                } catch {
+                  // Diagnostic rendering must never replace the launcher result.
+                }
+              }
+              if (deferred.dropped > 0) {
+                try {
+                  stderr.write(`[PrivacyAI] Suppressed ${deferred.dropped} older Codex gateway diagnostics.\n`);
                 } catch {
                   // Diagnostic rendering must never replace the launcher result.
                 }
@@ -115,4 +126,12 @@ function safeDiagnosticField(value, fallback) {
 
 function safeMessage(error) {
   return error instanceof Error ? error.message : "PrivacyAI failed safely.";
+}
+
+function positiveQueueCapacity(value, fallback) {
+  const normalized = value == null ? fallback : Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized <= 0 || normalized > 10_000) {
+    throw new TypeError("Deferred gateway diagnostic capacity must be between 1 and 10000.");
+  }
+  return normalized;
 }

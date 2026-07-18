@@ -1,3 +1,5 @@
+import { firstCodexCommand, splitCodexArguments } from "./codex-arguments.js";
+
 export const CODEX_TUI_SESSION_ACTION_EXIT_CODE = 86;
 
 const SESSION_ACTIONS = new Set(["resume", "fork"]);
@@ -30,6 +32,7 @@ const PERSISTENT_BOOLEAN_OPTIONS = new Set([
 
 const NON_INTERACTIVE_COMMANDS = new Set([
   "app-server",
+  "a",
   "apply",
   "archive",
   "cloud",
@@ -37,6 +40,7 @@ const NON_INTERACTIVE_COMMANDS = new Set([
   "debug",
   "delete",
   "doctor",
+  "e",
   "exec",
   "exec-server",
   "features",
@@ -85,7 +89,8 @@ export function buildCodexTuiSessionActionArgs(originalArgs, action) {
 }
 
 export function supportsCodexTuiSessionActions(args = []) {
-  if (args.some(arg => HELP_VERSION_FLAGS.has(String(arg)))) return false;
+  const { beforeDelimiter } = splitCodexArguments(args);
+  if (beforeDelimiter.some(arg => HELP_VERSION_FLAGS.has(arg))) return false;
 
   const command = firstCodexPositional(args);
   return command === null || !NON_INTERACTIVE_COMMANDS.has(command);
@@ -120,15 +125,5 @@ function persistentCodexOptions(args = []) {
 }
 
 function firstCodexPositional(args = []) {
-  for (let index = 0; index < args.length; index += 1) {
-    const arg = String(args[index]);
-    if (arg === "--") return args[index + 1] == null ? null : String(args[index + 1]);
-    if (PERSISTENT_VALUE_OPTIONS.has(arg)) {
-      index += 1;
-      continue;
-    }
-    if (arg.startsWith("-")) continue;
-    return arg;
-  }
-  return null;
+  return firstCodexCommand(args, PERSISTENT_VALUE_OPTIONS);
 }

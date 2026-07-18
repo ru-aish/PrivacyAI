@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
@@ -25,6 +24,7 @@ import {
   derivePrivacyContextMaxTokens
 } from "./privacy-sanitizer.js";
 import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
+import { runInheritedProcess } from "./process-supervisor.js";
 import { startAgyTransportRuntime } from "./agy-transport-runtime.js";
 
 const AGY_HOOK_PATH = fileURLToPath(new URL("../bin/privacyai-agy-hook.js", import.meta.url));
@@ -95,7 +95,7 @@ export async function launchAgy(userArgs = [], options = {}) {
       "PrivacyAI AGY transport active: native tools and integrations remain available; " +
       "supported model-bound content is sanitized locally.\n"
     );
-    const runChild = options.runChild || spawnInherited;
+    const runChild = options.runChild || runInheritedProcess;
     return await runChild(binary, privacyMode.args, {
       cwd: options.cwd || process.cwd(),
       env: {
@@ -178,7 +178,7 @@ async function launchAgyStrict(userArgs, options) {
       "the transport boundary was explicitly disabled.\n"
     );
 
-    const runChild = options.runChild || spawnInherited;
+    const runChild = options.runChild || runInheritedProcess;
     return await runChild(options.binary, childArgs, {
       cwd: options.cwd || process.cwd(),
       env
@@ -448,26 +448,10 @@ async function atomicWriteBytes(path, bytes, mode) {
   await rename(tempPath, path);
 }
 
-function spawnInherited(command, args, options) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { ...options, stdio: "inherit" });
-    child.on("error", reject);
-    child.on("exit", (code, signal) => {
-      if (signal) resolve(128 + signalNumber(signal));
-      else resolve(code ?? 1);
-    });
-  });
-}
-
 function onboardingRequiredError() {
   const error = new Error("PrivacyAI is not configured.\nRun: privacyai onboard");
   error.code = "PRIVACYAI_ONBOARDING_REQUIRED";
   return error;
-}
-
-function signalNumber(signal) {
-  const numbers = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGTERM: 15 };
-  return numbers[signal] || 1;
 }
 
 function shellQuote(value) {

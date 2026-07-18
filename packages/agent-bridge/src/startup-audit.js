@@ -8,6 +8,7 @@ import { localSanitize } from "@privacy-ai/sdk";
 
 import { assertNoProtectedOriginals, sanitizeModelVisibleValue } from "./context-gateway.js";
 import { buildCodexRequestVerificationSeed } from "./codex-request-transform.js";
+import { detachedProcessOptions, terminateProcessTree } from "./process-supervisor.js";
 import { resolveStartupFileManifest, sanitizeStartupFiles } from "./startup-cache.js";
 
 const DEFAULT_CAPTURE_LIMIT = 2 * 1024 * 1024;
@@ -239,12 +240,11 @@ export async function captureCodexPromptInput(options) {
       "prompt-input",
       options.prompt
     ];
-    const child = spawn(options.codexPath, args, {
+    const child = spawn(options.codexPath, args, detachedProcessOptions({
       cwd: options.cwd,
       env: options.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: process.platform !== "win32"
-    });
+      stdio: ["ignore", "pipe", "pipe"]
+    }));
     let stdout = "";
     let stderr = "";
     let stdoutBytes = 0;
@@ -255,9 +255,10 @@ export async function captureCodexPromptInput(options) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      terminateProbeTree(child);
-      if (error) rejectPromise(error);
-      else resolvePromise(value);
+      terminateProcessTree(child, { graceMs: 250, killWaitMs: 750 }).then(
+        () => error ? rejectPromise(error) : resolvePromise(value),
+        cleanupError => rejectPromise(error || cleanupError)
+      );
     };
 
     const timer = setTimeout(() => {
@@ -633,16 +634,6 @@ function ancestors(start, root) {
     current = parent;
   }
   return result;
-}
-
-function terminateProbeTree(child) {
-  if (!child?.pid) return;
-  try {
-    if (process.platform === "win32") child.kill("SIGTERM");
-    else process.kill(-child.pid, "SIGTERM");
-  } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
-  }
 }
 
 function startupTraversalBudget(maxFiles) {

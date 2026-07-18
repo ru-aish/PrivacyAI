@@ -1,3 +1,5 @@
+import { joinCodexArguments, splitCodexArguments } from "./codex-arguments.js";
+
 const PROTECTED_PROVIDER_ID = "privacyai";
 
 export const CODEX_GATEWAY_DISABLED_FEATURES = Object.freeze([
@@ -71,13 +73,13 @@ export function isProtectedCodexConfigOverride(value) {
 }
 
 export function parseCodexPrivacyMode(args, options = {}) {
+  const parts = splitCodexArguments(args);
   const explicit = [];
   const forwarded = [];
-  for (const raw of args) {
-    const arg = String(raw);
+  for (const arg of parts.beforeDelimiter) {
     if (arg === "--privacy-strict") explicit.push("strict");
     else if (arg === "--privacy-gateway") explicit.push("gateway");
-    else forwarded.push(raw);
+    else forwarded.push(arg);
   }
   if (new Set(explicit).size > 1) {
     throw new Error("Choose only one Codex privacy mode: --privacy-gateway or --privacy-strict.");
@@ -87,7 +89,10 @@ export function parseCodexPrivacyMode(args, options = {}) {
   if (!new Set(["gateway", "strict"]).has(mode)) {
     throw new Error(`Unsupported PrivacyAI Codex mode: ${mode}`);
   }
-  return { mode, args: forwarded };
+  return {
+    mode,
+    args: joinCodexArguments({ ...parts, beforeDelimiter: forwarded })
+  };
 }
 
 function tomlString(value) {

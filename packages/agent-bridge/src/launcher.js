@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { spawn } from "node:child_process";
 import { chmod, lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -36,6 +35,8 @@ import {
   derivePrivacyContextMaxChars,
   derivePrivacyContextMaxTokens
 } from "./privacy-sanitizer.js";
+import { runInheritedProcess } from "./process-supervisor.js";
+import { runCleanupSteps } from "./resource-cleanup.js";
 import { prepareAgentRuntimeIsolation } from "./runtime-isolation.js";
 import {
   auditClaudeStartupContext,
@@ -106,6 +107,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   let verificationStore;
   let ownsVerificationStore = false;
   let launchLock;
+  let primaryError;
 
   try {
     if (flavor === "codex") {
@@ -169,7 +171,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         chatgptUpstream: options.chatgptUpstream,
         apiUpstream: options.apiUpstream,
         allowInsecureTestUpstream: options.allowInsecureTestUpstream,
-        upstreamTimeoutMs: options.upstreamTimeoutMs
+        upstreamTimeoutMs: options.upstreamTimeoutMs,
+        upstreamIdleTimeoutMs: options.upstreamIdleTimeoutMs
       });
       const protectedArgs = buildCodexProviderArgs(gateway.baseURL, options);
 
@@ -289,16 +292,27 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
     }
 
     await reportLaunchProgress(options, "launch", `Startup context is safe; launching ${flavor}`);
-    return await (options.spawnInherited || spawnInherited)(
+    return await (options.spawnInherited || runInheritedProcess)(
       python,
       [PTY_HELPER, "--runtime-dir", runtimeDir, "--flavor", flavor, "--", binary, ...childArgs],
       { cwd, env }
     );
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await gateway?.close();
-    if (ownsVerificationStore) verificationStore?.close();
-    await launchLock?.release();
-    await rm(runtimeDir, { recursive: true, force: true });
+    await runCleanupSteps([
+      { name: "gateway", run: () => gateway?.close() },
+      {
+        name: "verification-store",
+        run: () => ownsVerificationStore ? Promise.resolve(verificationStore?.close()) : undefined
+      },
+      { name: "launch-lock", run: () => launchLock?.release() },
+      { name: "runtime-directory", run: () => rm(runtimeDir, { recursive: true, force: true }) }
+    ], {
+      primaryError,
+      message: "PrivacyAI could not fully clean up the native agent runtime."
+    });
   }
 }
 
@@ -311,7 +325,7 @@ async function launchCodexGatewayTui({
   env,
   options
 }) {
-  const spawnProcess = options.spawnInherited || spawnInherited;
+  const spawnProcess = options.spawnInherited || runInheritedProcess;
   const platform = options.platform || process.platform;
   if (
     platform === "win32" ||
@@ -459,24 +473,8 @@ async function reportLaunchProgress(options, stage, message) {
   process.stderr.write(`[PrivacyAI] ${message}\n`);
 }
 
-function spawnInherited(command, args, options) {
-  return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, { ...options, stdio: "inherit" });
-    child.on("error", rejectPromise);
-    child.on("exit", (code, signal) => {
-      if (signal) resolvePromise(128 + signalNumber(signal));
-      else resolvePromise(code ?? 1);
-    });
-  });
-}
-
 function onboardingRequiredError() {
   const error = new Error("PrivacyAI is not configured.\nRun: privacyai onboard");
   error.code = "PRIVACYAI_ONBOARDING_REQUIRED";
   return error;
-}
-
-function signalNumber(signal) {
-  const numbers = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGTERM: 15 };
-  return numbers[signal] || 1;
 }
