@@ -607,3 +607,166 @@ test("AsyncConcurrencyLimiter caps at two and releases permits after failures", 
   assert.equal(await third, "third");
   assert.equal(active, 0);
 });
+
+
+test("canonical session maps normalize aliases deterministically", () => {
+  const original = "owner@example.test";
+  const normalized = normalizeSessionMap({
+    contact1: original,
+    "[EMAIL_2]": original,
+    "[EMAIL_1]": original
+  });
+
+  assert.deepEqual(Object.keys(normalized), ["[EMAIL_1]", "[EMAIL_2]", "contact1"]);
+  assert.equal(sanitizeKnownText(original, normalized), "[EMAIL_1]");
+});
+
+test("rebaseSessionAdditions resolves folded placeholder collisions and rejects folded originals", () => {
+  assert.deepEqual(
+    rebaseSessionAdditions(
+      "[email_1]",
+      { "[email_1]": "new@example.test" },
+      { "[EMAIL_1]": "old@example.test" }
+    ),
+    {
+      sanitizedText: "[EMAIL_2]",
+      sessionMap: { "[EMAIL_2]": "new@example.test" }
+    }
+  );
+
+  assert.throws(
+    () => rebaseSessionAdditions(
+      "[PERSON_2]",
+      { "[PERSON_2]": "Alice" },
+      { "[PERSON_1]": "alice" }
+    ),
+    error => error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP"
+  );
+});
+
+test("StreamingPlaceholderRestorer preserves exact Unicode placeholders across surrogate splits", () => {
+  const placeholder = "🔒PRIVATE🔒";
+  const text = `before ${placeholder} after`;
+  for (let index = 0; index <= text.length; index += 1) {
+    const restorer = new StreamingPlaceholderRestorer({ [placeholder]: "restored" });
+    const output = restorer.push(text.slice(0, index)) + restorer.push(text.slice(index)) + restorer.flush();
+    assert.equal(output, "before restored after", `split ${index}`);
+  }
+});
+
+test("structured key policy preserves protocol keys while sanitizing other keys", async () => {
+  const secretKey = "private-key@example.test";
+  const privateValue = "private-value@example.test";
+  const result = await sanitizeStructuredValue({
+    protocol_key: privateValue,
+    [secretKey]: "public"
+  }, {
+    sanitizeObjectKeys: ({ key }) => key === "protocol_key" ? false : true,
+    sanitizer: async text => {
+      const sessionMap = {};
+      let sanitizedPrompt = text;
+      if (text.includes(secretKey)) {
+        sessionMap["[EMAIL_1]"] = secretKey;
+        sanitizedPrompt = sanitizedPrompt.replaceAll(secretKey, "[EMAIL_1]");
+      }
+      if (text.includes(privateValue)) {
+        sessionMap["[EMAIL_2]"] = privateValue;
+        sanitizedPrompt = sanitizedPrompt.replaceAll(privateValue, "[EMAIL_2]");
+      }
+      return { sanitizedPrompt, sessionMap };
+    }
+  });
+
+  assert.deepEqual(result.value, {
+    protocol_key: "[EMAIL_2]",
+    "[EMAIL_1]": "public"
+  });
+});
+
+test("structured sanitization propagates cancellation before and during classification", async () => {
+  const before = new AbortController();
+  const beforeReason = new Error("cancelled before classification");
+  before.abort(beforeReason);
+  let calls = 0;
+  await assert.rejects(
+    sanitizeStructuredValue("private", {
+      signal: before.signal,
+      sanitizer: async text => {
+        calls += 1;
+        return { sanitizedPrompt: text, sessionMap: {} };
+      }
+    }),
+    error => error === beforeReason
+  );
+  assert.equal(calls, 0);
+
+  const during = new AbortController();
+  const duringReason = new Error("cancelled during classification");
+  await assert.rejects(
+    sanitizeStructuredValue("private", {
+      signal: during.signal,
+      sanitizer: async text => {
+        during.abort(duringReason);
+        return { sanitizedPrompt: text, sessionMap: {} };
+      }
+    }),
+    error => error === duringReason
+  );
+});
+
+test("structured chunk boundaries never split surrogate pairs", async () => {
+  const secret = "🔐".repeat(256);
+  const input = "x".repeat(1800) + secret + "y".repeat(900);
+  let containingCalls = 0;
+  const result = await sanitizeStructuredValue(input, {
+    maxContextChars: 2048,
+    sanitizer: async text => {
+      assert.equal(hasUnpairedSurrogate(text), false);
+      const found = text.includes(secret);
+      if (found) containingCalls += 1;
+      return {
+        sanitizedPrompt: found ? text.replaceAll(secret, "[PRIVATE_IDENTIFIER_1]") : text,
+        sessionMap: found ? { "[PRIVATE_IDENTIFIER_1]": secret } : {}
+      };
+    }
+  });
+
+  assert.equal(containingCalls >= 1, true);
+  assert.equal(restoreValue(result.value, result.sessionMapAdditions), input);
+});
+
+test("privacy-core compatibility exports retain their public identities", async () => {
+  const publicApi = await import("../src/index.js");
+  const sessionMapApi = await import("../src/session-map.js");
+  const redactorApi = await import("../src/redactor.js");
+
+  for (const name of [
+    "normalizeSessionMap",
+    "rebaseSessionAdditions",
+    "restoreText",
+    "restoreValue",
+    "sanitizeKnownText",
+    "sanitizeKnownValue",
+    "transformValue",
+    "findUnresolvedPlaceholders",
+    "assertNoProtectedOriginals",
+    "assertNoProtectedOriginalsInValue"
+  ]) {
+    assert.equal(publicApi[name], sessionMapApi[name], name);
+  }
+  assert.equal(publicApi.restore, redactorApi.restore);
+});
+
+function hasUnpairedSurrogate(text) {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
