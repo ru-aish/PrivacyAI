@@ -31,6 +31,12 @@ export {
 } from "./context-verification-store.js";
 export { retryContextStoreOperation } from "./context-store-retry.js";
 export {
+  createCliInspectionService,
+  createRepositoryInspectionService,
+  inspectCache,
+  inspectLineage
+} from "./cli-inspection.js";
+export {
   commitProvenancedMutation,
   derivePrivacyPlanFromCommittedMutation,
   normalizeFileMutationOperation,
