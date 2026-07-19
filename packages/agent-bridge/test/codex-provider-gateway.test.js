@@ -2686,6 +2686,12 @@ test("gateway maintenance pruning uses shared request state", async t => {
     saveThread(key, value) {
       threads.set(key, value);
     },
+    updateThread(key, updater) {
+      const current = this.loadThread(key);
+      const value = updater(structuredClone(current));
+      threads.set(key, value);
+      return value;
+    },
     getVerification(key, policyFingerprint) {
       const value = records.get(key);
       return value?.policyFingerprint === policyFingerprint ? value : undefined;

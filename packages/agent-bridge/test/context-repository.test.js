@@ -45,6 +45,155 @@ test("stable JSON matches JSON.stringify undefined handling", () => {
   assert.equal(stableJson([1, undefined]), '[1,null]');
 });
 
+test("same SQLite handle preserves independently derived concurrent additions", async t => {
+  const { store } = await opened(t);
+  store.saveThread("same-handle", { sessionMap: { "[BASE_1]": "base" } });
+  const callerA = store.loadThread("same-handle");
+  const callerB = store.loadThread("same-handle");
+
+  store.saveThread("same-handle", {
+    sessionMap: { ...callerA.sessionMap, "[EMAIL_1]": "alice@example.test" }
+  });
+  store.saveThread("same-handle", {
+    sessionMap: { ...callerB.sessionMap, "[PHONE_1]": "+1-555-0100" }
+  });
+
+  assert.deepEqual(store.loadThread("same-handle").sessionMap, {
+    "[BASE_1]": "base",
+    "[EMAIL_1]": "alice@example.test",
+    "[PHONE_1]": "+1-555-0100"
+  });
+});
+
+test("same memory handle preserves independently derived concurrent additions", () => {
+  const store = new MemoryContextVerificationStore();
+  store.saveThread("same-handle", { sessionMap: { "[BASE_1]": "base" } });
+  const callerA = store.loadThread("same-handle");
+  const callerB = store.loadThread("same-handle");
+
+  store.saveThread("same-handle", {
+    sessionMap: { ...callerA.sessionMap, "[EMAIL_1]": "alice@example.test" }
+  });
+  store.saveThread("same-handle", {
+    sessionMap: { ...callerB.sessionMap, "[PHONE_1]": "+1-555-0100" }
+  });
+
+  assert.deepEqual(store.loadThread("same-handle").sessionMap, {
+    "[BASE_1]": "base",
+    "[EMAIL_1]": "alice@example.test",
+    "[PHONE_1]": "+1-555-0100"
+  });
+  store.close();
+});
+
+test("memory and SQLite retain the latest thread when the clock does not advance", async t => {
+  const { store: sqlite } = await opened(t, { maxThreads: 1 });
+  const memory = new MemoryContextVerificationStore({ maxThreads: 1 });
+  t.after(() => memory.close());
+  t.mock.method(Date, "now", () => 1_000);
+
+  for (const store of [sqlite, memory]) {
+    store.saveThread("old", { sessionMap: { "[OLD_1]": "old" } });
+    store.saveThread("new", { sessionMap: { "[NEW_1]": "new" } });
+    store.prune();
+    assert.deepEqual(store.loadThread("old").sessionMap, {});
+    assert.deepEqual(store.loadThread("new").sessionMap, { "[NEW_1]": "new" });
+  }
+});
+
+test("atomic thread updates express deletion explicitly with memory and SQLite parity", async t => {
+  const { path, store: sqlite } = await opened(t);
+  const memory = new MemoryContextVerificationStore();
+  t.after(() => memory.close());
+  const results = [];
+  const rejectedOriginal = "REJECTED-ORIGINAL-SENTINEL";
+
+  for (const store of [sqlite, memory]) {
+    store.saveThread("atomic-parity", {
+      parentSessionKeys: ["parent-a"],
+      sessionMap: {
+        "[BASE_1]": "base",
+        "[EMAIL_1]": "alice@example.test"
+      },
+      policyFingerprint: "initial"
+    });
+    const updated = store.updateThread("atomic-parity", current => {
+      const sessionMap = { ...current.sessionMap, "[PHONE_1]": "+1-555-0100" };
+      delete sessionMap["[EMAIL_1]"];
+      return {
+        parentSessionKeys: ["parent-b"],
+        sessionMap,
+        policyFingerprint: "updated"
+      };
+    });
+    results.push({
+      parentSessionKeys: updated.parentSessionKeys,
+      sessionMap: updated.sessionMap,
+      policyFingerprint: updated.policyFingerprint
+    });
+    const beforeCollision = store.loadThread("atomic-parity");
+    assert.throws(() => store.updateThread("atomic-parity", current => ({
+      ...current,
+      parentSessionKeys: ["parent-c"],
+      sessionMap: { ...current.sessionMap, "[PHONE_1]": rejectedOriginal },
+      policyFingerprint: "rejected"
+    })), error => {
+      const diagnostic = [error?.message, error?.stack, error?.cause?.message, error?.cause?.stack]
+        .filter(Boolean).join("\n");
+      return error?.code === "PRIVACYAI_SESSION_MAP_COLLISION" &&
+        !diagnostic.includes(rejectedOriginal);
+    });
+    assert.deepEqual(store.loadThread("atomic-parity"), beforeCollision);
+    assert.throws(
+      () => store.updateThread("atomic-parity", async current => current),
+      /must return a thread record synchronously/
+    );
+  }
+
+  assert.deepEqual(results[0], results[1]);
+  assert.deepEqual(results[0], {
+    parentSessionKeys: ["parent-a", "parent-b"],
+    sessionMap: {
+      "[BASE_1]": "base",
+      "[PHONE_1]": "+1-555-0100"
+    },
+    policyFingerprint: "updated"
+  });
+  assert.equal((await readFile(path)).includes(rejectedOriginal), false);
+  assert.equal((await readFile(`${path}-wal`).catch(() => Buffer.alloc(0))).includes(rejectedOriginal), false);
+});
+
+test("atomic updates remain correct after thread pruning", async t => {
+  const { store: sqlite } = await opened(t, { maxThreads: 1 });
+  const memory = new MemoryContextVerificationStore({ maxThreads: 1 });
+  t.after(() => memory.close());
+
+  for (const store of [sqlite, memory]) {
+    store.saveThread("evicted", { sessionMap: { "[OLD_1]": "old" } });
+    if (store.persistent) {
+      store.database.prepare("UPDATE threads SET updated_at = 1 WHERE session_key = ?").run("evicted");
+    } else {
+      store.threads.get("evicted").updatedAt = 1;
+    }
+    store.saveThread("keeper", { sessionMap: { "[KEEP_1]": "keep" } });
+    store.prune();
+    assert.deepEqual(store.loadThread("evicted").sessionMap, {});
+
+    store.updateThread("evicted", current => ({
+      ...current,
+      sessionMap: { ...current.sessionMap, "[ONE_1]": "one" }
+    }));
+    store.updateThread("evicted", current => ({
+      ...current,
+      sessionMap: { ...current.sessionMap, "[TWO_1]": "two" }
+    }));
+    assert.deepEqual(store.loadThread("evicted").sessionMap, {
+      "[ONE_1]": "one",
+      "[TWO_1]": "two"
+    });
+  }
+});
+
 test("schema v3 has every table, legacy index, and critical CHECK constraint", async t => {
   const { store } = await opened(t);
   const tables = store.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);
@@ -76,7 +225,7 @@ test("independent handles union thread state and collision rolls back all fields
     policyFingerprint: "right", updatedAt: right.loadThread("shared").updatedAt
   });
 
-  left.loadThread("shared");
+  const callerBase = left.loadThread("shared");
   right.saveThread("shared", {
     sessionMap: {
       "[EMAIL_1]": "left@example.test",
@@ -84,10 +233,11 @@ test("independent handles union thread state and collision rolls back all fields
       "[ZIP_1]": "12345"
     }
   });
-  left.saveThread("shared", {
+  left.updateThread("shared", () => ({
+    baseSessionMap: callerBase.sessionMap,
     sessionMap: { "[PHONE_1]": "+1-555-0100" },
     policyFingerprint: "pruned"
-  });
+  }));
   const reconciled = right.loadThread("shared");
   assert.deepEqual(reconciled.sessionMap, {
     "[PHONE_1]": "+1-555-0100",
@@ -95,18 +245,14 @@ test("independent handles union thread state and collision rolls back all fields
   });
   assert.equal(reconciled.policyFingerprint, "pruned");
 
-  assert.throws(() => left.saveThread("shared", {
+  const beforeCollision = right.loadThread("shared");
+  assert.throws(() => left.updateThread("shared", current => ({
+    ...current,
     parentSessionKeys: ["parent-c"],
-    sessionMap: { "[PHONE_1]": "+1-555-9999", "[ZIP_1]": "12345" },
+    sessionMap: { ...current.sessionMap, "[PHONE_1]": "+1-555-9999" },
     policyFingerprint: "bad"
-  }), error => error?.code === "PRIVACYAI_SESSION_MAP_COLLISION");
-  const after = right.loadThread("shared");
-  assert.deepEqual(after.parentSessionKeys, ["parent-a", "parent-b"]);
-  assert.deepEqual(after.sessionMap, {
-    "[PHONE_1]": "+1-555-0100",
-    "[ZIP_1]": "12345"
-  });
-  assert.equal(after.policyFingerprint, "pruned");
+  })), error => error?.code === "PRIVACYAI_SESSION_MAP_COLLISION");
+  assert.deepEqual(right.loadThread("shared"), beforeCollision);
 });
 
 test("child processes update the explicitly supplied database without lost mappings", async t => {
@@ -150,7 +296,7 @@ test("SQLite close is idempotent and all representative public operations fail c
   const { store } = await opened(t);
   store.close(); store.close();
   const calls = [
-    () => store.loadThread("x"), () => store.saveThread("x"), () => store.getVerification("x", "p"),
+    () => store.loadThread("x"), () => store.saveThread("x"), () => store.updateThread("x", current => current), () => store.getVerification("x", "p"),
     () => store.putVerification({}), () => store.recordThreadItem({}), () => store.registerRepository({}),
     () => store.getRepository("x"), () => store.registerWorktree({}), () => store.getWorktree("x"),
     () => store.putContentIdentity({}), () => store.putGitBlobAlias({}), () => store.getContentIdentity("x"),
@@ -176,9 +322,9 @@ test("memory fallback bounds every collection and preserves standalone ledger re
   store.putManifest({ worktreeId: hash("unmaterialized"), entries: [] });
   store.putPrivacyPlan({ contentHash: hash("unmaterialized"), policyFingerprint: hash("policy"), spans: [], editPlan: [] });
   store.stageFileMutation({ mutationId: hash("mutation"), worktreeId: hash("unmaterialized"), pathHash: hash("path"), expectedContentHash: hash("old"), nextContentHash: hash("new"), opaqueReference: hash("ref") });
-  for (const name of ["threads", "threadBases", "verifications", "threadItems", "repositories", "worktrees", "contentIdentities", "gitBlobAliases", "fileMetadata", "fileVersions", "manifests", "privacyPlans", "fileMutations"]) assert.ok(store[name].size <= 1, name);
+  for (const name of ["threads", "verifications", "threadItems", "repositories", "worktrees", "contentIdentities", "gitBlobAliases", "fileMetadata", "fileVersions", "manifests", "privacyPlans", "fileMutations"]) assert.ok(store[name].size <= 1, name);
   store.close();
-  for (const name of ["threads", "threadBases", "verifications", "threadItems", "repositories", "worktrees", "contentIdentities", "gitBlobAliases", "fileMetadata", "fileVersions", "manifests", "privacyPlans", "fileMutations"]) assert.equal(store[name].size, 0);
+  for (const name of ["threads", "verifications", "threadItems", "repositories", "worktrees", "contentIdentities", "gitBlobAliases", "fileMetadata", "fileVersions", "manifests", "privacyPlans", "fileMutations"]) assert.equal(store[name].size, 0);
 });
 
 test("memory fallback batches large-limit eviction while staying bounded", () => {

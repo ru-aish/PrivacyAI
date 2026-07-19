@@ -1,4 +1,4 @@
-import { compoundKey, emptyThread, mergeThreadSessionMaps, mutationConflict, normalizeEditPlan, normalizeFileMutation, normalizeManifestEntries, normalizePrivacySpans, normalizeSessionMap, normalizeStringArray, opaque, optionalInteger, positiveInteger, requiredHash, requiredOpaqueReference, sameMutationMemory, stableJson, verificationFingerprint, withoutLastUsed } from "./domain.js";
+import { compoundKey, emptyThread, mutationConflict, nextThreadUpdatedAt, normalizeEditPlan, normalizeFileMutation, normalizeManifestEntries, normalizePrivacySpans, opaque, optionalInteger, positiveInteger, requiredHash, requiredOpaqueReference, resolveSavedThread, resolveUpdatedThread, sameMutationMemory, stableJson, verificationFingerprint, withoutLastUsed } from "./domain.js";
 import { DEFAULT_MAX_AGE_MS, DEFAULT_MAX_LEDGER_ITEMS, DEFAULT_MAX_THREAD_ITEMS, DEFAULT_MAX_THREADS, DEFAULT_MAX_VERIFIED_ITEMS } from "./constants.js";
 import { closedError } from "./errors.js";
 
@@ -40,39 +40,52 @@ export class MemoryContextVerificationStore {
     this.manifests = new Map();
     this.privacyPlans = new Map();
     this.fileMutations = new Map();
-    this.threadBases = new Map();
+    this.lastThreadUpdatedAt = 0;
     this.lastAgePruneAt = 0;
     this.closed = false;
   }
 
   loadThread(sessionKey) {
     this.assertOpen();
-    const value = this.threads.get(sessionKey);
-    if (!value) {
-      this.rememberThreadBase(sessionKey, {});
-      return emptyThread(sessionKey);
-    }
-    value.updatedAt = Date.now();
-    this.rememberThreadBase(sessionKey, value.sessionMap);
-    return structuredClone(value);
+    return structuredClone(this.threads.get(sessionKey) || emptyThread(sessionKey));
   }
 
   saveThread(sessionKey, record = {}) {
     this.assertOpen();
-    const existing = this.threads.get(sessionKey);
-    const hasSessionMap = Object.hasOwn(record, "sessionMap");
-    const base = hasSessionMap && this.threadBases.has(sessionKey)
-      ? this.threadBases.get(sessionKey)
-      : undefined;
-    const value = {
+    const current = this.threads.get(sessionKey) || emptyThread(sessionKey);
+    const updatedAt = nextThreadUpdatedAt(
+      current.updatedAt,
+      this.lastThreadUpdatedAt
+    );
+    const value = resolveSavedThread(
       sessionKey,
-      parentSessionKeys: normalizeStringArray([...(existing?.parentSessionKeys || []), ...(Array.isArray(record.parentSessionKeys) ? record.parentSessionKeys : [])]),
-      sessionMap: mergeThreadSessionMaps(existing?.sessionMap || {}, record.sessionMap, base),
-      policyFingerprint: String(record.policyFingerprint || existing?.policyFingerprint || ""),
-      updatedAt: Date.now()
-    };
+      current,
+      record,
+      updatedAt
+    );
+    this.lastThreadUpdatedAt = updatedAt;
+    this.threads.delete(sessionKey);
     this.threads.set(sessionKey, structuredClone(value));
-    if (base !== undefined) this.rememberThreadBase(sessionKey, value.sessionMap);
+    this.prune(false);
+    return value;
+  }
+
+  updateThread(sessionKey, updater) {
+    this.assertOpen();
+    const current = this.threads.get(sessionKey) || emptyThread(sessionKey);
+    const updatedAt = nextThreadUpdatedAt(
+      current.updatedAt,
+      this.lastThreadUpdatedAt
+    );
+    const value = resolveUpdatedThread(
+      sessionKey,
+      current,
+      updater,
+      updatedAt
+    );
+    this.lastThreadUpdatedAt = updatedAt;
+    this.threads.delete(sessionKey);
+    this.threads.set(sessionKey, structuredClone(value));
     this.prune(false);
     return value;
   }
@@ -297,7 +310,6 @@ export class MemoryContextVerificationStore {
     const now = Date.now();
     const sweepInterval = Math.min(MEMORY_AGE_PRUNE_INTERVAL_MS, this.maxAgeMs);
     const sweepAge = forceAgeSweep || now - this.lastAgePruneAt >= sweepInterval;
-    let threadsChanged = false;
     let ledgerParentsChanged = false;
 
     if (sweepAge) {
@@ -312,7 +324,6 @@ export class MemoryContextVerificationStore {
       for (const [sessionKey, value] of this.threads) {
         if (Number(value.updatedAt || 0) < cutoff) {
           this.deleteThread(sessionKey);
-          threadsChanged = true;
         }
       }
     }
@@ -321,11 +332,9 @@ export class MemoryContextVerificationStore {
     trimMapByTimestamp(this.verifications, this.maxVerifiedItems, "lastUsedAt", cacheKey => {
       this.deleteVerification(cacheKey);
     });
-    if (trimMapByTimestamp(this.threads, this.maxThreads, "updatedAt", sessionKey => {
+    trimMapByTimestamp(this.threads, this.maxThreads, "updatedAt", sessionKey => {
       this.deleteThread(sessionKey);
-    })) {
-      threadsChanged = true;
-    }
+    });
 
     const ledgerMaps = [
       this.repositories,
@@ -359,16 +368,10 @@ export class MemoryContextVerificationStore {
     }
 
     if (sweepAge || ledgerParentsChanged) this.cascadeLedgerChildren();
-    if (sweepAge || threadsChanged) {
-      for (const sessionKey of this.threadBases.keys()) {
-        if (!this.threads.has(sessionKey)) this.threadBases.delete(sessionKey);
-      }
-    }
   }
 
   deleteThread(sessionKey) {
     this.threads.delete(sessionKey);
-    this.threadBases.delete(sessionKey);
     for (const [itemKey, item] of this.threadItems) {
       if (item.sessionKey === sessionKey) this.threadItems.delete(itemKey);
     }
@@ -406,16 +409,7 @@ export class MemoryContextVerificationStore {
     this.threads.clear();
     this.verifications.clear();
     this.threadItems.clear();
-    this.threadBases.clear();
     for (const map of [this.repositories, this.worktrees, this.contentIdentities, this.gitBlobAliases, this.fileMetadata, this.fileVersions, this.manifests, this.privacyPlans, this.fileMutations]) map.clear();
-  }
-
-  rememberThreadBase(sessionKey, sessionMap) {
-    this.threadBases.delete(sessionKey);
-    this.threadBases.set(sessionKey, structuredClone(normalizeSessionMap(sessionMap)));
-    while (this.threadBases.size > this.maxThreads) {
-      this.threadBases.delete(this.threadBases.keys().next().value);
-    }
   }
 
   assertOpen() { if (this.closed) throw closedError(); }
@@ -430,8 +424,12 @@ function trimMapByTimestamp(map, limit, field, remove = key => map.delete(key)) 
   if (map.size <= limit) return false;
   const target = limit > 10 ? Math.max(1, Math.floor(limit * 0.9)) : limit;
   const stale = [...map.entries()]
-    .sort((a, b) => Number(b[1]?.[field] || 0) - Number(a[1]?.[field] || 0))
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) =>
+      Number(b.entry[1]?.[field] || 0) - Number(a.entry[1]?.[field] || 0) ||
+      b.index - a.index
+    )
     .slice(target);
-  for (const [key] of stale) remove(key);
+  for (const { entry: [key] } of stale) remove(key);
   return stale.length > 0;
 }

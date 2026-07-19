@@ -328,11 +328,12 @@ async function handleRequestCore(request, response, context) {
       await context.vault.save(identity.sessionKey, completeMap);
     }
     await runVerificationStoreOperation(context, () =>
-      context.verificationStore.saveThread(identity.sessionKey, {
+      context.verificationStore.updateThread(identity.sessionKey, () => ({
+        baseSessionMap: currentThread.sessionMap || {},
         parentSessionKeys: identity.parentSessionKeys,
         sessionMap: completeMap,
         policyFingerprint: context.policyFingerprint
-      })
+      }))
     );
     if (typeof context.onSanitizedRequest === "function") {
       await context.onSanitizedRequest(result.body, {

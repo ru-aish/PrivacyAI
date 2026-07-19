@@ -6,6 +6,7 @@ export function prepareStatements(database) {
       SELECT parent_keys_json, session_map_json, policy_fingerprint, updated_at
       FROM threads WHERE session_key = ?
     `),
+    latestThreadUpdatedAt: prepare(database, "SELECT MAX(updated_at) AS updated_at FROM threads"),
     saveThread: prepare(database, `
       INSERT INTO threads(session_key, parent_keys_json, session_map_json, policy_fingerprint, updated_at)
       VALUES (?, ?, ?, ?, ?)

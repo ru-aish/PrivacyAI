@@ -84,6 +84,66 @@ export function mergeThreadSessionMaps(current = {}, incoming = {}, base) {
   }
 }
 
+export function replaceThreadSessionMap(current = {}, incoming = {}) {
+  try {
+    const normalizedCurrent = normalizeSessionMap(current);
+    const normalizedIncoming = normalizeSessionMap(incoming);
+    for (const [placeholder, original] of Object.entries(normalizedIncoming)) {
+      if (Object.hasOwn(normalizedCurrent, placeholder) && normalizedCurrent[placeholder] !== original) {
+        throw new Error("placeholder collision");
+      }
+    }
+    return normalizedIncoming;
+  } catch {
+    throw collisionError();
+  }
+}
+
+export function nextThreadUpdatedAt(previous = 0, latest = 0, now = Date.now()) {
+  return Math.max(Number(now || 0), Number(previous || 0) + 1, Number(latest || 0) + 1);
+}
+
+export function resolveSavedThread(sessionKey, current, record = {}, updatedAt = Date.now()) {
+  return {
+    sessionKey,
+    parentSessionKeys: normalizeStringArray([
+      ...(current?.parentSessionKeys || []),
+      ...(Array.isArray(record.parentSessionKeys) ? record.parentSessionKeys : [])
+    ]),
+    sessionMap: Object.hasOwn(record, "sessionMap")
+      ? mergeThreadSessionMaps(current?.sessionMap || {}, record.sessionMap)
+      : normalizeSessionMap(current?.sessionMap),
+    policyFingerprint: String(record.policyFingerprint || current?.policyFingerprint || ""),
+    updatedAt
+  };
+}
+
+export function resolveUpdatedThread(sessionKey, current, updater, updatedAt = Date.now()) {
+  if (typeof updater !== "function") {
+    throw new TypeError("updateThread requires a synchronous updater function.");
+  }
+  const candidate = updater(structuredClone(current));
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate) || typeof candidate.then === "function") {
+    throw new TypeError("updateThread updater must return a thread record synchronously.");
+  }
+  let sessionMap = normalizeSessionMap(current?.sessionMap);
+  if (Object.hasOwn(candidate, "sessionMap")) {
+    sessionMap = Object.hasOwn(candidate, "baseSessionMap")
+      ? mergeThreadSessionMaps(sessionMap, candidate.sessionMap, candidate.baseSessionMap)
+      : replaceThreadSessionMap(sessionMap, candidate.sessionMap);
+  }
+  return {
+    sessionKey,
+    parentSessionKeys: normalizeStringArray([
+      ...(current?.parentSessionKeys || []),
+      ...(Array.isArray(candidate.parentSessionKeys) ? candidate.parentSessionKeys : [])
+    ]),
+    sessionMap,
+    policyFingerprint: String(candidate.policyFingerprint || current?.policyFingerprint || ""),
+    updatedAt
+  };
+}
+
 export function requiredHash(value, name) {
   if (typeof value !== "string" || !value) throw new TypeError(`${name} must be a non-empty opaque hash.`);
   return value;

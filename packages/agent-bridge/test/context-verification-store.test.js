@@ -160,6 +160,7 @@ test("in-memory store closes idempotently and rejects every operation afterward"
   store.close();
   store.close();
   assert.throws(() => store.loadThread("closed"), error => error?.code === "PRIVACYAI_CONTEXT_DB_CLOSED");
+  assert.throws(() => store.updateThread("closed", current => current), error => error?.code === "PRIVACYAI_CONTEXT_DB_CLOSED");
   assert.throws(() => store.prune(), error => error?.code === "PRIVACYAI_CONTEXT_DB_CLOSED");
 });
 

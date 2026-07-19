@@ -121,11 +121,12 @@ export async function createAgySessionController(options = {}) {
           );
           completeMap = persisted.sessionMap;
         }
-        context.verificationStore.saveThread(sessionKey, {
+        context.verificationStore.updateThread(sessionKey, () => ({
+          baseSessionMap: currentThread.sessionMap || {},
           parentSessionKeys: [],
           sessionMap: completeMap,
           policyFingerprint: context.policyFingerprint
-        });
+        }));
         commitVerificationWrites(cache, result.cacheWrites, {
           maxEntries: context.maxCacheEntriesPerSession,
           verificationStore: context.verificationStore
