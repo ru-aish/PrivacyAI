@@ -49,6 +49,21 @@ jobs:
       - name: Test SDK contracts
         run: pnpm --filter @privacy-ai/sdk test
       - name: Test agent bridge
-        run: pnpm --filter @privacy-ai/agent-bridge test
+        shell: bash
+        run: |
+          set +e
+          pnpm --filter @privacy-ai/agent-bridge test > agent-bridge-test.log 2>&1
+          status=$?
+          tail -n 120 agent-bridge-test.log
+          exit "$status"
+      - name: Upload agent bridge test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-bridge-test-log
+          path: agent-bridge-test.log
+          if-no-files-found: error
+          retention-days: 3
       - name: Test product shell integration
+        if: always()
         run: pnpm --filter @privacy-ai/agent-tui test
