@@ -28,9 +28,12 @@ export async function retryContextStoreOperation(operation, options = {}) {
   const deadline = options.deadlineAt == null ? Date.now() + timeoutMs : Number(options.deadlineAt);
   if (!Number.isSafeInteger(deadline)) throw new TypeError("context-store retry deadline must be a safe integer timestamp.");
   let delayMs = DEFAULT_RETRY_DELAY_MS;
+  let firstAttempt = true;
 
   while (true) {
     throwIfAborted(options.signal);
+    if (!firstAttempt && Date.now() >= deadline) throw timeoutError();
+    firstAttempt = false;
     try {
       return await operation();
     } catch (error) {

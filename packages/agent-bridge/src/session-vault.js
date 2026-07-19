@@ -65,7 +65,7 @@ export class SessionVault {
       sessionMap: normalizeSessionMap(sessionMap),
       updatedAt: new Date().toISOString()
     };
-    const tempPath = `${path}.${process.pid}.tmp`;
+    const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
       await chmod(tempPath, 0o600);

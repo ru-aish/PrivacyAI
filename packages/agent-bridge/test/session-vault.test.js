@@ -43,6 +43,18 @@ test("SessionVault cleans a temp file when final rename cannot succeed", async t
   assert.equal(names.some(name => name.endsWith(".tmp")), false);
 });
 
+test("SessionVault concurrent saves use independent temporary files", async () => {
+  const root = await createTestTempDir("privacyai-a4-vault-concurrent-save-");
+  const vault = new SessionVault({ baseDir: root });
+  const maps = Array.from({ length: 12 }, (_, index) => ({
+    [`[TOKEN_${index}]`]: `original-${index}`
+  }));
+  await Promise.all(maps.map(sessionMap => vault.save("shared-session", sessionMap)));
+  const persisted = (await vault.load("shared-session")).sessionMap;
+  assert.equal(maps.some(sessionMap => JSON.stringify(sessionMap) === JSON.stringify(persisted)), true);
+  assert.equal((await readdir(root)).some(name => name.endsWith(".tmp")), false);
+});
+
 test("SessionVault corruption errors never echo stored originals", async () => {
   const root = await createTestTempDir("privacyai-a4-vault-corrupt-");
   const vault = new SessionVault({ baseDir: root });

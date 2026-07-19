@@ -16,8 +16,8 @@ test("retry success yields to the event loop and timeout hides SQLite lock text"
   let ticks = 0;
   const timer = setInterval(() => { ticks += 1; }, 2);
   const release = setTimeout(() => blocker.exec("COMMIT"), 35);
+  t.after(() => { clearInterval(timer); clearTimeout(release); });
   await retryContextStoreOperation(() => store.saveThread("yielded", { sessionMap: {} }), { timeoutMs: 500 });
-  clearInterval(timer); clearTimeout(release);
   assert.ok(ticks > 0);
 
   blocker.exec("BEGIN IMMEDIATE");
@@ -39,4 +39,19 @@ test("retry supports AbortSignal, preserves non-contention identity, and honors 
 
   const contention = new Error("database is locked"); contention.code = "SQLITE_BUSY";
   await assert.rejects(retryContextStoreOperation(() => { throw contention; }, { deadlineAt: Date.now() - 1 }), error => error?.code === "PRIVACYAI_CONTEXT_DB_RETRY_TIMEOUT");
+});
+
+
+test("retry does not invoke an operation after its deadline", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    retryContextStoreOperation(() => {
+      attempts += 1;
+      const error = new Error("database is locked");
+      error.code = "SQLITE_BUSY";
+      throw error;
+    }, { deadlineAt: Date.now() + 5 }),
+    error => error?.code === "PRIVACYAI_CONTEXT_DB_RETRY_TIMEOUT"
+  );
+  assert.equal(attempts, 1);
 });

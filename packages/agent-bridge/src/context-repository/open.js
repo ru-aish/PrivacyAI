@@ -17,12 +17,13 @@ export async function openContextVerificationStore(options = {}) {
     }
     throw error;
   }
-  const path = resolve(options.verificationDbPath || process.env.PRIVACYAI_CONTEXT_DB || `${homedir()}/.local/share/privacyai/context-gateway.sqlite3`);
+  const configuredPath = options.verificationDbPath || process.env.PRIVACYAI_CONTEXT_DB;
+  const path = resolve(configuredPath || `${homedir()}/.local/share/privacyai/context-gateway.sqlite3`);
   const busyTimeoutMs = resolveContextStoreBusyTimeout(options.verificationBusyTimeoutMs);
   let database;
   try {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    await chmod(dirname(path), 0o700);
+    if (!configuredPath) await chmod(dirname(path), 0o700);
     const file = await openFile(path, "a", 0o600);
     try {
       await file.chmod(0o600);

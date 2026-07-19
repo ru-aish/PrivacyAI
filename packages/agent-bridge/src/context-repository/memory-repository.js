@@ -2,6 +2,8 @@ import { compoundKey, emptyThread, mergeThreadSessionMaps, mutationConflict, nor
 import { DEFAULT_MAX_AGE_MS, DEFAULT_MAX_LEDGER_ITEMS, DEFAULT_MAX_THREAD_ITEMS, DEFAULT_MAX_THREADS, DEFAULT_MAX_VERIFIED_ITEMS } from "./constants.js";
 import { closedError } from "./errors.js";
 
+const MEMORY_AGE_PRUNE_INTERVAL_MS = 5_000;
+
 export class MemoryContextVerificationStore {
   constructor(options = {}) {
     this.persistent = false;
@@ -39,6 +41,7 @@ export class MemoryContextVerificationStore {
     this.privacyPlans = new Map();
     this.fileMutations = new Map();
     this.threadBases = new Map();
+    this.lastAgePruneAt = 0;
     this.closed = false;
   }
 
@@ -70,7 +73,7 @@ export class MemoryContextVerificationStore {
     };
     this.threads.set(sessionKey, structuredClone(value));
     if (base !== undefined) this.rememberThreadBase(sessionKey, value.sessionMap);
-    this.prune();
+    this.prune(false);
     return value;
   }
 
@@ -98,7 +101,7 @@ export class MemoryContextVerificationStore {
       lastUsedAt: now,
       hitCount: Number(existing?.hitCount || 0)
     });
-    this.prune();
+    this.prune(false);
   }
 
   recordThreadItem(record) {
@@ -107,7 +110,7 @@ export class MemoryContextVerificationStore {
       ...structuredClone(record),
       lastSeenAt: Date.now()
     });
-    this.prune();
+    this.prune(false);
   }
 
   registerRepository(record) {
@@ -115,7 +118,7 @@ export class MemoryContextVerificationStore {
     const repositoryId = requiredHash(record.repositoryId, "repositoryId");
     const value = { repositoryId, rootRef: opaque(record.rootRef), lastUsedAt: Date.now() };
     this.repositories.set(repositoryId, value);
-    this.prune();
+    this.prune(false);
     return withoutLastUsed(value);
   }
 
@@ -129,8 +132,8 @@ export class MemoryContextVerificationStore {
     const worktreeId = requiredHash(record.worktreeId, "worktreeId");
     const repositoryId = requiredHash(record.repositoryId, "repositoryId");
     const value = { worktreeId, repositoryId, pathHash: requiredHash(record.pathHash, "pathHash"), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() };
-    this.worktrees.set(worktreeId, value);
-    this.prune();
+    if (this.repositories.has(repositoryId)) this.worktrees.set(worktreeId, value);
+    this.prune(false);
     return withoutLastUsed(value);
   }
 
@@ -147,8 +150,10 @@ export class MemoryContextVerificationStore {
       repositoryId: record.repositoryId ? requiredHash(record.repositoryId, "repositoryId") : null
     } : null;
     this.contentIdentities.set(contentHash, { contentHash, byteLength: optionalInteger(record.byteLength), kind: opaque(record.kind), lastUsedAt: Date.now() });
-    if (alias) this.gitBlobAliases.set(alias.gitBlobHash, { ...alias, contentHash, lastUsedAt: Date.now() });
-    this.prune();
+    if (alias && (!alias.repositoryId || this.repositories.has(alias.repositoryId))) {
+      this.gitBlobAliases.set(alias.gitBlobHash, { ...alias, contentHash, lastUsedAt: Date.now() });
+    }
+    this.prune(false);
     return { contentHash };
   }
 
@@ -157,8 +162,10 @@ export class MemoryContextVerificationStore {
     const gitBlobHash = requiredHash(record.gitBlobHash, "gitBlobHash");
     const contentHash = requiredHash(record.contentHash, "contentHash");
     const repositoryId = record.repositoryId ? requiredHash(record.repositoryId, "repositoryId") : null;
-    this.gitBlobAliases.set(gitBlobHash, { gitBlobHash, contentHash, repositoryId, lastUsedAt: Date.now() });
-    this.prune();
+    if (this.contentIdentities.has(contentHash) && (!repositoryId || this.repositories.has(repositoryId))) {
+      this.gitBlobAliases.set(gitBlobHash, { gitBlobHash, contentHash, repositoryId, lastUsedAt: Date.now() });
+    }
+    this.prune(false);
   }
 
   getContentIdentity(contentHash) {
@@ -179,9 +186,11 @@ export class MemoryContextVerificationStore {
     const key = compoundKey(worktreeId, pathHash);
     const versionHash = record.versionHash ? requiredHash(record.versionHash, "versionHash") : null;
     const gitBlobHash = record.gitBlobHash ? requiredHash(record.gitBlobHash, "gitBlobHash") : null;
-    this.fileMetadata.set(key, { worktreeId, pathHash, contentHash, byteLength: optionalInteger(record.byteLength), mode: optionalInteger(record.mode), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() });
-    if (versionHash) this.fileVersions.set(compoundKey(key, versionHash), { worktreeId, pathHash, versionHash, contentHash, gitBlobHash, versionRef: opaque(record.versionRef), lastUsedAt: Date.now() });
-    this.prune();
+    if (this.worktrees.has(worktreeId) && this.contentIdentities.has(contentHash)) {
+      this.fileMetadata.set(key, { worktreeId, pathHash, contentHash, byteLength: optionalInteger(record.byteLength), mode: optionalInteger(record.mode), metadataRef: opaque(record.metadataRef), lastUsedAt: Date.now() });
+      if (versionHash) this.fileVersions.set(compoundKey(key, versionHash), { worktreeId, pathHash, versionHash, contentHash, gitBlobHash, versionRef: opaque(record.versionRef), lastUsedAt: Date.now() });
+    }
+    this.prune(false);
   }
 
   getFileMetadata(worktreeId, pathHash) {
@@ -200,7 +209,7 @@ export class MemoryContextVerificationStore {
     const manifestHash = record.manifestHash ? requiredHash(record.manifestHash, "manifestHash") : verificationFingerprint(entries);
     const worktreeId = requiredHash(record.worktreeId, "worktreeId");
     this.manifests.set(manifestHash, { manifestHash, worktreeId, metadataRef: opaque(record.metadataRef), entries, lastUsedAt: Date.now() });
-    this.prune();
+    this.prune(false);
     return { manifestHash, entries };
   }
 
@@ -216,7 +225,7 @@ export class MemoryContextVerificationStore {
     const policyFingerprint = requiredHash(record.policyFingerprint, "policyFingerprint");
     const planHash = record.planHash ? requiredHash(record.planHash, "planHash") : verificationFingerprint({ spans, editPlan });
     this.privacyPlans.set(compoundKey(contentHash, policyFingerprint), { planHash, contentHash, policyFingerprint, spans, editPlan, lastUsedAt: Date.now() });
-    this.prune();
+    this.prune(false);
     return { planHash, spans, editPlan };
   }
 
@@ -232,7 +241,7 @@ export class MemoryContextVerificationStore {
     if (existing?.status === "committed") return sameMutationMemory(existing, value) ? this.getFileMutation(value.mutationId) : mutationConflict(existing, value);
     if (existing?.status === "pending") return sameMutationMemory(existing, value) ? this.getFileMutation(value.mutationId) : mutationConflict(existing, value);
     this.fileMutations.set(value.mutationId, { ...value, committedReference: null, status: "pending", lastUsedAt: Date.now() });
-    this.prune();
+    this.prune(false);
     return this.getFileMutation(value.mutationId);
   }
 
@@ -283,33 +292,77 @@ export class MemoryContextVerificationStore {
     return Number(value.lastUsedAt || 0) < Date.now() - this.maxAgeMs;
   }
 
-  prune() {
+  prune(forceAgeSweep = true) {
     this.assertOpen();
-    const cutoff = Date.now() - this.maxAgeMs;
-    for (const [key, value] of this.threadItems) {
-      if (Number(value.lastSeenAt || 0) < cutoff) this.threadItems.delete(key);
-    }
-    for (const [cacheKey, value] of this.verifications) {
-      if (Number(value.lastUsedAt || 0) < cutoff) this.deleteVerification(cacheKey);
-    }
-    for (const [sessionKey, value] of this.threads) {
-      if (Number(value.updatedAt || 0) < cutoff) this.deleteThread(sessionKey);
+    const now = Date.now();
+    const sweepInterval = Math.min(MEMORY_AGE_PRUNE_INTERVAL_MS, this.maxAgeMs);
+    const sweepAge = forceAgeSweep || now - this.lastAgePruneAt >= sweepInterval;
+    let threadsChanged = false;
+    let ledgerParentsChanged = false;
+
+    if (sweepAge) {
+      this.lastAgePruneAt = now;
+      const cutoff = now - this.maxAgeMs;
+      for (const [key, value] of this.threadItems) {
+        if (Number(value.lastSeenAt || 0) < cutoff) this.threadItems.delete(key);
+      }
+      for (const [cacheKey, value] of this.verifications) {
+        if (Number(value.lastUsedAt || 0) < cutoff) this.deleteVerification(cacheKey);
+      }
+      for (const [sessionKey, value] of this.threads) {
+        if (Number(value.updatedAt || 0) < cutoff) {
+          this.deleteThread(sessionKey);
+          threadsChanged = true;
+        }
+      }
     }
 
     trimMapByTimestamp(this.threadItems, this.maxThreadItems, "lastSeenAt");
     trimMapByTimestamp(this.verifications, this.maxVerifiedItems, "lastUsedAt", cacheKey => {
       this.deleteVerification(cacheKey);
     });
-    trimMapByTimestamp(this.threads, this.maxThreads, "updatedAt", sessionKey => {
+    if (trimMapByTimestamp(this.threads, this.maxThreads, "updatedAt", sessionKey => {
       this.deleteThread(sessionKey);
-    });
-    for (const map of [this.repositories, this.worktrees, this.contentIdentities, this.gitBlobAliases, this.fileMetadata, this.fileVersions, this.manifests, this.privacyPlans, this.fileMutations]) {
-      for (const [key, value] of map) if (this.isExpired(value)) map.delete(key);
-      trimMapByTimestamp(map, this.maxLedgerItems, "lastUsedAt");
+    })) {
+      threadsChanged = true;
     }
-    this.cascadeLedgerChildren();
-    for (const sessionKey of this.threadBases.keys()) {
-      if (!this.threads.has(sessionKey)) this.threadBases.delete(sessionKey);
+
+    const ledgerMaps = [
+      this.repositories,
+      this.worktrees,
+      this.contentIdentities,
+      this.gitBlobAliases,
+      this.fileMetadata,
+      this.fileVersions,
+      this.manifests,
+      this.privacyPlans,
+      this.fileMutations
+    ];
+    const parentMaps = new Set([
+      this.repositories,
+      this.worktrees,
+      this.contentIdentities,
+      this.fileMetadata
+    ]);
+    for (const map of ledgerMaps) {
+      let changed = false;
+      if (sweepAge) {
+        for (const [key, value] of map) {
+          if (this.isExpired(value)) {
+            map.delete(key);
+            changed = true;
+          }
+        }
+      }
+      changed = trimMapByTimestamp(map, this.maxLedgerItems, "lastUsedAt") || changed;
+      if (changed && parentMaps.has(map)) ledgerParentsChanged = true;
+    }
+
+    if (sweepAge || ledgerParentsChanged) this.cascadeLedgerChildren();
+    if (sweepAge || threadsChanged) {
+      for (const sessionKey of this.threadBases.keys()) {
+        if (!this.threads.has(sessionKey)) this.threadBases.delete(sessionKey);
+      }
     }
   }
 
@@ -374,7 +427,11 @@ function stripMemoryMetadata(value) {
 }
 
 function trimMapByTimestamp(map, limit, field, remove = key => map.delete(key)) {
-  if (map.size <= limit) return;
-  const stale = [...map.entries()].sort((a, b) => Number(b[1]?.[field] || 0) - Number(a[1]?.[field] || 0)).slice(limit);
+  if (map.size <= limit) return false;
+  const target = limit > 10 ? Math.max(1, Math.floor(limit * 0.9)) : limit;
+  const stale = [...map.entries()]
+    .sort((a, b) => Number(b[1]?.[field] || 0) - Number(a[1]?.[field] || 0))
+    .slice(target);
   for (const [key] of stale) remove(key);
+  return stale.length > 0;
 }

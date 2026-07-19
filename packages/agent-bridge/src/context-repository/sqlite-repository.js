@@ -309,26 +309,30 @@ export class SqliteContextVerificationStore {
     this.assertOpen();
     actualContentHash = requiredHash(actualContentHash, "actualContentHash");
     const reference = committedReference == null ? null : requiredOpaqueReference(committedReference, "committedReference");
-    const row = this.statements.getFileMutation.get(mutationId);
-    if (!row) return { status: "missing" };
-    if (row.status === "committed") {
+    return withImmediateTransaction(this.database, () => {
+      const row = this.statements.getFileMutation.get(mutationId);
+      if (!row) return { status: "missing" };
+      if (row.status === "committed") {
+        if (row.next_content_hash !== actualContentHash) return { status: "mismatch", expectedContentHash: row.next_content_hash, actualContentHash };
+        return reference == null || row.committed_reference === reference ? this.getFileMutation(mutationId) : { status: "conflict", reason: "committed_reference_conflict" };
+      }
+      if (row.status !== "pending") return { status: row.status };
       if (row.next_content_hash !== actualContentHash) return { status: "mismatch", expectedContentHash: row.next_content_hash, actualContentHash };
-      return reference == null || row.committed_reference === reference ? this.getFileMutation(mutationId) : { status: "conflict", reason: "committed_reference_conflict" };
-    }
-    if (row.status !== "pending") return { status: row.status };
-    if (row.next_content_hash !== actualContentHash) return { status: "mismatch", expectedContentHash: row.next_content_hash, actualContentHash };
-    this.statements.commitFileMutation.run(reference, Date.now(), mutationId);
-    return this.getFileMutation(mutationId);
+      this.statements.commitFileMutation.run(reference, Date.now(), mutationId);
+      return this.getFileMutation(mutationId);
+    });
   }
 
   rollbackFileMutation(mutationId) {
     this.assertOpen();
-    const existing = this.statements.getFileMutation.get(mutationId);
-    if (!existing) return { status: "missing" };
-    if (existing.status === "committed") return { status: "conflict", reason: "already_committed" };
-    if (existing.status === "rolled_back") return this.getFileMutation(mutationId);
-    this.statements.rollbackFileMutation.run(Date.now(), mutationId);
-    return this.getFileMutation(mutationId);
+    return withImmediateTransaction(this.database, () => {
+      const existing = this.statements.getFileMutation.get(mutationId);
+      if (!existing) return { status: "missing" };
+      if (existing.status === "committed") return { status: "conflict", reason: "already_committed" };
+      if (existing.status === "rolled_back") return this.getFileMutation(mutationId);
+      this.statements.rollbackFileMutation.run(Date.now(), mutationId);
+      return this.getFileMutation(mutationId);
+    });
   }
 
   expired(timestamp) {

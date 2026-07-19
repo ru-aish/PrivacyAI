@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { MemoryContextVerificationStore, openContextVerificationStore } from "../src/index.js";
+import { stableJson } from "../src/context-repository/domain.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
 const hash = value => `sha256:${value}`;
-const childFixture = join(import.meta.dirname, "fixtures", "context-store-child.js");
+const childFixture = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "context-store-child.js");
 
 async function opened(t, options = {}) {
   const root = await createTestTempDir("privacyai-a4-repository-");
@@ -24,6 +26,23 @@ test("SQLite constructor creates private storage with WAL and FULL synchronous",
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.equal(store.database.prepare("PRAGMA journal_mode").get().journal_mode, "wal");
   assert.equal(store.database.prepare("PRAGMA synchronous").get().synchronous, 2);
+});
+
+test("explicit database paths preserve caller-owned parent permissions", async t => {
+  const root = await createTestTempDir("privacyai-explicit-db-parent-");
+  const parent = join(root, "shared-parent");
+  await mkdir(parent, { mode: 0o755 });
+  await chmod(parent, 0o755);
+  const path = join(parent, "context.sqlite3");
+  const store = await openContextVerificationStore({ verificationDbPath: path });
+  t.after(() => store.close());
+  assert.equal((await stat(parent)).mode & 0o777, 0o755);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+});
+
+test("stable JSON matches JSON.stringify undefined handling", () => {
+  assert.equal(stableJson({ a: 1, b: undefined }), '{"a":1}');
+  assert.equal(stableJson([1, undefined]), '[1,null]');
 });
 
 test("schema v3 has every table, legacy index, and critical CHECK constraint", async t => {
@@ -162,6 +181,18 @@ test("memory fallback bounds every collection and preserves standalone ledger re
   for (const name of ["threads", "threadBases", "verifications", "threadItems", "repositories", "worktrees", "contentIdentities", "gitBlobAliases", "fileMetadata", "fileVersions", "manifests", "privacyPlans", "fileMutations"]) assert.equal(store[name].size, 0);
 });
 
+test("memory fallback batches large-limit eviction while staying bounded", () => {
+  const store = new MemoryContextVerificationStore({ maxLedgerItems: 20 });
+  for (let index = 0; index < 21; index += 1) {
+    store.registerRepository({
+      repositoryId: hash(`batch-repository-${index}`),
+      rootRef: hash(`batch-root-${index}`)
+    });
+  }
+  assert.equal(store.repositories.size, 18);
+  store.close();
+});
+
 test("memory fallback preserves permissive parent handling while pruning unusable children", () => {
   const store = new MemoryContextVerificationStore();
   assert.doesNotThrow(() => store.registerWorktree({
@@ -283,6 +314,48 @@ test("corrupt, unsupported, and invalid-option opens fail closed without holding
   const renamed = join(root, "bad-option-renamed.sqlite3");
   await (await import("node:fs/promises")).rename(join(root, "bad-option.sqlite3"), renamed);
   assert.equal((await stat(renamed)).mode & 0o777, 0o600);
+});
+
+test("mutation commit and rollback transitions serialize across handles", async t => {
+  const { path, store: first } = await opened(t);
+  const second = await openContextVerificationStore({ verificationDbPath: path });
+  t.after(() => second.close());
+  first.registerRepository({ repositoryId: hash("transition-repo"), rootRef: hash("transition-root") });
+  first.registerWorktree({
+    worktreeId: hash("transition-worktree"),
+    repositoryId: hash("transition-repo"),
+    pathHash: hash("transition-worktree-path"),
+    metadataRef: hash("transition-meta")
+  });
+  first.stageFileMutation({
+    mutationId: hash("transition-mutation"),
+    worktreeId: hash("transition-worktree"),
+    pathHash: hash("transition-path"),
+    expectedContentHash: hash("transition-old"),
+    nextContentHash: hash("transition-new"),
+    opaqueReference: hash("transition-operation")
+  });
+
+  assert.equal(
+    first.commitFileMutation(
+      hash("transition-mutation"),
+      hash("transition-new"),
+      hash("transition-commit-a")
+    ).status,
+    "committed"
+  );
+  assert.deepEqual(
+    second.commitFileMutation(
+      hash("transition-mutation"),
+      hash("transition-new"),
+      hash("transition-commit-b")
+    ),
+    { status: "conflict", reason: "committed_reference_conflict" }
+  );
+  assert.deepEqual(
+    second.rollbackFileMutation(hash("transition-mutation")),
+    { status: "conflict", reason: "already_committed" }
+  );
 });
 
 test("transaction failures roll back parent and children and do not write the failure sentinel", async t => {

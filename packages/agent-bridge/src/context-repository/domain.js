@@ -5,9 +5,15 @@ import { collisionError, contextStoreError } from "./errors.js";
 export { normalizeSessionMap };
 
 export function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (Array.isArray(value)) {
+    return `[${value.map(item => item === undefined ? "null" : stableJson(item)).join(",")}]`;
+  }
   if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+    return `{${Object.keys(value)
+      .filter(key => value[key] !== undefined)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value);
 }
