@@ -617,16 +617,78 @@ test("AsyncConcurrencyLimiter caps at two and releases permits after failures", 
 });
 
 
-test("canonical session maps normalize aliases deterministically", () => {
+test("normalization preserves the first alias preference while remaining semantically equal", () => {
   const original = "owner@example.test";
-  const normalized = normalizeSessionMap({
-    contact1: original,
+  const historicalOrder = normalizeSessionMap({
+    "[EMAIL_2]": original,
+    "[EMAIL_1]": original
+  });
+  const lexicalOrder = normalizeSessionMap({
+    "[EMAIL_1]": original,
+    "[EMAIL_2]": original
+  });
+
+  assert.deepEqual(historicalOrder, lexicalOrder);
+  assert.deepEqual(Object.keys(historicalOrder), ["[EMAIL_2]", "[EMAIL_1]"]);
+  assert.deepEqual(Object.keys(lexicalOrder), ["[EMAIL_1]", "[EMAIL_2]"]);
+  assert.equal(sanitizeKnownText(original, historicalOrder), "[EMAIL_2]");
+  assert.equal(sanitizeKnownText(original.toUpperCase(), historicalOrder), "[EMAIL_2]");
+});
+
+test("persisted maps retain their preferred alias in later turns and rebasing", async () => {
+  const original = "owner@example.test";
+  const persistedMap = JSON.parse(JSON.stringify({
+    "[EMAIL_2]": original,
+    "[EMAIL_1]": original
+  }));
+  const normalized = normalizeSessionMap(persistedMap);
+
+  assert.equal(
+    sanitizeKnownText(`Follow up with ${original}`, normalized),
+    "Follow up with [EMAIL_2]"
+  );
+  const laterTurn = await sanitizeStructuredValue(`Follow up with ${original}`, {
+    sessionMap: persistedMap,
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+  });
+  assert.equal(laterTurn.value, "Follow up with [EMAIL_2]");
+  assert.deepEqual(laterTurn.sessionMapAdditions, {});
+  assert.deepEqual(
+    rebaseSessionAdditions(
+      "Use [EMAIL_9]",
+      { "[EMAIL_9]": original },
+      persistedMap
+    ),
+    {
+      sanitizedText: "Use [EMAIL_2]",
+      sessionMap: {}
+    }
+  );
+});
+
+test("StreamingPlaceholderRestorer restores every established alias exactly", () => {
+  const original = "owner@example.test";
+  const restorer = new StreamingPlaceholderRestorer({
     "[EMAIL_2]": original,
     "[EMAIL_1]": original
   });
 
-  assert.deepEqual(Object.keys(normalized), ["[EMAIL_1]", "[EMAIL_2]", "contact1"]);
-  assert.equal(sanitizeKnownText(original, normalized), "[EMAIL_1]");
+  const output =
+    restorer.push("[EMAIL_") +
+    restorer.push("2] and [EMAIL_1] and [email_2]") +
+    restorer.flush();
+  assert.equal(output, `${original} and ${original} and [email_2]`);
+});
+
+test("alias preference preserves case-insensitive placeholder/original collision rejection", () => {
+  assert.throws(
+    () => normalizeSessionMap({
+      "[EMAIL_2]": "owner@example.test",
+      "[EMAIL_1]": "owner@example.test",
+      "[TOKEN_1]": "[email_2]"
+    }),
+    error => error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP"
+  );
 });
 
 test("rebaseSessionAdditions resolves folded placeholder collisions and rejects folded originals", () => {

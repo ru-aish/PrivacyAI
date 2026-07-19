@@ -3,16 +3,15 @@ import { escapeRegExp, foldCase } from "./text-matching.js";
 const UNSAFE_PLACEHOLDERS = new Set(["__proto__", "prototype", "constructor"]);
 
 /**
- * Canonical session maps point from provider-visible placeholders to exact
- * private originals. Restoration is exact; known-original lookup is
- * case-insensitive.
+ * Validated session maps point from provider-visible placeholders to exact
+ * private originals. Entry order is preserved because the first placeholder
+ * for an original is its established provider-visible alias. Restoration is
+ * exact; known-original lookup is case-insensitive.
  */
 export function normalizeSessionMap(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 
-  const entries = Object.entries(value)
-    .filter(isValidEntry)
-    .sort(compareEntries);
+  const entries = Object.entries(value).filter(isValidEntry);
   validateEntries(entries);
   return recordFromEntries(entries);
 }
@@ -125,10 +124,6 @@ function rememberUnambiguous(index, key, value) {
   const existing = index.get(key);
   if (existing !== undefined && existing !== value) throw ambiguousSessionMapError();
   index.set(key, value);
-}
-
-function compareEntries([left], [right]) {
-  return compareText(foldCase(left), foldCase(right)) || compareText(left, right);
 }
 
 function compareText(left, right) {
