@@ -151,22 +151,30 @@ test("sanitizeStructuredValue shields existing placeholders and rebases new coll
   assert.deepEqual(result.sessionMapAdditions, { "[EMAIL_2]": "new@example.test" });
 });
 
-test("sanitizeStructuredValue allocates boundary shields case-insensitively", async () => {
+test("sanitizeStructuredValue allocates distinct boundary shields case-insensitively", async () => {
   const literalBoundary = "__privacyai_boundary_0__";
   const result = await sanitizeStructuredValue(
     { text: `${literalBoundary} and [EMAIL_1]` },
     {
       sessionMap: { "[EMAIL_1]": "existing@example.test" },
       sanitizer: async text => {
-        const generated = text.match(/__PRIVACYAI_BOUNDARY_0___+/)?.[0];
-        assert.ok(generated, "the generated shield should avoid the lowercase literal collision");
-        assert.notEqual(generated.toLocaleLowerCase("en-US"), literalBoundary);
+        assert.equal(text.includes("__PRIVACYAI_BOUNDARY_0___"), false);
+        assert.equal(text.includes("__PRIVACYAI_BOUNDARY_1__"), true);
         return { sanitizedPrompt: text, sessionMap: {} };
       }
     }
   );
 
   assert.deepEqual(result.value, { text: `${literalBoundary} and [EMAIL_1]` });
+});
+
+test("sanitizeStructuredValue makes progress for short known originals", async () => {
+  const result = await sanitizeStructuredValue("a", {
+    sessionMap: { "[PRIVATE_VALUE_1]": "a" },
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+  });
+
+  assert.equal(result.value, "[PRIVATE_VALUE_1]");
 });
 
 test("sanitizeStructuredValue ignores classifier mappings derived from reserved boundary shields", async () => {
@@ -607,3 +615,248 @@ test("AsyncConcurrencyLimiter caps at two and releases permits after failures", 
   assert.equal(await third, "third");
   assert.equal(active, 0);
 });
+
+
+test("normalization preserves the first alias preference while remaining semantically equal", () => {
+  const original = "owner@example.test";
+  const historicalOrder = normalizeSessionMap({
+    "[EMAIL_2]": original,
+    "[EMAIL_1]": original
+  });
+  const lexicalOrder = normalizeSessionMap({
+    "[EMAIL_1]": original,
+    "[EMAIL_2]": original
+  });
+
+  assert.deepEqual(historicalOrder, lexicalOrder);
+  assert.deepEqual(Object.keys(historicalOrder), ["[EMAIL_2]", "[EMAIL_1]"]);
+  assert.deepEqual(Object.keys(lexicalOrder), ["[EMAIL_1]", "[EMAIL_2]"]);
+  assert.equal(sanitizeKnownText(original, historicalOrder), "[EMAIL_2]");
+  assert.equal(sanitizeKnownText(original.toUpperCase(), historicalOrder), "[EMAIL_2]");
+});
+
+test("persisted maps retain their preferred alias in later turns and rebasing", async () => {
+  const original = "owner@example.test";
+  const persistedMap = JSON.parse(JSON.stringify({
+    "[EMAIL_2]": original,
+    "[EMAIL_1]": original
+  }));
+  const normalized = normalizeSessionMap(persistedMap);
+
+  assert.equal(
+    sanitizeKnownText(`Follow up with ${original}`, normalized),
+    "Follow up with [EMAIL_2]"
+  );
+  const laterTurn = await sanitizeStructuredValue(`Follow up with ${original}`, {
+    sessionMap: persistedMap,
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+  });
+  assert.equal(laterTurn.value, "Follow up with [EMAIL_2]");
+  assert.deepEqual(laterTurn.sessionMapAdditions, {});
+  assert.deepEqual(
+    rebaseSessionAdditions(
+      "Use [EMAIL_9]",
+      { "[EMAIL_9]": original },
+      persistedMap
+    ),
+    {
+      sanitizedText: "Use [EMAIL_2]",
+      sessionMap: {}
+    }
+  );
+});
+
+test("StreamingPlaceholderRestorer restores every established alias exactly", () => {
+  const original = "owner@example.test";
+  const restorer = new StreamingPlaceholderRestorer({
+    "[EMAIL_2]": original,
+    "[EMAIL_1]": original
+  });
+
+  const output =
+    restorer.push("[EMAIL_") +
+    restorer.push("2] and [EMAIL_1] and [email_2]") +
+    restorer.flush();
+  assert.equal(output, `${original} and ${original} and [email_2]`);
+});
+
+test("alias preference preserves case-insensitive placeholder/original collision rejection", () => {
+  assert.throws(
+    () => normalizeSessionMap({
+      "[EMAIL_2]": "owner@example.test",
+      "[EMAIL_1]": "owner@example.test",
+      "[TOKEN_1]": "[email_2]"
+    }),
+    error => error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP"
+  );
+});
+
+test("rebaseSessionAdditions resolves folded placeholder collisions and rejects folded originals", () => {
+  assert.deepEqual(
+    rebaseSessionAdditions(
+      "[email_1]",
+      { "[email_1]": "new@example.test" },
+      { "[EMAIL_1]": "old@example.test" }
+    ),
+    {
+      sanitizedText: "[EMAIL_2]",
+      sessionMap: { "[EMAIL_2]": "new@example.test" }
+    }
+  );
+
+  assert.throws(
+    () => rebaseSessionAdditions(
+      "[PERSON_2]",
+      { "[PERSON_2]": "Alice" },
+      { "[PERSON_1]": "alice" }
+    ),
+    error => error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP"
+  );
+});
+
+test("rebaseSessionAdditions replaces overlapping aliases in one longest-first pass", () => {
+  assert.deepEqual(
+    rebaseSessionAdditions(
+      "contact10 contact1",
+      {
+        contact1: "first@example.test",
+        contact10: "second@example.test"
+      },
+      {
+        "[EMAIL_1]": "first@example.test",
+        "[EMAIL_10]": "second@example.test"
+      }
+    ),
+    {
+      sanitizedText: "[EMAIL_10] [EMAIL_1]",
+      sessionMap: {}
+    }
+  );
+});
+
+test("StreamingPlaceholderRestorer preserves exact Unicode placeholders across surrogate splits", () => {
+  const placeholder = "🔒PRIVATE🔒";
+  const text = `before ${placeholder} after`;
+  for (let index = 0; index <= text.length; index += 1) {
+    const restorer = new StreamingPlaceholderRestorer({ [placeholder]: "restored" });
+    const output = restorer.push(text.slice(0, index)) + restorer.push(text.slice(index)) + restorer.flush();
+    assert.equal(output, "before restored after", `split ${index}`);
+  }
+});
+
+test("structured key policy preserves protocol keys while sanitizing other keys", async () => {
+  const secretKey = "private-key@example.test";
+  const privateValue = "private-value@example.test";
+  const result = await sanitizeStructuredValue({
+    protocol_key: privateValue,
+    [secretKey]: "public"
+  }, {
+    sanitizeObjectKeys: ({ key }) => key === "protocol_key" ? false : true,
+    sanitizer: async text => {
+      const sessionMap = {};
+      let sanitizedPrompt = text;
+      if (text.includes(secretKey)) {
+        sessionMap["[EMAIL_1]"] = secretKey;
+        sanitizedPrompt = sanitizedPrompt.replaceAll(secretKey, "[EMAIL_1]");
+      }
+      if (text.includes(privateValue)) {
+        sessionMap["[EMAIL_2]"] = privateValue;
+        sanitizedPrompt = sanitizedPrompt.replaceAll(privateValue, "[EMAIL_2]");
+      }
+      return { sanitizedPrompt, sessionMap };
+    }
+  });
+
+  assert.deepEqual(result.value, {
+    protocol_key: "[EMAIL_2]",
+    "[EMAIL_1]": "public"
+  });
+});
+
+test("structured sanitization propagates cancellation before and during classification", async () => {
+  const before = new AbortController();
+  const beforeReason = new Error("cancelled before classification");
+  before.abort(beforeReason);
+  let calls = 0;
+  await assert.rejects(
+    sanitizeStructuredValue("private", {
+      signal: before.signal,
+      sanitizer: async text => {
+        calls += 1;
+        return { sanitizedPrompt: text, sessionMap: {} };
+      }
+    }),
+    error => error === beforeReason
+  );
+  assert.equal(calls, 0);
+
+  const during = new AbortController();
+  const duringReason = new Error("cancelled during classification");
+  await assert.rejects(
+    sanitizeStructuredValue("private", {
+      signal: during.signal,
+      sanitizer: async text => {
+        during.abort(duringReason);
+        return { sanitizedPrompt: text, sessionMap: {} };
+      }
+    }),
+    error => error === duringReason
+  );
+});
+
+test("structured chunk boundaries never split surrogate pairs", async () => {
+  const secret = "🔐".repeat(256);
+  const input = "x".repeat(1800) + secret + "y".repeat(900);
+  let containingCalls = 0;
+  const result = await sanitizeStructuredValue(input, {
+    maxContextChars: 2048,
+    sanitizer: async text => {
+      assert.equal(hasUnpairedSurrogate(text), false);
+      const found = text.includes(secret);
+      if (found) containingCalls += 1;
+      return {
+        sanitizedPrompt: found ? text.replaceAll(secret, "[PRIVATE_IDENTIFIER_1]") : text,
+        sessionMap: found ? { "[PRIVATE_IDENTIFIER_1]": secret } : {}
+      };
+    }
+  });
+
+  assert.equal(containingCalls >= 1, true);
+  assert.equal(restoreValue(result.value, result.sessionMapAdditions), input);
+});
+
+test("privacy-core compatibility exports retain their public identities", async () => {
+  const publicApi = await import("../src/index.js");
+  const sessionMapApi = await import("../src/session-map.js");
+  const redactorApi = await import("../src/redactor.js");
+
+  for (const name of [
+    "normalizeSessionMap",
+    "rebaseSessionAdditions",
+    "restoreText",
+    "restoreValue",
+    "sanitizeKnownText",
+    "sanitizeKnownValue",
+    "transformValue",
+    "findUnresolvedPlaceholders",
+    "assertNoProtectedOriginals",
+    "assertNoProtectedOriginalsInValue"
+  ]) {
+    assert.equal(publicApi[name], sessionMapApi[name], name);
+  }
+  assert.equal(publicApi.restore, redactorApi.restore);
+});
+
+function hasUnpairedSurrogate(text) {
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return true;
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}

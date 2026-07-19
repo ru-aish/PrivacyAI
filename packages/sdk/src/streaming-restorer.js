@@ -1,13 +1,17 @@
-import { normalizeSessionMap, restoreText } from "./session-map.js";
+import { normalizeSessionMap } from "./session-map-contract.js";
+import { compileNormalizedTextRestorer } from "./placeholder-transform.js";
 
 /**
- * Restores placeholders in an arbitrarily chunked text stream without emitting
- * a prefix that might later become a complete placeholder.
+ * Restores exact placeholders from arbitrarily chunked text without emitting a
+ * suffix that could still become a complete placeholder.
  */
 export class StreamingPlaceholderRestorer {
   constructor(sessionMap = {}) {
     this.sessionMap = normalizeSessionMap(sessionMap);
-    this.placeholders = Object.keys(this.sessionMap).sort((a, b) => b.length - a.length);
+    this.placeholders = Object.keys(this.sessionMap)
+      .sort((left, right) => right.length - left.length);
+    this.candidatesByFirstUnit = indexByFirstUnit(this.placeholders);
+    this.restoreBufferedText = compileNormalizedTextRestorer(this.sessionMap);
     this.buffer = "";
   }
 
@@ -17,18 +21,34 @@ export class StreamingPlaceholderRestorer {
     }
     if (chunk.length === 0) return "";
     this.buffer += chunk;
-    const holdLength = longestPossiblePlaceholderPrefixSuffix(this.buffer, this.placeholders);
-    const emitLength = this.buffer.length - holdLength;
-    if (emitLength <= 0) return "";
-    const emitted = this.buffer.slice(0, emitLength);
-    this.buffer = this.buffer.slice(emitLength);
-    return restoreText(emitted, this.sessionMap);
+
+    let cursor = 0;
+    let output = "";
+    while (cursor < this.buffer.length) {
+      const candidates = this.candidatesByFirstUnit.get(this.buffer[cursor]) || [];
+      if (isIncompletePlaceholder(this.buffer, cursor, candidates)) break;
+
+      const placeholder = candidates.find(candidate =>
+        this.buffer.startsWith(candidate, cursor)
+      );
+      if (placeholder) {
+        output += this.sessionMap[placeholder];
+        cursor += placeholder.length;
+        continue;
+      }
+      if (isTrailingHighSurrogate(this.buffer, cursor)) break;
+      output += this.buffer[cursor];
+      cursor += 1;
+    }
+
+    this.buffer = this.buffer.slice(cursor);
+    return output;
   }
 
   flush() {
-    const emitted = restoreText(this.buffer, this.sessionMap);
+    const output = this.restoreBufferedText(this.buffer);
     this.buffer = "";
-    return emitted;
+    return output;
   }
 
   get pendingLength() {
@@ -36,16 +56,30 @@ export class StreamingPlaceholderRestorer {
   }
 }
 
-function longestPossiblePlaceholderPrefixSuffix(text, placeholders) {
-  let longest = 0;
+function indexByFirstUnit(placeholders) {
+  const index = new Map();
   for (const placeholder of placeholders) {
-    const maximum = Math.min(text.length, placeholder.length - 1);
-    for (let length = maximum; length > longest; length -= 1) {
-      if (text.endsWith(placeholder.slice(0, length))) {
-        longest = length;
-        break;
-      }
-    }
+    const firstUnit = placeholder[0];
+    const candidates = index.get(firstUnit) || [];
+    candidates.push(placeholder);
+    index.set(firstUnit, candidates);
   }
-  return longest;
+  return index;
+}
+
+function isIncompletePlaceholder(text, start, candidates) {
+  const remainingLength = text.length - start;
+  return candidates.some(placeholder => {
+    if (placeholder.length <= remainingLength) return false;
+    for (let offset = 0; offset < remainingLength; offset += 1) {
+      if (placeholder[offset] !== text[start + offset]) return false;
+    }
+    return true;
+  });
+}
+
+function isTrailingHighSurrogate(text, index) {
+  if (index !== text.length - 1) return false;
+  const code = text.charCodeAt(index);
+  return code >= 0xd800 && code <= 0xdbff;
 }
