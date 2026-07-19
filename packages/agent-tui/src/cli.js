@@ -47,11 +47,11 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
       if (!CANONICAL_AGENTS.has(agent)) {
         throw usageError(`Unknown PrivacyAI agent: ${agent}`);
       }
-      return delegateToBridge([agent, ...agentArgs], options, stdout, stderr, stdin);
+      return await delegateToBridge([agent, ...agentArgs], options, stdout, stderr, stdin);
     }
 
     if (COMPATIBILITY_AGENTS.has(command)) {
-      return delegateToBridge([command, ...args], options, stdout, stderr, stdin);
+      return await delegateToBridge([command, ...args], options, stdout, stderr, stdin);
     }
 
     if (command === "onboard" || command === "setup") {
@@ -65,7 +65,7 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
           "PrivacyAI onboarding requires an interactive terminal. Run it from a TTY."
         );
       }
-      return delegateToBridge(["onboard"], options, stdout, stderr, stdin);
+      return await delegateToBridge(["onboard"], options, stdout, stderr, stdin);
     }
 
     if (command === "doctor" || command === "diagnostics") {
@@ -73,7 +73,7 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
         printDoctorHelp(stdout);
         return CLI_EXIT_CODES.success;
       }
-      return runDoctor(args, { ...options, stdout, stderr });
+      return await runDoctor(args, { ...options, stdout, stderr });
     }
 
     if (command === "cache") {
@@ -81,7 +81,7 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
         printCacheHelp(stdout);
         return CLI_EXIT_CODES.success;
       }
-      return runCache(args, { ...options, stdout, stderr });
+      return await runCache(args, { ...options, stdout, stderr });
     }
 
     if (command === "lineage") {
@@ -89,7 +89,7 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
         printLineageHelp(stdout);
         return CLI_EXIT_CODES.success;
       }
-      return runLineage(args, { ...options, stdout, stderr });
+      return await runLineage(args, { ...options, stdout, stderr });
     }
 
     throw usageError(`Unknown PrivacyAI command: ${command}`);
@@ -106,11 +106,11 @@ export function printHelp(output = process.stdout) {
   output.write("Usage:\n");
   output.write("  privacyai <command> [options]\n\n");
   output.write("Product commands:\n");
-  output.write("  onboard               Configure the local privacy model\n");
-  output.write("  doctor [--json]       Check configuration, model, agents, and local state\n");
-  output.write("  agent <name> [...]    Launch claude, codex, or agy through PrivacyAI\n");
-  output.write("  cache [command]       Inspect protected cache metadata\n");
-  output.write("  lineage [command]     Inspect session and mutation lineage\n\n");
+  output.write("  privacyai onboard               Configure the local privacy model\n");
+  output.write("  privacyai doctor [--json]       Check configuration, model, agents, and local state\n");
+  output.write("  privacyai agent <name> [...]    Launch claude, codex, or agy through PrivacyAI\n");
+  output.write("  privacyai cache [command]       Inspect protected cache metadata\n");
+  output.write("  privacyai lineage [command]     Inspect session and mutation lineage\n\n");
   output.write("Compatibility aliases:\n");
   output.write("  claude|codex|agy [...]  Equivalent to privacyai agent <name> [...]\n");
   output.write("  antigravity [...]       Alias for agy\n");
