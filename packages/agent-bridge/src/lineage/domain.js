@@ -202,14 +202,14 @@ export function normalizeMetadata(value = {}) {
       output[key] = item;
       continue;
     }
-    throw lineageInputError(`Lineage metadata field ${key} is not allowed.`);
+    throw lineageInputError("Lineage metadata contains an unsupported field.");
   }
   return Object.freeze(output);
 }
 
 export function opaqueIdentity(value, name = "identity") {
   if (typeof value !== "string" || !OPAQUE_ID.test(value)) {
-    throw lineageInputError(`${name} must be a namespaced opaque identity.`);
+    throw lineageInputError("Lineage identity must be a namespaced opaque identity.");
   }
   return value;
 }
@@ -357,8 +357,8 @@ function forbid(event, fields, eventType) {
 }
 
 function rejectUnknownFields(value, allowed, label) {
-  const field = Object.keys(value).find(key => !allowed.has(key));
-  if (field) throw lineageInputError(`${label} field ${field} is not allowed.`);
+  const hasUnknownField = Object.keys(value).some(key => !allowed.has(key));
+  if (hasUnknownField) throw lineageInputError(`${label} contains an unsupported field.`);
 }
 
 function assertPlainObject(value, message) {
