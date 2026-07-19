@@ -49,6 +49,19 @@ Exit codes are stable for scripts:
 Onboarding requires an interactive terminal and fails immediately instead of
 waiting for input when stdin or stdout is not a TTY.
 
+## Configuration discovery
+
+PrivacyAI uses one configuration file. Discovery order is explicit:
+
+1. An explicit path supplied by an embedding API.
+2. `PRIVACYAI_CONFIG_FILE`.
+3. `PRIVACYAI_CONFIG_DIR/config.json`.
+4. `~/.config/privacyai/config.json`.
+
+The first selected path is authoritative. An invalid or unreadable file fails
+with a safe validation error; PrivacyAI does not silently fall through to a
+lower-precedence configuration.
+
 ## Diagnostics
 
 `privacyai doctor` checks the saved local-model configuration, model readiness,

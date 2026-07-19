@@ -64,6 +64,33 @@ test("canonical agent routing and direct compatibility aliases preserve argument
   ]);
 });
 
+test("agent delegation propagates child exits and contains asynchronous failures", async () => {
+  const streams = ttyStreams();
+  assert.equal(
+    await runPrivacyAiCli(["agent", "codex"], {
+      ...streams,
+      bridgeCli: { runPrivacyAiCli: async () => 143 }
+    }),
+    143
+  );
+
+  const stdout = capture();
+  const stderr = capture();
+  const code = await runPrivacyAiCli(["agent", "agy", "--print", "hello"], {
+    stdin: ttyInput(),
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    bridgeCli: {
+      runPrivacyAiCli: async () => {
+        throw new Error("Agent launch failed safely.");
+      }
+    }
+  });
+  assert.equal(code, CLI_EXIT_CODES.failure);
+  assert.equal(stdout.text(), "");
+  assert.equal(stderr.text(), "Agent launch failed safely.\n");
+});
+
 test("invalid commands use stderr and the stable usage exit code", async () => {
   const stdout = capture();
   const stderr = capture();
