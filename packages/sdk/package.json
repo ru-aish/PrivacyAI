@@ -6,10 +6,12 @@
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./browser": "./src/browser.js"
+    "./browser": "./src/browser.js",
+    "./image": "./src/image/index.js"
   },
   "scripts": {
-    "test": "node --test test/env.test.js test/sanitizer.test.js test/prompts.test.js test/ai-sanitizer.test.js test/detectors.test.js test/policy.test.js test/hard-prompts.test.js test/context-compactor.test.js test/benchmark-logs.test.js test/intent-preservation.test.js",
+    "test": "node --test test/errors.test.js test/env.test.js test/sanitizer.test.js test/prompts.test.js test/ai-sanitizer.test.js test/detectors.test.js test/policy.test.js test/hard-prompts.test.js test/context-compactor.test.js test/benchmark-logs.test.js test/intent-preservation.test.js test/session-map.test.js test/text-edits.test.js test/image.test.js",
+    "test:image": "node --test test/image.test.js",
     "test:e2e:ollama": "node test/ollama.e2e.test.js"
   },
   "keywords": [
@@ -25,6 +27,11 @@
     "examples",
     "README.md"
   ],
+  "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "sharp": "^0.34.3",
+    "tesseract.js": "^6.0.1"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=18.18"

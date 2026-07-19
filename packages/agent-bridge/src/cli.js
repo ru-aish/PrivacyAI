@@ -1,4 +1,5 @@
 import { launchAgy } from "./agy.js";
+import { BoundedQueue } from "./bounded-queue.js";
 import { loadPrivacyConfig } from "./config-store.js";
 import { launchNativeTui } from "./launcher.js";
 import { checkPrivacyModel } from "./model-health.js";
@@ -12,8 +13,42 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
   try {
     switch (command) {
       case "claude":
-      case "codex":
-        return await (options.launchNativeTui || launchNativeTui)(command, args, options.launchOptions);
+      case "codex": {
+        const launchOptions = { ...options.launchOptions };
+        if (command === "codex" && typeof launchOptions.onGatewayError !== "function") {
+          const render = diagnostic => writeGatewayDiagnostic(stderr, diagnostic);
+          // Codex owns an alternate-screen TUI while its child is running. Do
+          // not write through that screen; flush safe, structured summaries
+          // when the launcher gives control back. Pipes stay immediately useful.
+          if (stderr.isTTY) {
+            const deferred = new BoundedQueue(
+              positiveQueueCapacity(options.maxDeferredGatewayDiagnostics, 128),
+              "deferred gateway diagnostics"
+            );
+            launchOptions.onGatewayError = diagnostic => deferred.push(diagnostic);
+            try {
+              return await (options.launchNativeTui || launchNativeTui)(command, args, launchOptions);
+            } finally {
+              for (const diagnostic of deferred.drain()) {
+                try {
+                  render(diagnostic);
+                } catch {
+                  // Diagnostic rendering must never replace the launcher result.
+                }
+              }
+              if (deferred.dropped > 0) {
+                try {
+                  stderr.write(`[PrivacyAI] Suppressed ${deferred.dropped} older Codex gateway diagnostics.\n`);
+                } catch {
+                  // Diagnostic rendering must never replace the launcher result.
+                }
+              }
+            }
+          }
+          launchOptions.onGatewayError = render;
+        }
+        return await (options.launchNativeTui || launchNativeTui)(command, args, launchOptions);
+      }
       case "agy":
       case "antigravity":
         return await (options.launchAgy || launchAgy)(args, options.agyOptions);
@@ -28,7 +63,7 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
         return await runDoctor({ ...options, stdout });
       case "--version":
       case "-v":
-        stdout.write("privacyai 0.0.1\n");
+        stdout.write("privacyai 0.0.2\n");
         return 0;
       case "help":
       case "--help":
@@ -52,7 +87,10 @@ async function runDoctor(options) {
     return 1;
   }
 
-  const health = await checkPrivacyModel(loaded.config, options.healthOptions);
+  const health = await checkPrivacyModel(loaded.config, {
+    probeCompletion: true,
+    ...options.healthOptions
+  });
   options.stdout.write(`Configuration: ${loaded.path}\n`);
   options.stdout.write(`Provider: ${loaded.config.provider}\n`);
   options.stdout.write(`Model: ${loaded.config.model}\n`);
@@ -65,11 +103,35 @@ export function printHelp(output = process.stdout) {
   output.write("Usage:\n");
   output.write("  privacyai onboard       Configure the local privacy model\n");
   output.write("  privacyai claude [...]  Open the normal Claude Code TUI with prompt protection\n");
-  output.write("  privacyai codex [...]   Open the normal Codex TUI with prompt protection\n");
-  output.write("  privacyai agy --print \"...\"  Send a protected one-shot Antigravity prompt\n");
+  output.write("  privacyai codex [...]   Open stock Codex through the local provider gateway\n");
+  output.write("  privacyai codex resume <id>  Resume through the protected gateway (never use raw codex resume)\n");
+  output.write("  privacyai codex fork <id>    Fork through the protected gateway (never use raw codex fork)\n");
+  output.write("  Unix-like Codex TUI: /resume [--all|--last|id] or /fork [--all|--last|id]\n");
+  output.write("  privacyai codex --privacy-strict [...]  Use prompt-only fallback isolation\n");
+  output.write("  privacyai agy [...]                    Run stock Antigravity through the privacy transport\n");
+  output.write("  privacyai agy --privacy-strict --print \"...\"  Use prompt-only fallback isolation\n");
   output.write("  privacyai doctor        Check local setup\n");
+}
+
+function writeGatewayDiagnostic(output, diagnostic) {
+  const code = safeDiagnosticField(diagnostic?.code, "PRIVACYAI_CODEX_GATEWAY_FAILURE");
+  const category = safeDiagnosticField(diagnostic?.category, "gateway").toLowerCase();
+  output.write(`[PrivacyAI] Codex gateway failure: ${category} (${code}).\n`);
+}
+
+function safeDiagnosticField(value, fallback) {
+  const text = String(value || "");
+  return /^[A-Za-z0-9_]{1,96}$/.test(text) ? text : fallback;
 }
 
 function safeMessage(error) {
   return error instanceof Error ? error.message : "PrivacyAI failed safely.";
+}
+
+function positiveQueueCapacity(value, fallback) {
+  const normalized = value == null ? fallback : Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized <= 0 || normalized > 10_000) {
+    throw new TypeError("Deferred gateway diagnostic capacity must be between 1 and 10000.");
+  }
+  return normalized;
 }

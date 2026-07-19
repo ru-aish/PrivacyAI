@@ -2,12 +2,20 @@ import { createDetectorPipeline, mergeDetections } from "./detectors/index.js";
 import { redact } from "./redactor.js";
 import { RedactionPlan } from "./redaction-plan.js";
 import { shouldRedact } from "./policy/redaction-policy.js";
-import { generateDummy } from "./dummy-data.js";
+import { allocateUniqueDummy, generateDummy } from "./dummy-data.js";
 import {
   BROWSER_PRIVACY_SANITIZER_PROMPT,
   STRICT_PRIVACY_SANITIZER_PROMPT
 } from "./prompts.js";
 import { PrivacyGuardianError } from "./errors.js";
+import { parseAndApplyTextEdits } from "./text-edits.js";
+import { sanitizeKnownText } from "./session-map.js";
+import { AsyncConcurrencyLimiter } from "./concurrency-limiter.js";
+import {
+  DEFAULT_PRIVACY_OUTPUT_TOKENS,
+  TRUNCATED_PRIVACY_OUTPUT_TOKENS,
+  normalizePrivacyOutputTokens
+} from "./local-model-policy.js";
 
 export const SANITIZATION_MODES = Object.freeze({
   STRICT: "strict",
@@ -17,10 +25,18 @@ export const SANITIZATION_MODES = Object.freeze({
 const STRICT_ALWAYS_SENSITIVE_TYPES = new Set([
   "EMAIL", "SSN", "CREDIT_CARD", "PHONE", "API_KEY", "AWS_ACCESS_KEY",
   "URL_CREDENTIAL", "URL_QUERY_SECRET", "CONNECTION_STRING_CREDENTIAL",
-  "MEDICAL_ID", "MRN", "PRIVATE_IDENTIFIER"
+  "MEDICAL_ID", "MRN", "PRIVATE_IDENTIFIER", "PASSWORD", "SECRET",
+  "CREDENTIAL", "TOKEN"
 ]);
 
 const STRICT_IDENTITY_TYPES = new Set(["PERSON", "ORGANIZATION", "LOCATION"]);
+const STRICT_ALLOWED_SPAN_TYPES = new Set([
+  ...STRICT_ALWAYS_SENSITIVE_TYPES,
+  ...STRICT_IDENTITY_TYPES,
+  "IP_ADDRESS",
+  "POSTAL_CODE",
+  "ZIP"
+]);
 
 export class AiSanitizer {
   constructor(options = {}) {
@@ -34,11 +50,22 @@ export class AiSanitizer {
       options.sanitizationMode || options.privacyMode || SANITIZATION_MODES.STRICT
     );
     this.systemPrompt = options.privacySystemPrompt || promptForMode(this.sanitizationMode);
-    this.privacyMaxTokens = options.privacyMaxTokens;
+    this.privacyMaxTokens = normalizePrivacyOutputTokens(
+      options.privacyMaxTokens,
+      DEFAULT_PRIVACY_OUTPUT_TOKENS
+    );
+    this.truncatedPrivacyMaxTokens = Number.isSafeInteger(Number(options.truncatedPrivacyMaxTokens))
+      ? Math.max(this.privacyMaxTokens, Math.min(Number(options.truncatedPrivacyMaxTokens), TRUNCATED_PRIVACY_OUTPUT_TOKENS))
+      : TRUNCATED_PRIVACY_OUTPUT_TOKENS;
+    this.classifierLimiter = new AsyncConcurrencyLimiter(options.classifierConcurrency);
     this.fallbackDetector = createDetectorPipeline({ ...options, localDetectorEnabled: false });
   }
 
   async sanitize(text, options = {}) {
+    return this.classifierLimiter.run(() => this.#sanitize(text, options), options.signal);
+  }
+
+  async #sanitize(text, options = {}) {
     if (typeof text !== "string") {
       throw new TypeError("AiSanitizer.sanitize expects a string prompt.");
     }
@@ -63,14 +90,37 @@ export class AiSanitizer {
 
     messages.push({ role: "user", content: text });
 
+    const maxTokens = optionsMaxTokens(this);
     let response = await this.provider.chat({
       model: this.model,
       messages,
       temperature: 0,
-      maxTokens: optionsMaxTokens(this)
+      maxTokens,
+      signal: options.signal
     });
+    // Retrying a larger output is useful only when the provider explicitly
+    // says generation was truncated. Other malformed output follows the
+    // normal repair path and must not silently increase local-model work.
+    if (isTruncatedOutput(response)) {
+      response = await this.provider.chat({
+        model: this.model,
+        messages,
+        temperature: 0,
+        maxTokens: Math.min(maxTokens * 2, this.truncatedPrivacyMaxTokens),
+        signal: options.signal
+      });
+    }
+    throwIfAborted(options.signal);
 
-    let parsed = parseSanitizerJson(response.text);
+    if (this.sanitizationMode === SANITIZATION_MODES.STRICT) {
+      const spanResult = parseSanitizerSpans(response.text, text);
+      if (spanResult) {
+        const enforced = await enforceStrictSpanResult(text, spanResult, this.fallbackDetector, options);
+        return normalizeSanitizerResult(text, enforced, response, "ai-span-sanitizer");
+      }
+    }
+
+    let parsed = parseSanitizerResponse(response.text, text, this.sanitizationMode);
     let isValid = parsed
       ? await validateSanitizerOutput(
           text,
@@ -81,16 +131,24 @@ export class AiSanitizer {
         )
       : false;
 
-    if (!isValid) {
+    // Browser-mode compact patches either verify exactly or fall back locally.
+    // Do not resend the full source for a repair attempt, which would erase the
+    // compute savings of the patch protocol.
+    if (!isValid && this.sanitizationMode !== SANITIZATION_MODES.BROWSER) {
       const repairMessages = buildRepairMessages(text, response.text, this.sanitizationMode);
       try {
         const repairResponse = await this.provider.chat({
           model: this.model,
           messages: repairMessages,
           temperature: 0,
-          maxTokens: optionsMaxTokens(this)
+          maxTokens: optionsMaxTokens(this),
+          signal: options.signal
         });
-        const repairedParsed = parseSanitizerJson(repairResponse.text);
+        const repairedParsed = parseSanitizerResponse(
+          repairResponse.text,
+          text,
+          this.sanitizationMode
+        );
         if (repairedParsed) {
           const repairValid = await validateSanitizerOutput(
             text,
@@ -106,20 +164,27 @@ export class AiSanitizer {
           }
         }
       } catch (err) {
+        if (options.signal?.aborted) throw abortReason(options.signal, err);
         console.error("Sanitizer repair retry failed:", err);
       }
     }
 
+    throwIfAborted(options.signal);
     if (isValid && parsed) {
       const enforced = this.sanitizationMode === SANITIZATION_MODES.STRICT
-        ? await enforceStrictSafeResult(text, parsed, this.fallbackDetector)
+        ? await enforceStrictSafeResult(text, parsed, this.fallbackDetector, options)
         : await enforceBrowserSafeResult(text, parsed, this.fallbackDetector);
-      return normalizeSanitizerResult(text, enforced, response, "ai-sanitizer");
+      const source = parsed.format === "edits" ? "ai-edit-sanitizer" : "ai-sanitizer";
+      return normalizeSanitizerResult(text, enforced, response, source);
     }
 
     const detections = await this.fallbackDetector.detect(text);
     const fallback = this.sanitizationMode === SANITIZATION_MODES.STRICT
-      ? buildStrictRedactionPlan(text, detections).toResult("strict-regex-fallback")
+      ? strictPlanToResult(
+          text,
+          buildStrictRedactionPlan(text, detections, options),
+          "strict-regex-fallback"
+        )
       : redact(text, detections);
     return {
       ...fallback,
@@ -144,7 +209,12 @@ function normalizeSanitizationMode(value) {
 }
 
 function optionsMaxTokens(sanitizer) {
-  return sanitizer.privacyMaxTokens || 2048;
+  return sanitizer.privacyMaxTokens;
+}
+
+function isTruncatedOutput(response) {
+  const reason = response?.raw?.done_reason ?? response?.raw?.choices?.[0]?.finish_reason;
+  return /^(?:length|max_tokens)$/i.test(String(reason || ""));
 }
 
 function buildRepairMessages(originalText, previousOutput, mode) {
@@ -162,6 +232,79 @@ function buildRepairMessages(originalText, previousOutput, mode) {
       content: `Original Input:\n${originalText}\n\nPrevious Output (failed validation):\n${previousOutput}\n\nCorrect the JSON only.`
     }
   ];
+}
+
+
+export function parseSanitizerSpans(text, originalText) {
+  const json = extractJson(text);
+  if (!json || !Array.isArray(json.spans) || typeof originalText !== "string") return null;
+  if (json.spans.length > 2048) return null;
+
+  const spans = [];
+  const seen = new Set();
+  for (const entry of json.spans) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const value = entry.value;
+    const type = entry.type;
+    if (typeof value !== "string" || value.length === 0 || value.length > 512) return null;
+    if (/\r|\n/.test(value) || !originalText.includes(value)) return null;
+    if (
+      typeof type !== "string" ||
+      !/^[A-Z][A-Z0-9_]{1,63}$/.test(type) ||
+      !STRICT_ALLOWED_SPAN_TYPES.has(type)
+    ) return null;
+    const key = `${type}\0${value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    spans.push({ value, type });
+  }
+  return spans;
+}
+
+async function enforceStrictSpanResult(originalText, spans, detector, options = {}) {
+  const detectorDetections = await detector.detect(originalText);
+  const modelDetections = [];
+  for (const span of spans) {
+    let searchIndex = 0;
+    while (searchIndex < originalText.length) {
+      const start = originalText.indexOf(span.value, searchIndex);
+      if (start === -1) break;
+      modelDetections.push({
+        type: span.type,
+        value: span.value,
+        start,
+        end: start + span.value.length,
+        confidence: 1,
+        source: "local-ai-span"
+      });
+      searchIndex = start + span.value.length;
+    }
+  }
+  const combined = mergeDetections([...detectorDetections, ...modelDetections]);
+  const plan = buildStrictRedactionPlan(originalText, combined, options);
+  return strictPlanToSafeResult(originalText, plan);
+}
+
+function parseSanitizerResponse(text, originalText, mode) {
+  if (mode === SANITIZATION_MODES.BROWSER) {
+    const compact = parseSanitizerEdits(text, originalText);
+    if (compact) return compact;
+  }
+  const legacy = parseSanitizerJson(text);
+  return legacy ? { ...legacy, format: "legacy" } : null;
+}
+
+export function parseSanitizerEdits(text, originalText) {
+  const applied = parseAndApplyTextEdits(text, originalText);
+  if (!applied) return null;
+  const sessionMap = normalizeSessionMap(applied.json.session_map);
+  if (!sessionMap) return null;
+  return {
+    safe_prompt: applied.text,
+    session_map: sessionMap,
+    edits: applied.edits,
+    format: "edits"
+  };
 }
 
 export function parseSanitizerJson(text) {
@@ -221,7 +364,7 @@ function normalizeSessionMapCasing(originalText, sessionMap) {
   return normalized;
 }
 
-async function enforceStrictSafeResult(originalText, parsed, detector) {
+async function enforceStrictSafeResult(originalText, parsed, detector, options = {}) {
   const detectorDetections = await detector.detect(originalText);
   const oriented = fixSessionMapOrientation(
     originalText,
@@ -231,25 +374,26 @@ async function enforceStrictSafeResult(originalText, parsed, detector) {
   const modelMap = removeInvalidSessionMapEntries(originalText, oriented);
   const modelDetections = sessionMapToDetections(originalText, modelMap, detectorDetections);
   const combined = mergeDetections([...detectorDetections, ...modelDetections]);
-  const plan = buildStrictRedactionPlan(originalText, combined);
-
-  return {
-    safe_prompt: plan.apply(),
-    session_map: { ...plan.sessionMap }
-  };
+  const plan = buildStrictRedactionPlan(originalText, combined, options);
+  return strictPlanToSafeResult(originalText, plan);
 }
 
-function buildStrictRedactionPlan(originalText, detections) {
+function buildStrictRedactionPlan(originalText, detections, options = {}) {
   const plan = new RedactionPlan(originalText);
   const typeCounts = {};
   const reusableDummies = new Map();
 
   for (const detection of detections) {
-    if (!shouldRedactStrict(detection, originalText)) continue;
+    if (!shouldRedactStrict(detection, originalText, options)) continue;
     if (plan.replacements.some(current => rangesOverlap(current, detection))) continue;
 
     const type = normalizeReplacementType(detection.type);
-    const valueKey = `${type}\0${detection.value}`;
+    const originalValue = originalText.slice(detection.start, detection.end);
+    // A session map is a global original -> placeholder contract. Reusing one
+    // placeholder per case-insensitive original guarantees that applying the
+    // returned map reconstructs the exact strict output, even when different
+    // detectors assign different types to separate occurrences.
+    const valueKey = originalValue.toLocaleLowerCase("en-US");
     let dummy = reusableDummies.get(valueKey);
     if (!dummy) {
       typeCounts[type] = (typeCounts[type] || 0) + 1;
@@ -260,7 +404,7 @@ function buildStrictRedactionPlan(originalText, detections) {
     plan.addReplacement(
       detection.start,
       detection.end,
-      originalText.slice(detection.start, detection.end),
+      originalValue,
       dummy,
       type,
       detection.source || "strict"
@@ -270,9 +414,54 @@ function buildStrictRedactionPlan(originalText, detections) {
   return plan;
 }
 
-function shouldRedactStrict(detection, text) {
+function strictPlanToSafeResult(originalText, plan) {
+  const sessionMap = canonicalSessionMap(plan.sessionMap);
+  return {
+    safe_prompt: sanitizeKnownText(originalText, sessionMap),
+    session_map: sessionMap
+  };
+}
+
+function strictPlanToResult(originalText, plan, privacySource) {
+  const safe = strictPlanToSafeResult(originalText, plan);
+  return {
+    originalText,
+    sanitizedText: safe.safe_prompt,
+    sessionMap: safe.session_map,
+    detections: plan.replacements.map(replacement => ({
+      type: replacement.type,
+      value: replacement.original,
+      start: replacement.start,
+      end: replacement.end,
+      confidence: 1,
+      source: replacement.reason || privacySource,
+      replacement: replacement.replacement
+    })),
+    privacySource
+  };
+}
+
+function canonicalSessionMap(sessionMap) {
+  const canonical = {};
+  const seenOriginals = new Set();
+  for (const [placeholder, original] of Object.entries(sessionMap || {})) {
+    const key = String(original).toLocaleLowerCase("en-US");
+    if (!original || seenOriginals.has(key)) continue;
+    seenOriginals.add(key);
+    canonical[placeholder] = original;
+  }
+  return canonical;
+}
+
+function shouldRedactStrict(detection, text, options = {}) {
   if (STRICT_ALWAYS_SENSITIVE_TYPES.has(detection.type)) return true;
-  if (STRICT_IDENTITY_TYPES.has(detection.type)) return detection.confidence >= 0.65;
+  if (STRICT_IDENTITY_TYPES.has(detection.type)) {
+    const threshold = Number(options.identityConfidenceThreshold ?? 0.65);
+    if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1) {
+      throw new TypeError("identityConfidenceThreshold must be between 0 and 1.");
+    }
+    return detection.confidence >= threshold;
+  }
   return shouldRedact(detection, { text });
 }
 
@@ -496,16 +685,12 @@ function findDummyForOriginal(sessionMap, original) {
 }
 
 function createUniqueDummy(type, index, sourceText, sessionMap) {
-  let dummy = generateDummy(type, index);
-  let slot = index;
   const lowerSource = sourceText.toLowerCase();
-
-  while (lowerSource.includes(dummy.toLowerCase()) || Object.hasOwn(sessionMap, dummy)) {
-    slot += 1;
-    dummy = generateDummy(type, slot);
-  }
-
-  return dummy;
+  return allocateUniqueDummy(
+    type,
+    index,
+    dummy => lowerSource.includes(dummy.toLowerCase()) || Object.hasOwn(sessionMap, dummy)
+  );
 }
 
 function isVagueStandIn(value) {
@@ -685,6 +870,20 @@ function lineBreakSignature(text) {
 
 function rangesOverlap(a, b) {
   return a.start < b.end && b.start < a.end;
+}
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  throw abortReason(signal);
+}
+
+function abortReason(signal, fallback) {
+  if (signal?.reason instanceof Error) return signal.reason;
+  if (fallback instanceof Error) return fallback;
+  const error = new Error("PrivacyAI sanitizer request was cancelled.");
+  error.name = "AbortError";
+  error.code = "PRIVACYAI_REQUEST_ABORTED";
+  return error;
 }
 
 function escapeRegExp(value) {

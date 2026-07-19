@@ -1,368 +1,314 @@
 # PrivacyAI native Claude Code, Codex, and Antigravity wrapper
 
-Status: P0 context-boundary hardening implemented on July 12, 2026.
+Status: Codex provider gateway and AGY selective transport implementation stacked
+on the P0 context-boundary branch, July 2026.
 
-The wrapper keeps each official CLI, account, subscription, provider route, and
-terminal UI. It does not treat all native hook APIs as equally capable. Claude
-Code uses the supported result gateway; Codex and AGY default to prompt-only
-isolation because their currently exposed result boundaries cannot safely cover
-every failure and implicit-context path.
+## Product invariant
 
-## Security decision
+> No supported model-visible text, JSON, or inline image crosses a remote
+> provider boundary before local privacy classification. Values are restored
+> only on the local side of that boundary. Unknown transports and unsupported
+> content fail closed.
 
-The previous implementation was prompt-rooted:
-
-```text
-prompt contains secret
-        ↓
-create placeholder map
-        ↓
-restore before tool
-        ↓
-replace only values already in map
-```
-
-That misses secrets first discovered in files, APIs, errors, resources, and
-startup instructions. P0 changes the root invariant to:
-
-> No supported byte becomes model-visible until it has crossed a local context
-> privacy boundary. A host path without a trustworthy boundary is isolated or
-> blocked, not described as protected.
+The official agent binaries remain installed and controlled by the user. The
+integration boundary differs by host because each host exposes different native
+capabilities.
 
 ## Enforced modes
 
-| Native host | Startup boundary | Prompt boundary | Tool boundary |
-| --- | --- | --- | --- |
-| Claude Code | Credential-only config home; strict empty MCP config; project instructions/skills/commands/agents/plugins scanned locally | Block original and reinject placeholders | Supported success results are classified atomically; new values extend the map; unsafe failure/batch results stop the turn |
-| Codex | Credential-only `CODEX_HOME`; tool features disabled; `debug prompt-input` captured, classified, and canary-checked | Block original and reinject placeholders | Every `PreToolUse` is denied in production prompt-only mode |
-| AGY / Antigravity | Fresh one-shot only; scoped temporary global hook | Prompt sanitized before process launch | Every scoped tool call is denied, even when the prompt map is empty |
+| Host | Default mode | What remains available |
+| --- | --- | --- |
+| Claude Code | Prompt/startup isolation and supported lifecycle hooks | Supported native file, terminal, and tool paths. |
+| Codex | Stock Codex through a bidirectional localhost Responses gateway | Normal account, model, `CODEX_HOME`, history, skills, plugins, user MCPs, filesystem, shell, patch, Git, resume, fork, exec, and review. |
+| Codex strict fallback | Credential-only temporary home and hook denial | Prompt-only reasoning; tool-capable paths denied. |
+| AGY | Stock AGY through a process-scoped selective HTTPS boundary | Normal account, model, files, terminal, browser, MCPs, and native tools for supported text/JSON turns plus inline PNG, JPEG, and WebP images in prompts and function responses. |
 
-## Components
-
-### `@privacy-ai/agent-tui`
-
-The user-facing executable:
+## Codex architecture
 
 ```text
-privacyai onboard
-privacyai doctor
-privacyai claude [safe native arguments]
-privacyai codex [safe native arguments]
-privacyai agy --print "fresh one-shot prompt"
+┌────────────────────────────────────────────────────────────┐
+│ User's installed stock Codex                              │
+│ normal CODEX_HOME · account · model · tools · MCPs         │
+└──────────────────────┬─────────────────────────────────────┘
+                       │ OpenAI Responses HTTP
+                       ▼
+┌────────────────────────────────────────────────────────────┐
+│ PrivacyAI provider gateway                                 │
+│ 127.0.0.1 · random port · random path nonce                │
+│                                                            │
+│ OUTBOUND                                                   │
+│  • parse and validate request schema                       │
+│  • extract model-visible fields                            │
+│  • classify uncached values with local model               │
+│  • assign stable thread mappings                           │
+│  • assert no protected original remains                    │
+│                                                            │
+│ INBOUND                                                    │
+│  • parse SSE/JSON as protocol                              │
+│  • restore text deltas safely across chunks                │
+│  • restore completed tool arguments structurally           │
+└──────────────────────┬─────────────────────────────────────┘
+                       │ one authenticated upstream request
+                       ▼
+┌────────────────────────────────────────────────────────────┐
+│ OpenAI Codex backend                                       │
+└────────────────────────────────────────────────────────────┘
 ```
 
-### `@privacy-ai/agent-bridge`
+The gateway does not call a second OpenAI model. It changes the existing request
+locally and streams the existing response back. OpenAI account activity and
+usage remain normal Codex activity; only placeholder tokenization may change the
+exact input-token count slightly.
 
-The implementation package now contains:
+### Provider configuration
 
-- loopback-local sanitizer configuration and health checks;
-- prompt blocking and one-time PTY reinjection;
-- a structured context gateway for model-visible results;
-- stable placeholder rebasing, complete SDK-dummy recognition, and shielding;
-- transactional per-session vault updates with owner identity;
-- native hook generation and Codex hook trust discovery;
-- credential-only runtime-home isolation;
-- Codex model-visible startup capture and canary verification;
-- Claude static startup-context collection and classification;
-- strict native argument/context-ingress guards;
-- AGY process scoping and serialized hook installation.
+PrivacyAI injects temporary command-line configuration equivalent to:
 
-## Prompt flow
+```toml
+model_provider = "privacyai"
+
+[model_providers.privacyai]
+name = "OpenAI through PrivacyAI"
+base_url = "http://127.0.0.1:<port>/<nonce>"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+```
+
+It does not rewrite the user's configuration file or copy the normal Codex home.
+Security-critical provider/base-URL/WebSocket/compression overrides are reserved
+by the wrapper. Ordinary model, sandbox, approval, directory, resume, fork,
+exec, review, and local-feature arguments remain usable.
+
+### Supported paths
+
+The gateway currently accepts only:
 
 ```text
-┌──────────────────────┐
-│ Native CLI composer  │
-└──────────┬───────────┘
-           │ raw prompt
-           ▼
-┌──────────────────────┐
-│ UserPromptSubmit     │
-│ local hook           │
-└──────────┬───────────┘
-           │
-           ├─ reject native @file expansion
-           ├─ reject native shell escape
-           ├─ reject context-loading slash command
-           └─ call loopback-local privacy model
-           │
-           ▼
-┌──────────────────────┐
-│ Safe prompt + map    │
-└──────────┬───────────┘
-           │ original submit blocked
-           ▼
-┌──────────────────────┐
-│ Transparent PTY      │
-│ one-time reinjection │
-└──────────┬───────────┘
-           ▼
-┌──────────────────────┐
-│ Official CLI/provider│
-└──────────────────────┘
+GET  /<nonce>/health
+GET  /<nonce>/models
+POST /<nonce>/responses
+POST /<nonce>/responses/compact
 ```
 
-The PTY bracket-pastes the safe prompt and sends Enter separately. A hashed,
-short-lived allowance lets exactly that reinjected prompt pass the hook once.
+The production upstream destination is selected internally between the ChatGPT
+Codex backend and the OpenAI API according to the authentication headers emitted
+by stock Codex. A client-supplied upstream is never honored.
 
-### Native prompt ingress that fails closed
+### Outbound transformation
 
-The prompt hook blocks paths whose contents are expanded only after the hook:
+The request transformer validates top-level fields and known Responses item
+shapes. It protects:
 
-- `/review` and other non-allowlisted slash commands;
-- `@README.md`, `@src/file.ts`, and similar file/context mentions;
-- native `!command` shell escapes.
+- instructions and user/developer text;
+- assistant and reasoning text already in history;
+- native shell, patch, and function-call arguments;
+- command, MCP, and dynamic-tool results represented in Responses input;
+- tool descriptions and schemas;
+- user-defined JSON Schema property, definition, pattern, and dependency keys;
+- corresponding `required`, `$ref`, enum, default, and example strings;
+- output schemas;
+- compaction input and error text.
 
-Only a small allowlist of non-contextual UI commands, such as `/help`, `/model`,
-`/status`, and `/theme`, bypasses classification.
+The transformer preserves model names, response IDs, call IDs, and reserved
+protocol/JSON Schema keys. It strips unknown client metadata and hashes the
+prompt-cache key into a stable PrivacyAI identifier.
 
-## Structured context gateway
+Function-call arguments are parsed as JSON before classification. This ensures a
+private value containing quotes, line breaks, backslashes, or Unicode is restored
+as valid JSON rather than replaced in an encoded string.
 
-For replaceable result events, PrivacyAI does not sanitize each JSON leaf in
-isolation. It serializes the complete value once:
+### Inbound restoration
+
+Network chunks do not align with Unicode, SSE events, placeholders, or JSON
+values. The response path therefore uses:
+
+1. `StringDecoder` for UTF-8 boundaries.
+2. An SSE frame parser supporting LF and CRLF framing.
+3. A bounded placeholder-prefix buffer for text deltas.
+4. Atomic JSON restoration for completed function calls.
+
+Raw `response.function_call_arguments.delta` events are withheld. Arbitrary
+replacement in a partial JSON string can invalidate escapes. Codex receives the
+restored authoritative `response.output_item.done` event instead.
+
+### Sessions, forks, and subagents
+
+Each request must carry a stable Codex thread or session identifier in allowlisted
+body metadata or the native `x-codex-turn-metadata` header. Missing identity fails
+closed instead of sharing a gateway-wide fallback map. Mappings are persisted
+through the existing hashed, permission-restricted session vault. Parent/fork
+mappings may be inherited only when:
+
+- the same placeholder maps to the same original; and
+- the same original maps to the same placeholder.
+
+Any ambiguity blocks the request before upstream transmission.
+
+A bounded in-memory cache fronts a persistent SQLite verification ledger. Each
+entry is addressed by the content hash, artifact type, and a policy fingerprint
+covering the sanitizer model and prompt. The ledger survives gateway restarts,
+so resumed threads do not reclassify unchanged history, instructions, tool
+definitions, schemas, or tool outputs. Session-map growth alone does not invalidate
+clean entries; content or policy changes do. Parent/fork threads can reuse the
+same content-addressed records while retaining collision checks on private maps.
+
+Strict classification is detection-oriented: the local model returns exact
+bounded private spans, and the SDK reconstructs the complete structured value.
+Large model-visible strings are divided into overlapping, deterministic chunks,
+then merged through exact-substring mappings. This bounds local-model context
+without truncating the text sent to Codex's real model.
+
+### Disabled provider-hosted paths
+
+The following are intentionally disabled in gateway mode until their complete
+provider traffic and local restoration boundary are supported:
+
+- Responses WebSockets and realtime conversation;
+- provider-hosted web search;
+- OpenAI apps/connectors;
+- in-app browser and computer use;
+- image generation and direct media inputs;
+- remote plugins;
+- remote Codex/app-server clients and alternate model providers.
+
+User-configured local MCP servers are not disabled. Their model-visible text
+returns through the protected Responses request. Local MCPs, plugins, skills,
+and hooks remain trusted local code and can make independent network requests;
+the provider gateway is not an outbound firewall for extension processes.
+
+## Codex strict fallback
+
+```bash
+privacyai codex --privacy-strict
+```
+
+Strict mode retains the earlier P0 behavior:
+
+- temporary credential-only `CODEX_HOME`;
+- skills, plugins, MCP configuration, history, and implicit context omitted;
+- prompt startup input audited through Codex's serializer;
+- tool-capable features disabled;
+- every Codex `PreToolUse` denied.
+
+It is intended for unsupported Codex versions or deployments that require the
+smallest possible provider-facing surface.
+
+## Claude Code
+
+Claude Code continues to use a transparent PTY, prompt hook, credential-only
+configuration home, startup-context audit, and supported lifecycle hooks.
+Placeholder arguments are restored before local execution. Successful structured
+results are atomically classified and replaced before another model turn. A
+private failure/batch path without a shape-preserving replacement stops.
+
+## Antigravity
+
+`privacyai agy` now keeps the installed stock AGY runtime and its normal account,
+model, files, terminal, browser, MCPs, and native tool execution. PrivacyAI adds
+an ephemeral process-only CA plus an authenticated loopback CONNECT proxy.
+Connections to unrelated hosts are tunneled unchanged. On the current AGY model
+host, only explicitly audited non-generation routes remain opaque; the supported
+`streamGenerateContent` route is validated and transformed, and unknown routes
+fail closed.
 
 ```text
-{
-  "secret-as-a-key": "secret in a value",
-  "nested": ["same secret"]
-}
-        ↓
-known originals replaced
-        ↓
-existing placeholders shielded
-        ↓
-whole JSON document classified locally
-        ↓
-new mappings rebased against session state
-        ↓
-protected-original assertion
-        ↓
-JSON parsed back to original structure
+stock AGY
+  -> native local tool work
+  -> complete supported model request
+  -> local bounded classification + persistent verification cache
+  -> complete sanitized model request
+  -> streamed response restoration
+  -> stock AGY executes the native tool call
 ```
 
-This protects object keys and keeps one newly discovered value mapped to one
-stable placeholder throughout a result. It also avoids rotating existing fake
-emails or other placeholder values when the local classifier sees them again.
+Private function names receive deterministic aliases that remain valid under the
+provider's function-name grammar and are restored locally before execution. The
+local classifier window does not reduce the remote model context: oversized
+artifacts are inspected in bounded chunks and rebuilt before forwarding.
 
-Object keys are transformed alongside values. Prototype-like names remain
-ordinary data properties, and two keys that collapse to the same restored name
-block the tool call rather than overwrite one another.
+Supported inline PNG, JPEG, and WebP images in prompts and function responses are
+sanitized locally. Remote `fileData`, malformed images, unsupported media types,
+model route or schema drift, compressed model-generation payloads, Windows, and
+environments that already require an HTTP/SOCKS proxy fail closed. The previous
+prompt-only boundary is retained explicitly as:
 
-The gateway fails closed if:
+```bash
+privacyai agy --privacy-strict --print "fresh one-shot prompt"
+```
 
-- the sanitizer does not return text;
-- the sanitized document is no longer valid JSON;
-- a protected original remains;
-- the result is too large for one atomic classification pass;
-- a new map cannot be persisted;
-- a private failure result has no safe replacement field.
+## Reusable SDK v0.0.2 layer
 
-### Claude tool lifecycle
-
-Claude Code retains the gateway mode because it exposes structured successful
-result replacement. The lifecycle is:
+Generic privacy mechanics live in `@privacy-ai/sdk`:
 
 ```text
-placeholder arguments
-        ↓
-PreToolUse restores local originals
-        ↓
-tool executes
-        ↓
-PostToolUse classifies the complete result
-        ↓
-newly discovered values merge transactionally
-        ↓
-updatedToolOutput returns only placeholders
+session-map normalization
+collision-safe placeholder rebasing
+known-value replacement
+recursive object-key/value restoration
+atomic structured sanitization
+provider-bound leak assertion
+unresolved-placeholder detection
+chunk-safe streaming restoration
 ```
 
-For failed or batched paths, PrivacyAI scans only model-visible result fields;
-restored local `tool_input`, `input`, and `arguments` fields are excluded. When
-private data is detected and the host offers no shape-preserving replacement,
-the turn is stopped before another model request.
+The agent bridge owns only host-specific launch, HTTP, Responses, SSE, session
+routing, and policy logic.
 
-### Codex tool lifecycle
+## Transport hardening
 
-Codex's native APIs can expose a successful post-tool hook, but current failed,
-cancelled, deferred/polling, and some control-channel paths do not provide the
-same reliable replacement boundary. Therefore production mode is deliberately
-stricter:
+The Codex gateway:
 
-```text
-any Codex PreToolUse event
-        ↓
-PrivacyAI deny
-```
+- binds literal IPv4 loopback only;
+- uses a random 24-byte route nonce;
+- rejects WebSocket upgrades;
+- requires JSON and uncompressed requests;
+- requires identity-encoded upstream responses;
+- strips hop-by-hop and forwarding headers;
+- forwards authorization only in memory and never logs it;
+- bounds request, response, cache, and session counts;
+- does not independently retry;
+- preserves upstream status codes and retry headers;
+- rejects malformed JSON/SSE, unknown request fields/items, unsupported media,
+  non-text output, and schema-key collisions;
+- returns generic local errors that do not contain protected values.
 
-The launcher also disables apps, plugins, browser/computer use, image generation,
-multi-agent/code modes, shell/unified execution, remote plugins, workspace
-dependencies, and MCP elicitation features. The hook denial remains the final
-defense if a native tool is still surfaced.
+## Test evidence
 
-The reusable gateway code still supports Codex-shaped result tests so a future
-upstream replacement boundary can adopt it without redesigning session state.
+The automated suite covers:
 
-### AGY tool lifecycle
+- every placeholder split point and one-character streaming chunks;
+- shared-prefix placeholders and partial-prefix flushes;
+- Unicode network fragmentation;
+- object-key and JSON Schema-key restoration/collisions;
+- quote/newline/backslash-safe function arguments;
+- malformed and incomplete JSON/SSE;
+- compressed, oversized, binary, and unknown requests/responses;
+- wrong nonces and unsupported routes;
+- exact `401`/`429`/`500` passthrough with no proxy retry;
+- repeated-history classification caching;
+- parent/fork inheritance and conflict rejection;
+- launcher cleanup on success and failure;
+- explicit strict-mode selection;
+- a real installed stock-Codex native command loop against a mock Responses
+  backend.
 
-AGY can deny a tool but cannot rewrite tool arguments or outputs. The earlier
-behavior allowed tools when a clean prompt created no session map; that was
-unsafe because the tool itself could discover the first secret. P0 removes that
-exception. Every scoped tool call is denied for every protected AGY launch. The
-scope token exists only in the child environment and private session-map file;
-it is never persisted in the global hook command, and the installed hook file is
-forced to `0600` until exact cleanup restores its previous bytes and mode.
-
-## Startup-context boundary
-
-### Codex exact model-input preflight
-
-Every protected Codex launch gets a new temporary `CODEX_HOME`. Only regular,
-non-symlink credential files are copied with mode `0600`; global `AGENTS.md`,
-config, memories, skills, plugins, MCP definitions, caches, and histories are
-not copied.
-
-Before opening the TUI, PrivacyAI asks the installed Codex binary to serialize
-its own model-visible startup input with:
-
-```text
-codex ...privacy flags... debug prompt-input [LOCAL_CANARY_PLACEHOLDER]
-```
-
-The captured JSON is bounded in size, parsed, and classified locally. PrivacyAI
-asserts that:
-
-1. the placeholder appears in the capture, proving the capture contains the
-   supplied user item;
-2. its locally held original canary does not appear, proving no boundary restored
-   it before model input;
-3. no high-risk private values are already present in the implicit startup
-   context.
-
-No captured raw context is printed in diagnostics. A timeout, nonzero exit,
-invalid JSON, missing placeholder, excessive output, canary leak, or high-risk
-detection blocks launch.
-
-This is the final **model-visible startup serialization** exposed by Codex. It is
-not a packet capture of the encrypted transport and cannot assert every later
-HTTP request. A complete final-request gateway requires an upstream hook,
-maintained Codex patch, or local provider proxy.
-
-### Claude static preflight
-
-Claude Code does not expose an equivalent startup serializer. PrivacyAI instead:
-
-- creates a temporary credential-only `CLAUDE_CONFIG_DIR`;
-- limits settings sources to the isolated user source;
-- passes an explicit empty MCP config with strict MCP mode;
-- disables slash commands, attachments, CLAUDE.md loading, auto-memory, bundled
-  skills, background tasks/agent view, Claude.ai MCP connectors, prompt-history
-  persistence, and sensitive telemetry payload fields;
-- scrubs provider credentials from Claude-spawned subprocess environments;
-- scans project `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, settings,
-  `.mcp.json`, and files under `.claude/skills`, `commands`, `agents`, and
-  `plugins` from the working directory to the Git root.
-
-The scan is bounded by file count and aggregate size. Symlinks are not followed.
-Any high-risk private detection or unclassifiably large context blocks startup.
-
-## Session vault and concurrency
-
-Session IDs are hashed before becoming filenames. Records and temporary files
-use `0600`; directories use `0700`; writes use atomic rename. Lock records carry
-a random ownership token and, on Linux, the process start identity so recycled
-PIDs are not mistaken for the original owner.
-
-P0 adds a per-session transaction lock:
-
-```text
-acquire exclusive .lock
-        ↓
-load current map
-        ↓
-rebase/merge additions
-        ↓
-atomic save
-        ↓
-release lock
-```
-
-A bounded retry loop handles contention. Dead or recycled-PID locks are removed
-only when the observed ownership record is unchanged; active owners are never
-expired merely because time passed. Parallel prompt/tool writers can no longer
-silently overwrite each other's additions or delete a replacement lock.
-
-The vault is still plaintext under local filesystem permissions; encryption or
-OS-keyring storage remains separate hardening work.
-
-## Fresh-session and argument guards
-
-### Codex rejects
-
-- resume and fork;
-- exec/review/app-server/mcp-server modes;
-- images, search, extra directories, and profiles;
-- arbitrary config overrides;
-- attempts to enable any feature except required hooks;
-- hook disabling and dangerous trust/approval bypasses.
-
-### Claude rejects
-
-- resume/continue/fork and print/replay/session reuse;
-- custom settings, setting sources, MCP config, plugins, agents, tools, or system
-  prompts;
-- browser/IDE context and permission bypass;
-- hook-disabling modes and environments.
-
-### AGY rejects
-
-- interactive prompt mode;
-- continuation, resume, or conversation reuse;
-- permission bypass;
-- missing one-shot prompt.
-
-## Tests and verification
-
-The bridge suite covers:
-
-- raw-prompt blocking and one-time reinjection;
-- no-op sanitizer results that still contain current- or prior-turn originals;
-- cross-turn placeholder collision rebasing;
-- known and newly discovered secrets in nested values and object keys;
-- stable placeholder shielding;
-- success, failure, cancellation-style, and batch events;
-- malformed sanitized JSON and oversized result rejection;
-- parallel session-map writers;
-- executable-level Codex denial and Claude restoration/sanitization;
-- AGY empty-map tool denial;
-- credential-only homes and private file modes;
-- Codex startup capture, missing/leaking canary, and implicit-context detection;
-- Claude instruction/skill scanning;
-- blocked slash, `@file`, and shell ingress;
-- installed Codex strict-feature startup capture and hook discovery.
-
-The installed Codex 0.144.1 binary was exercised in this branch with the strict
-feature set. Its startup serializer returned five model-input items, the local
-canary remained absent in original form, and hook discovery returned
-`userPromptSubmit`, `preToolUse`, and `postToolUse` from session flags.
-
-Optional integration tests remain available for Ollama, LM Studio, and an
-installed Claude Code mock-provider/MCP lifecycle.
+The stock-Codex integration uses a dummy API key and fake private value. Codex
+executes its native command tool, writes the restored value locally, sends the
+native result into its next model request, and every captured upstream request
+contains placeholders only.
 
 ## Remaining boundary
 
-This P0 hardening does not claim universal provider-request interception.
-Remaining work includes:
+The current guarantee covers supported textual/JSON Responses traffic. It does
+not cover images, uploaded files, audio, provider-hosted search/apps/browser
+results, realtime media, encrypted/derived secrets, or unknown future transports.
+Those paths are disabled or rejected.
 
-- exact final serialized request capture for every turn;
-- images, PDFs, screenshots, audio/video, OCR, and attachment metadata;
-- encoded, fragmented, normalized, compressed, encrypted, or derived secrets;
-- subagent state propagation and safe compaction/resume semantics;
-- future host-added implicit context types not represented by current preflights;
-- encrypted vault storage and local transcript/debug/crash-log scrubbing;
-- message-aware restoration of placeholders in assistant prose.
+Restored values may exist in local files, terminal output, Codex history, crash
+reports, and application logs. PrivacyAI protects the remote provider boundary;
+it is not a local data-erasure system. Session records are protected with local
+filesystem permissions and atomic locking but are not yet encrypted at rest.
 
-Local native transcripts and execution panels can still contain restored tool
-arguments on hosts where tools are allowed. The privacy guarantee targets what
-crosses a supported provider-facing boundary, not erasure of all local state.
-
-Windows remains unsupported until a ConPTY backend can preserve the same
-fail-closed lifecycle.
+Current platform support is Linux and macOS. Windows remains blocked until an
+equivalent fully tested implementation is available.

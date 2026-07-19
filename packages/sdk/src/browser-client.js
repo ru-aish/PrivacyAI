@@ -2,6 +2,11 @@ import { OpenAICompatibleProvider } from "./providers/openai-compatible.js";
 import { OllamaProvider } from "./providers/ollama.js";
 import { PrivacySanitizer } from "./sanitizer.js";
 import { ContextCompactor } from "./context-compactor.js";
+import {
+  DEFAULT_CLASSIFIER_CONCURRENCY,
+  DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
+  DEFAULT_OLLAMA_KEEP_ALIVE
+} from "./local-model-policy.js";
 
 const DEFAULT_CONFIG = {
   apiKey: "not-required",
@@ -9,7 +14,9 @@ const DEFAULT_CONFIG = {
   model: "qwen3.5:2b",
   provider: "openai-compatible",
   timeoutMs: 60000,
-  numCtx: 4096,
+  numCtx: DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
+  classifierConcurrency: DEFAULT_CLASSIFIER_CONCURRENCY,
+  keepAlive: DEFAULT_OLLAMA_KEEP_ALIVE,
   localDetectorEnabled: false,
   sanitizationMode: "browser"
 };

@@ -1,7 +1,8 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { once } from "node:events";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -9,24 +10,29 @@ import { fileURLToPath } from "node:url";
 
 import {
   DEFAULT_PRIVACY_MODEL,
+  MemoryContextVerificationStore,
   SessionVault,
   assertLocalPrivacyEndpoint,
   assertNoProtectedOriginals,
   auditClaudeStartupContext,
   auditCodexStartupContext,
+  auditCodexStaticStartupContext,
   buildCodexHookDeclarationArgs,
   captureCodexPromptInput,
   buildCodexIsolationArgs,
   buildModelChoices,
   codexEffectiveCwd,
   consumeAllowance,
+  discoverCodexHookTrust,
   listDownloadedLanguageModels,
   listLmStudioLanguageModels,
   loadPrivacyConfig,
   prepareAgentRuntimeIsolation,
   processPromptSubmission,
   rebaseSessionAdditions,
+  resolveCodexCaptureTimeoutMs,
   runOnboarding,
+  sanitizeCodexRequestBody,
   validateNativeArguments,
   validateNativeEnvironment,
   writeClaudeSettings
@@ -35,7 +41,7 @@ import {
 const PTY_HELPER = fileURLToPath(new URL("../bin/privacyai-pty.py", import.meta.url));
 
 test("prompt submission blocks raw text, stores the map, and allows only the reinjected prompt", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-prompt-flow-"));
+  const root = await createTestTempDir("privacyai-prompt-flow-");
   const runtimeDir = join(root, "runtime");
   const vault = new SessionVault({ baseDir: join(root, "vault") });
   await mkdir(runtimeDir, { mode: 0o700 });
@@ -94,7 +100,7 @@ test("prompt submission blocks raw text, stores the map, and allows only the rei
 });
 
 test("clean prompts do not create empty session-vault records", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-clean-prompt-"));
+  const root = await createTestTempDir("privacyai-clean-prompt-");
   const runtimeDir = join(root, "runtime");
   const vault = new SessionVault({ baseDir: join(root, "vault") });
   await mkdir(runtimeDir, { mode: 0o700 });
@@ -117,7 +123,7 @@ test("clean prompts do not create empty session-vault records", async () => {
 });
 
 test("prompt flow fails closed when a sanitizer mapping leaves its original in provider text", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-prompt-leak-"));
+  const root = await createTestTempDir("privacyai-prompt-leak-");
   const runtimeDir = join(root, "runtime");
   const vault = new SessionVault({ baseDir: join(root, "vault") });
   await mkdir(runtimeDir, { mode: 0o700 });
@@ -148,7 +154,7 @@ test("prompt flow fails closed when a sanitizer mapping leaves its original in p
 });
 
 test("known values from earlier turns cannot pass through a later no-op sanitizer result", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-known-prompt-leak-"));
+  const root = await createTestTempDir("privacyai-known-prompt-leak-");
   const runtimeDir = join(root, "runtime");
   const vault = new SessionVault({ baseDir: join(root, "vault") });
   await mkdir(runtimeDir, { mode: 0o700 });
@@ -199,19 +205,40 @@ test("remote sanitizer endpoints are rejected unless explicitly allowed", () => 
   );
 });
 
-test("argument guards reject flags that can replace privacy hooks", () => {
+test("argument guards preserve normal Codex workflows while blocking provider bypasses", () => {
   assert.throws(() => validateNativeArguments("claude", ["--settings", "other.json"]), /privacy hooks/);
   assert.throws(() => validateNativeArguments("claude", ["--bare"]), /disables privacy hooks/);
   assert.throws(() => validateNativeArguments("claude", ["--safe-mode"]), /disables privacy hooks/);
-  assert.throws(() => validateNativeArguments("codex", ["--disable", "hooks"]), /hooks disabled/);
-  assert.throws(() => validateNativeArguments("codex", ["-c", "hooks.UserPromptSubmit=[]"]), /reserves/);
-  assert.throws(() => validateNativeArguments("codex", ["resume", "--last"]), /fresh-session boundary/);
-  assert.throws(() => validateNativeArguments("codex", ["--enable", "shell_tool"]), /cannot enable/);
-  assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"]), /prompt-only isolation/);
-  assert.throws(() => validateNativeArguments("codex", ["-ip"]), /combined or attached Codex short options/);
-  assert.throws(() => validateNativeArguments("codex", ["-mresume"]), /combined or attached Codex short options/);
+
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["resume", "--last"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["fork", "--last"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["exec", "hello"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["review"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--add-dir", "../shared"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--enable", "shell_tool"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["-c", "model_reasoning_effort=\"high\""]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--model", "resume"]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--", "resume"]));
+
+  assert.throws(() => validateNativeArguments("codex", ["--remote", "unix:///tmp/server"]), /not protected by the local provider gateway/);
+  assert.throws(() => validateNativeArguments("codex", ["--search"]), /not protected/);
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--image", "private.png"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["-i", "private.png"]));
+  assert.throws(() => validateNativeArguments("codex", ["--profile", "unsafe"]), /not protected/);
+  assert.throws(() => validateNativeArguments("codex", ["-c", "model_provider=\"other\""]), /model-provider/);
+  assert.throws(() => validateNativeArguments("codex", ["--config", "openai_base_url=\"https://example.test\""]), /model-provider/);
+  assert.throws(() => validateNativeArguments("codex", ["--enable", "responses_websockets"]), /bypasses local restoration/);
+  assert.throws(() => validateNativeArguments("codex", ["-c", "features.apps=true"]), /provider-hosted/);
+  assert.throws(() => validateNativeArguments("codex", ["-ip"]), /combined or attached Codex short options/);
+  assert.throws(() => validateNativeArguments("codex", ["-mresume"]), /combined or attached Codex short options/);
+
+  const strict = { codexMode: "strict" };
+  assert.throws(() => validateNativeArguments("codex", ["--disable", "hooks"], strict), /hooks disabled/);
+  assert.throws(() => validateNativeArguments("codex", ["-c", "hooks.UserPromptSubmit=[]"], strict), /reserves/);
+  assert.throws(() => validateNativeArguments("codex", ["resume", "--last"], strict), /fresh-session boundary/);
+  assert.throws(() => validateNativeArguments("codex", ["--enable", "shell_tool"], strict), /cannot enable/);
+  assert.throws(() => validateNativeArguments("codex", ["--image", "private.png"], strict), /prompt-only isolation/);
+
   assert.throws(() => validateNativeArguments("claude", ["--resume", "session"]), /isolated startup context/);
   assert.throws(() => validateNativeArguments("claude", ["--plugin-dir", "plugin"]), /isolated startup context/);
   assert.throws(() => validateNativeArguments("claude", ["--plugin-url", "https://example.test/plugin.zip"]), /isolated startup context/);
@@ -244,8 +271,9 @@ test("Claude environment guards reject hook-disabling modes", () => {
   assert.doesNotThrow(() => validateNativeEnvironment("codex", { CLAUDE_CODE_SIMPLE: "1" }));
 });
 
-test("only non-contextual native slash commands bypass prompt sanitization", async () => {
-  const runtimeDir = await mkdtemp(join(tmpdir(), "privacyai-slash-"));
+test("only non-contextual native slash commands bypass prompt sanitization", async t => {
+  const runtimeDir = await createTestTempDir("privacyai-slash-");
+  t.after(() => rm(runtimeDir, { recursive: true, force: true }));
   const result = await processPromptSubmission(
     {
       hook_event_name: "UserPromptSubmit",
@@ -390,7 +418,7 @@ test("a downloaded LM Studio Ministral outranks an unavailable Ollama default", 
 });
 
 test("onboarding shows Ollama and LM Studio models in one numbered menu", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-multi-provider-"));
+  const root = await createTestTempDir("privacyai-onboard-multi-provider-");
   const configPath = join(root, "config.json");
   const output = new PassThrough();
   let text = "";
@@ -400,6 +428,7 @@ test("onboarding shows Ollama and LM Studio models in one numbered menu", async 
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "2",
     output,
@@ -439,11 +468,12 @@ test("onboarding shows Ollama and LM Studio models in one numbered menu", async 
 });
 
 test("LM Studio-only onboarding works when Ollama is not installed", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-lm-only-"));
+  const root = await createTestTempDir("privacyai-onboard-lm-only-");
   const configPath = join(root, "config.json");
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: null,
     ask: async () => "",
     output: new PassThrough(),
@@ -459,7 +489,7 @@ test("LM Studio-only onboarding works when Ollama is not installed", async () =>
 });
 
 test("onboarding recommends Ministral 3 3B and shows every downloaded language model", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-"));
+  const root = await createTestTempDir("privacyai-onboard-");
   const configPath = join(root, "config", "config.json");
   const output = new PassThrough();
   let text = "";
@@ -470,6 +500,7 @@ test("onboarding recommends Ministral 3 3B and shows every downloaded language m
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "",
     output,
@@ -498,7 +529,7 @@ test("onboarding recommends Ministral 3 3B and shows every downloaded language m
 });
 
 test("onboarding pulls the recommended Ministral model when it is not downloaded", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-default-pull-"));
+  const root = await createTestTempDir("privacyai-onboard-default-pull-");
   const configPath = join(root, "config.json");
   const output = new PassThrough();
   let text = "";
@@ -509,6 +540,7 @@ test("onboarding pulls the recommended Ministral model when it is not downloaded
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "",
     output,
@@ -527,12 +559,13 @@ test("onboarding pulls the recommended Ministral model when it is not downloaded
 });
 
 test("onboarding can select a downloaded model by number without pulling it", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-choice-"));
+  const root = await createTestTempDir("privacyai-onboard-choice-");
   const configPath = join(root, "config.json");
   const commands = [];
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "2",
     output: new PassThrough(),
@@ -550,12 +583,13 @@ test("onboarding can select a downloaded model by number without pulling it", as
 });
 
 test("onboarding pulls a model name that is not downloaded", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-onboard-custom-"));
+  const root = await createTestTempDir("privacyai-onboard-custom-");
   const configPath = join(root, "config.json");
   const commands = [];
 
   await runOnboarding({
     configPath,
+    skipHealthCheck: true,
     ollamaPath: "/test/ollama",
     ask: async () => "custom-private-model:latest",
     output: new PassThrough(),
@@ -573,7 +607,7 @@ test("onboarding pulls a model name that is not downloaded", async () => {
 
 
 test("runtime isolation copies only credential material into private agent homes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-runtime-isolation-"));
+  const root = await createTestTempDir("privacyai-runtime-isolation-");
   const runtimeDir = join(root, "runtime");
   const codexSource = join(root, "codex-source");
   const claudeSource = join(root, "claude-source");
@@ -616,7 +650,7 @@ test("runtime isolation copies only credential material into private agent homes
 });
 
 test("Codex startup capture drains UTF-8 output before parsing", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-codex-capture-"));
+  const root = await createTestTempDir("privacyai-codex-capture-");
   const fakeCodex = join(root, "fake-codex.js");
   await writeFile(
     fakeCodex,
@@ -647,6 +681,84 @@ test("Codex startup capture drains UTF-8 output before parsing", async () => {
   assert.deepEqual(result, [{ text: "€" }]);
 });
 
+test("Codex startup capture reports an incomplete platform package", async () => {
+  const root = await createTestTempDir("privacyai-codex-capture-broken-");
+  const fakeCodex = join(root, "fake-codex.js");
+  await writeFile(
+    fakeCodex,
+    [
+      "#!/usr/bin/env node",
+      "process.stderr.write('Error: Missing optional dependency @openai/codex-linux-x64.');",
+      "process.exit(1);"
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  await chmod(fakeCodex, 0o755);
+
+  await assert.rejects(
+    captureCodexPromptInput({
+      codexPath: fakeCodex,
+      args: [],
+      cwd: root,
+      env: process.env,
+      prompt: "ignored",
+      timeoutMs: 5000
+    }),
+    error =>
+      error?.code === "PRIVACYAI_CODEX_EXECUTABLE_BROKEN" &&
+      error.message.includes("npm install -g @openai/codex@latest") &&
+      !error.message.includes(root)
+  );
+});
+
+test("Codex startup capture timeout follows configured MCP startup budgets", async () => {
+  const root = await createTestTempDir("privacyai-codex-capture-timeout-");
+  const codexHome = join(root, "codex-home");
+  await mkdir(join(root, ".git"), { recursive: true });
+  await mkdir(codexHome, { recursive: true });
+  await writeFile(
+    join(codexHome, "config.toml"),
+    [
+      "[mcp_servers.fast]",
+      "command = \"fast\"",
+      "startup_timeout_sec = 15",
+      "",
+      "[mcp_servers.slow]",
+      "command = \"slow\"",
+      "startup_timeout_sec = 120",
+      "",
+      "[mcp_servers.slow.env]",
+      "PRIVATE_VALUE = \"ignored\""
+    ].join("\n")
+  );
+
+  assert.equal(
+    await resolveCodexCaptureTimeoutMs({
+      cwd: root,
+      env: { CODEX_HOME: codexHome }
+    }),
+    150000
+  );
+  assert.equal(
+    await resolveCodexCaptureTimeoutMs({
+      cwd: root,
+      env: {
+        CODEX_HOME: codexHome,
+        PRIVACYAI_STARTUP_AUDIT_TIMEOUT_MS: "4321"
+      }
+    }),
+    4321
+  );
+  assert.equal(
+    await resolveCodexCaptureTimeoutMs({
+      cwd: root,
+      env: { CODEX_HOME: codexHome },
+      timeoutMs: 1234
+    }),
+    1234
+  );
+});
+
 test("Codex startup audit captures serialized model input and verifies the local canary", async () => {
   const audit = await auditCodexStartupContext({
     codexPath: "/test/codex",
@@ -663,6 +775,66 @@ test("Codex startup audit captures serialized model input and verifies the local
   assert.equal(audit.itemCount, 2);
   assert.equal(audit.canaryPlaceholder, "[PRIVACYAI_PROVIDER_CANARY_TEST]");
   assert.equal(audit.serializedBytes > 0, true);
+});
+
+test("Codex startup audit ignores classifier false positives on synthetic canary shields", async () => {
+  let sawBoundaryToken = false;
+  const audit = await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    canaryOriginal: "raw-provider-canary-secret",
+    canaryPlaceholder: "[PRIVACYAI_PROVIDER_CANARY_TEST]",
+    capture: async ({ prompt }) => [{ prompt, instructions: "safe startup" }],
+    sanitizer: async text => {
+      const token = text.match(/__PRIVACYAI_BOUNDARY_\d+__/)?.[0];
+      if (!token) return { sanitizedPrompt: text, sessionMap: {} };
+      sawBoundaryToken = true;
+      return {
+        sanitizedPrompt: text.replaceAll(token, "[PRIVATE_VALUE_1]"),
+        sessionMap: { "[PRIVATE_VALUE_1]": token }
+      };
+    },
+    blockHighRisk: false
+  });
+
+  assert.equal(sawBoundaryToken, true);
+  assert.deepEqual(audit.sessionMapAdditions, {});
+});
+
+test("Codex startup audit reuses a verified static manifest across canary rotations", async () => {
+  const verificationStore = new MemoryContextVerificationStore();
+  let sanitizerCalls = 0;
+  const capture = async ({ prompt }) => [
+    { type: "message", role: "developer", content: [{ type: "input_text", text: "unchanged safe startup" }] },
+    { type: "message", role: "user", content: [{ type: "input_text", text: prompt }] }
+  ];
+  const sanitizer = async text => {
+    sanitizerCalls += 1;
+    return { sanitizedPrompt: text, sessionMap: {} };
+  };
+
+  await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    canaryPlaceholder: "[PRIVACYAI_PROVIDER_CANARY_FIRST]",
+    capture,
+    sanitizer,
+    verificationStore,
+    policyFingerprint: "startup-policy-v1"
+  });
+  await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    canaryPlaceholder: "[PRIVACYAI_PROVIDER_CANARY_SECOND]",
+    capture,
+    sanitizer: async () => {
+      throw new Error("unchanged startup context should use its trust manifest");
+    },
+    verificationStore,
+    policyFingerprint: "startup-policy-v1"
+  });
+
+  assert.equal(sanitizerCalls, 1);
 });
 
 test("Codex startup audit fails if the serialized provider input contains its raw canary", async () => {
@@ -695,7 +867,7 @@ test("Codex startup audit blocks high-risk values already present in implicit co
 });
 
 test("Claude startup audit scans project instructions, skills, commands, agents, and plugins", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-claude-startup-"));
+  const root = await createTestTempDir("privacyai-claude-startup-");
   await mkdir(join(root, ".git"), { recursive: true });
   await mkdir(join(root, ".claude", "skills", "private-skill"), { recursive: true });
   await writeFile(join(root, "CLAUDE.md"), "Safe project instructions\n");
@@ -716,6 +888,81 @@ test("Claude startup audit scans project instructions, skills, commands, agents,
   );
 });
 
+test("Claude startup audit reuses unchanged files without reads or sanitizer calls", async () => {
+  const root = await createTestTempDir("privacyai-claude-startup-cache-");
+  await mkdir(join(root, ".git"), { recursive: true });
+  const instructions = join(root, "CLAUDE.md");
+  await writeFile(instructions, "Safe project instructions\n");
+
+  const verificationStore = new MemoryContextVerificationStore();
+  let sanitizerCalls = 0;
+  const sanitizer = async text => {
+    sanitizerCalls += 1;
+    return { sanitizedPrompt: text, sessionMap: {} };
+  };
+  const options = {
+    cwd: root,
+    sanitizer,
+    verificationStore,
+    policyFingerprint: "sha256:claude-startup-cache-policy"
+  };
+
+  const cold = await auditClaudeStartupContext(options);
+  assert.equal(cold.counters.reads, 1);
+  assert.equal(cold.counters.sanitizerCalls, 1);
+  assert.equal(sanitizerCalls, 1);
+
+  const warm = await auditClaudeStartupContext(options);
+  assert.equal(warm.manifestHash, cold.manifestHash);
+  assert.equal(warm.counters.metadataHits, 1);
+  assert.equal(warm.counters.reads, 0);
+  assert.equal(warm.counters.sanitizerCalls, 0);
+  assert.equal(sanitizerCalls, 1);
+
+  await writeFile(instructions, "Changed safe project instructions\n");
+  const changed = await auditClaudeStartupContext(options);
+  assert.notEqual(changed.manifestHash, cold.manifestHash);
+  assert.equal(changed.counters.reads, 1);
+  assert.equal(changed.counters.sanitizerCalls, 1);
+  assert.equal(sanitizerCalls, 2);
+});
+
+test("startup directory traversal is bounded even when directories contain no files", async t => {
+  const root = await createTestTempDir("privacyai-startup-traversal-limit-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, ".git"), { recursive: true });
+  const claudeSkills = join(root, ".claude", "skills");
+  const codexSkills = join(root, ".codex", "skills");
+  await mkdir(claudeSkills, { recursive: true });
+  await mkdir(codexSkills, { recursive: true });
+  await Promise.all(Array.from({ length: 321 }, (_, index) => Promise.all([
+    mkdir(join(claudeSkills, "empty-" + index)),
+    mkdir(join(codexSkills, "empty-" + index))
+  ])));
+
+  await assert.rejects(
+    auditClaudeStartupContext({
+      cwd: root,
+      maxFiles: 10,
+      maxContextChars: 1024,
+      sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+    }),
+    error => error?.code === "PRIVACYAI_STARTUP_CONTEXT_TOO_LARGE"
+  );
+
+  await assert.rejects(
+    auditCodexStaticStartupContext({
+      cwd: root,
+      projectRoot: root,
+      codexHome: join(root, "codex-home"),
+      maxFiles: 10,
+      maxBytes: 1024,
+      staticSanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+    }),
+    error => error?.code === "PRIVACYAI_STARTUP_CONTEXT_TOO_LARGE"
+  );
+});
+
 test("provider-bound assertion never includes the protected value in diagnostics", () => {
   const secret = "do-not-print-this-provider-secret";
   assert.throws(
@@ -729,7 +976,7 @@ test("provider-bound assertion never includes the protected value in diagnostics
 });
 
 test("native hook declarations cover every built-in, app, plugin, and MCP tool", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-all-tool-hooks-"));
+  const root = await createTestTempDir("privacyai-all-tool-hooks-");
   const settingsPath = join(root, "claude-settings.json");
   const settings = await writeClaudeSettings(settingsPath, { nodePath: "/usr/bin/node" });
   assert.equal(settings.disableAllHooks, false);
@@ -747,10 +994,78 @@ test("native hook declarations cover every built-in, app, plugin, and MCP tool",
   assert.match(joined, /\^\.\*\$/);
   assert.doesNotMatch(joined, /\^Bash\$/);
   assert.equal(codexEffectiveCwd(["resume", "--last", "-C", "/tmp/project"]), "/tmp/project");
+  assert.equal(
+    codexEffectiveCwd(["exec", "--", "-C", "/tmp/not-the-wrapper-cwd"], "/tmp/original"),
+    "/tmp/original"
+  );
+});
+
+test("Codex hook trust validation bounds output and removes resistant process trees", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await createTestTempDir("privacyai-hook-probe-tree-");
+  const fakeCodex = join(root, "fake-hook-codex.js");
+  const childPidPath = join(root, "child.pid");
+  const response = {
+    id: 2,
+    result: {
+      data: [{
+        hooks: [
+          { source: "sessionFlags", key: "prompt", currentHash: "hash-1", eventName: "userPromptSubmit" },
+          { source: "sessionFlags", key: "pre", currentHash: "hash-2", eventName: "preToolUse" },
+          { source: "sessionFlags", key: "post", currentHash: "hash-3", eventName: "postToolUse" }
+        ]
+      }]
+    }
+  };
+  await writeFile(fakeCodex, [
+    "#!/usr/bin/env node",
+    "const { spawn } = require('node:child_process');",
+    "const { writeFileSync } = require('node:fs');",
+    "process.on('SIGTERM', () => {});",
+    `const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' });`,
+    "child.unref();",
+    `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+    `process.stdout.write(${JSON.stringify(JSON.stringify(response) + "\n")});`,
+    "setInterval(() => {}, 1000);"
+  ].join("\n"), { mode: 0o755 });
+  await chmod(fakeCodex, 0o755);
+
+  const result = await discoverCodexHookTrust({
+    codexPath: fakeCodex,
+    declarationArgs: [],
+    cwd: root,
+    env: process.env,
+    timeoutMs: 2000,
+    maxBytes: 4096
+  });
+  assert.equal(result.hooks.length, 3);
+  const childPid = Number(await readFile(childPidPath, "utf8"));
+  assert.equal(processExists(childPid), false);
+
+  const noisyCodex = join(root, "noisy-hook-codex.js");
+  await writeFile(noisyCodex, [
+    "#!/usr/bin/env node",
+    "process.on('SIGTERM', () => {});",
+    "process.stdout.write('x'.repeat(8192));",
+    "setInterval(() => {}, 1000);"
+  ].join("\n"), { mode: 0o755 });
+  await chmod(noisyCodex, 0o755);
+  await assert.rejects(
+    discoverCodexHookTrust({
+      codexPath: noisyCodex,
+      declarationArgs: [],
+      cwd: root,
+      env: process.env,
+      timeoutMs: 2000,
+      maxBytes: 1024
+    }),
+    /excessive output/
+  );
 });
 
 test("Unix PTY helper reinjects a pending sanitized prompt into an unchanged child TUI", async () => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-pty-"));
+  const root = await createTestTempDir("privacyai-pty-");
   const pendingDir = join(root, "pending");
   await mkdir(pendingDir, { mode: 0o700 });
   const id = "12345678-1234-1234-1234-123456789abc";
@@ -791,6 +1106,246 @@ test("Unix PTY helper reinjects a pending sanitized prompt into an unchanged chi
   assert.match(result.stdout, /RECEIVED:Use \[API_KEY_1\] now/);
 });
 
+test("Unix PTY helper converts exact Codex session commands into private launcher actions", async () => {
+  const root = await createTestTempDir("privacyai-pty-session-action-");
+  const actionPath = join(root, "action.json");
+  const input = "/resume --last" + String.fromCharCode(13);
+
+  const result = await runProcessWithInput("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--session-action-file",
+    actionPath,
+    "--",
+    "/bin/cat"
+  ], input);
+
+  assert.equal(result.code, 86);
+  assert.deepEqual(JSON.parse(await readFile(actionPath, "utf8")), {
+    version: 1,
+    action: "resume",
+    selector: "--last"
+  });
+  assert.equal((await stat(actionPath)).mode & 0o777, 0o600);
+
+  const terminalActionPath = join(root, "terminal-action.json");
+  const terminalInput =
+    String.fromCharCode(27) + "[?1;2c" +
+    String.fromCharCode(27) + "]10;rgb:0000/0000/0000" +
+    String.fromCharCode(27) + "\\" +
+    "/resume --all" + String.fromCharCode(13);
+  const terminalResult = await runProcessWithInput("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--session-action-file",
+    terminalActionPath,
+    "--",
+    "/bin/cat"
+  ], terminalInput);
+
+  assert.equal(terminalResult.code, 86);
+  assert.deepEqual(JSON.parse(await readFile(terminalActionPath, "utf8")), {
+    version: 1,
+    action: "resume",
+    selector: "--all"
+  });
+
+  const forkActionPath = join(root, "fork-action.json");
+  const forkInput = String.fromCharCode(27) + "/fork --all" + String.fromCharCode(13);
+  const forkResult = await runProcessWithInput("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--session-action-file",
+    forkActionPath,
+    "--",
+    "/bin/cat"
+  ], forkInput);
+
+  assert.equal(forkResult.code, 86);
+  assert.deepEqual(JSON.parse(await readFile(forkActionPath, "utf8")), {
+    version: 1,
+    action: "fork",
+    selector: "--all"
+  });
+
+  const navigationActionPath = join(root, "navigation-action.json");
+  const finiteTui = join(root, "finite-tui.py");
+  await writeFile(
+    finiteTui,
+    [
+      "import os,sys",
+      "data=b''",
+      "while not data.endswith((b'\\r', b'\\n')):",
+      "    chunk=os.read(sys.stdin.fileno(), 1)",
+      "    if not chunk: break",
+      "    data += chunk",
+      "print('FORWARDED:'+data.hex(), flush=True)"
+    ].join("\n")
+  );
+  const navigationInput =
+    "draft" + String.fromCharCode(27) + "[D" + "/resume --last" + String.fromCharCode(13);
+  const navigationResult = await runProcessWithInput("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--session-action-file",
+    navigationActionPath,
+    "--",
+    "python3",
+    finiteTui
+  ], navigationInput);
+
+  assert.equal(navigationResult.code, 0);
+  await assert.rejects(readFile(navigationActionPath, "utf8"), /ENOENT/);
+});
+
+test("Unix PTY session actions survive line editing and bracketed paste", async () => {
+  const root = await createTestTempDir("privacyai-pty-edited-actions-");
+  const cases = [
+    {
+      name: "left-delete",
+      input: "/resume --lastX" + String.fromCharCode(27) + "[D" + String.fromCharCode(27) + "[3~" + String.fromCharCode(13),
+      expected: { version: 1, action: "resume", selector: "--last" }
+    },
+    {
+      name: "home",
+      input: "resume --all" + String.fromCharCode(27) + "[H/" + String.fromCharCode(13),
+      expected: { version: 1, action: "resume", selector: "--all" }
+    },
+    {
+      name: "bracketed-paste",
+      input: String.fromCharCode(27) + "[200~/fork --last" + String.fromCharCode(27) + "[201~" + String.fromCharCode(13),
+      expected: { version: 1, action: "fork", selector: "--last" }
+    }
+  ];
+
+  for (const candidate of cases) {
+    const actionPath = join(root, `${candidate.name}.json`);
+    const result = await runProcessWithInput("python3", [
+      PTY_HELPER,
+      "--runtime-dir",
+      root,
+      "--flavor",
+      "codex",
+      "--session-action-file",
+      actionPath,
+      "--",
+      "/bin/cat"
+    ], candidate.input);
+    assert.equal(result.code, 86, candidate.name);
+    assert.deepEqual(JSON.parse(await readFile(actionPath, "utf8")), candidate.expected);
+  }
+});
+
+test("Unix PTY tolerates malformed terminal dimensions", async () => {
+  const root = await createTestTempDir("privacyai-pty-dimensions-");
+  const result = await runProcess("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--",
+    "python3",
+    "-c",
+    "print('dimension-safe', flush=True)"
+  ], {
+    env: { ...process.env, LINES: "not-a-number", COLUMNS: "also-invalid" }
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stdout, /dimension-safe/);
+  assert.doesNotMatch(result.stderr, /ValueError|Traceback/);
+});
+
+test("Unix PTY escalates wrapper signals and reaps the complete child group", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await createTestTempDir("privacyai-pty-signal-tree-");
+  const pidPath = join(root, "pids.json");
+  const fakeTui = join(root, "stubborn-tui.py");
+  await writeFile(fakeTui, [
+    "import json,os,signal,subprocess,sys,time",
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+    "child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])",
+    `open(${JSON.stringify(pidPath)},'w').write(json.dumps([os.getpid(),child.pid]))`,
+    "while True: time.sleep(1)"
+  ].join("\n"));
+
+  const wrapper = spawn("python3", [
+    PTY_HELPER,
+    "--runtime-dir",
+    root,
+    "--flavor",
+    "codex",
+    "--",
+    "python3",
+    fakeTui
+  ], { stdio: ["ignore", "pipe", "pipe"] });
+  const pids = JSON.parse(await waitForFile(pidPath));
+  const exited = once(wrapper, "exit");
+  wrapper.kill("SIGTERM");
+  const [code, signalName] = await exited;
+  assert.equal(signalName, null);
+  assert.equal(code, 143);
+  for (const pid of pids) assert.equal(processExists(pid), false);
+});
+
+test("Unix PTY treats a closed output pipe as shutdown and leaves no orphan", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await createTestTempDir("privacyai-pty-broken-pipe-");
+  const pidPath = join(root, "pids.json");
+  const fakeTui = join(root, "noisy-tui.py");
+  await writeFile(fakeTui, [
+    "import json,os,signal,subprocess,sys,time",
+    "signal.signal(signal.SIGPIPE, signal.SIG_IGN)",
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)",
+    "child=subprocess.Popen([sys.executable,'-c','import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])",
+    `open(${JSON.stringify(pidPath)},'w').write(json.dumps([os.getpid(),child.pid]))`,
+    "while True:",
+    "    print('x'*4096, flush=True)"
+  ].join("\n"));
+
+  const result = await runProcess("bash", [
+    "-o",
+    "pipefail",
+    "-c",
+    'python3 "$1" --runtime-dir "$2" --flavor codex -- python3 "$3" | head -c 1 >/dev/null',
+    "privacyai-pty-test",
+    PTY_HELPER,
+    root,
+    fakeTui
+  ]);
+  const pids = JSON.parse(await waitForFile(pidPath));
+  assert.equal(result.code, 141, result.stderr);
+  assert.doesNotMatch(result.stderr, /BrokenPipeError|Traceback/);
+  for (const pid of pids) assert.equal(processExists(pid), false);
+});
+
+async function waitForFile(path, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
+  throw new Error(`Timed out waiting for test file: ${path}`);
+}
+
 function jsonResponse(body, options = {}) {
   return {
     ok: options.ok ?? true,
@@ -801,9 +1356,9 @@ function jsonResponse(body, options = {}) {
   };
 }
 
-function runProcess(command, args) {
+function runProcess(command, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", chunk => {
@@ -815,4 +1370,189 @@ function runProcess(command, args) {
     child.on("error", reject);
     child.on("exit", code => resolve({ code, stdout, stderr }));
   });
+}
+
+function runProcessWithInput(command, args, input, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", chunk => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", chunk => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("exit", code => resolve({ code, stdout, stderr }));
+    child.stdin.end(input);
+  });
+}
+
+
+test("Codex static preflight detects home and project startup files without spawning Codex or the AI sanitizer", async () => {
+  const root = await createTestTempDir("privacyai-codex-static-preflight-");
+  const codexHome = join(root, "codex-home");
+  await mkdir(join(root, ".git"), { recursive: true });
+  await mkdir(join(codexHome, "skills", "private-skill"), { recursive: true });
+  await writeFile(join(root, "AGENTS.md"), "Safe project instructions.\n");
+  await writeFile(
+    join(codexHome, "skills", "private-skill", "SKILL.md"),
+    "Contact startup.private@example.test before launch.\n"
+  );
+
+  let calls = 0;
+  const sanitizer = async text => {
+    calls += 1;
+    return {
+      sanitizedPrompt: text.replaceAll("startup.private@example.test", "[EMAIL_1]"),
+      sessionMap: text.includes("startup.private@example.test")
+        ? { "[EMAIL_1]": "startup.private@example.test" }
+        : {}
+    };
+  };
+  const store = new MemoryContextVerificationStore();
+  const result = await auditCodexStaticStartupContext({
+    cwd: root,
+    env: { CODEX_HOME: codexHome },
+    staticSanitizer: sanitizer,
+    verificationStore: store,
+    policyFingerprint: "static-preflight-v1",
+    blockHighRisk: false,
+    maxContextChars: 4096,
+    maxBytes: 100000
+  });
+
+  assert.equal(result.fileCount, 2);
+  assert.equal(calls > 0, true);
+  assert.equal(result.sessionMapAdditions["[EMAIL_1]"], "startup.private@example.test");
+
+  await assert.rejects(
+    auditCodexStaticStartupContext({
+      cwd: root,
+      env: { CODEX_HOME: codexHome },
+      sanitizer: async () => {
+        throw new Error("static preflight must not call the AI sanitizer");
+      },
+      staticSanitizer: sanitizer,
+      verificationStore: store,
+      policyFingerprint: "static-preflight-v1",
+      blockHighRisk: true,
+      maxContextChars: 4096,
+      maxBytes: 100000
+    }),
+    error => error?.code === "PRIVACYAI_UNSAFE_STARTUP_CONTEXT"
+  );
+});
+
+test("rendered Codex startup audit primes exact gateway item verification", async () => {
+  const store = new MemoryContextVerificationStore();
+  const policyFingerprint = "rendered-preflight-v1";
+  let capturedPayload;
+  const result = await auditCodexStartupContext({
+    codexPath: "/test/codex",
+    cwd: process.cwd(),
+    capture: async ({ prompt }) => {
+      capturedPayload = [
+        {
+          type: "message",
+          role: "developer",
+          content: [{ type: "input_text", text: "stable rendered startup instructions" }]
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: prompt }]
+        }
+      ];
+      return capturedPayload;
+    },
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+    verificationStore: store,
+    policyFingerprint,
+    blockHighRisk: false,
+    primeRequestCache: true
+  });
+
+  assert.equal(result.primedItemCount, 2);
+  assert.deepEqual(
+    store.loadThread("codex-provider:privacyai-startup-preflight").sessionMap,
+    {},
+    "the synthetic canary must never be persisted as a real session mapping"
+  );
+
+  const body = {
+    model: "test-model",
+    input: capturedPayload,
+    stream: false,
+    store: false,
+    client_metadata: { thread_id: "real-thread" }
+  };
+  let sanitizerCalls = 0;
+  const transformed = await sanitizeCodexRequestBody(body, {
+    sanitizer: async () => {
+      sanitizerCalls += 1;
+      throw new Error("primed rendered startup items must not be classified again");
+    },
+    sessionMap: {},
+    policyFingerprint,
+    cache: {
+      get(cacheKey, fingerprint) {
+        return store.getVerification(cacheKey, fingerprint);
+      }
+    }
+  });
+
+  assert.equal(sanitizerCalls, 0);
+  assert.deepEqual(transformed.body.input, capturedPayload);
+});
+
+test("Codex prompt renderer terminates its entire probe process group", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = await createTestTempDir("privacyai-codex-probe-tree-");
+  const fakeCodex = join(root, "fake-codex-tree.js");
+  const childPidPath = join(root, "child.pid");
+  await writeFile(
+    fakeCodex,
+    [
+      "#!/usr/bin/env node",
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      `const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'], { stdio: 'ignore' });`,
+      "child.unref();",
+      `writeFileSync(${JSON.stringify(childPidPath)}, String(child.pid));`,
+      "process.stdout.write(JSON.stringify([{ text: 'rendered' }]));"
+    ].join("\n"),
+    { mode: 0o755 }
+  );
+  await chmod(fakeCodex, 0o755);
+
+  assert.deepEqual(
+    await captureCodexPromptInput({
+      codexPath: fakeCodex,
+      args: [],
+      cwd: root,
+      env: process.env,
+      prompt: "ignored",
+      timeoutMs: 5000
+    }),
+    [{ text: "rendered" }]
+  );
+
+  const childPid = Number(await readFile(childPidPath, "utf8"));
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline && processExists(childPid)) {
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(processExists(childPid), false);
+});
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
 }

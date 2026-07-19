@@ -2,8 +2,16 @@ import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
+import { codexWorkingDirectory } from "./codex-arguments.js";
+import {
+  BoundedTextBuffer,
+  detachedProcessOptions,
+  terminateProcessTree
+} from "./process-supervisor.js";
+
 const PROMPT_HOOK_PATH = fileURLToPath(new URL("../bin/privacyai-prompt-hook.js", import.meta.url));
 const AGENT_HOOK_PATH = fileURLToPath(new URL("../bin/privacyai-agent-hook.js", import.meta.url));
+const DEFAULT_HOOK_PROBE_MAX_BYTES = 1024 * 1024;
 
 export function hookCommands(options = {}) {
   const nodePath = options.nodePath || process.execPath;
@@ -91,7 +99,12 @@ export async function discoverCodexHookTrust(options) {
     args: [...declarationArgs, "app-server"],
     cwd,
     env,
-    timeoutMs
+    timeoutMs,
+    maxBytes: positiveInteger(
+      options.maxBytes ?? options.hookProbeMaxBytes,
+      DEFAULT_HOOK_PROBE_MAX_BYTES,
+      "Codex hook probe output limit"
+    )
   });
 
   const hooks = response?.result?.data?.flatMap(item => item.hooks || []) || [];
@@ -113,21 +126,30 @@ export async function discoverCodexHookTrust(options) {
   };
 }
 
-function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs }) {
+function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs, maxBytes }) {
   return new Promise((resolve, reject) => {
-    const child = spawn(codexPath, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(codexPath, args, detachedProcessOptions({
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    }));
     let stdoutBuffer = "";
-    let stderr = "";
+    let stdoutBytes = 0;
+    const stderr = new BoundedTextBuffer(maxBytes, "Codex hook probe stderr");
     let settled = false;
 
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      child.kill("SIGTERM");
-      if (error) reject(error);
-      else resolve(value);
+      terminateProcessTree(child, { graceMs: 250, killWaitMs: 750 }).then(
+        () => error ? reject(error) : resolve(value),
+        cleanupError => reject(error || cleanupError)
+      );
     };
+    const tooLarge = () => finish(new Error(
+      "Codex produced excessive output while validating PrivacyAI hooks."
+    ));
 
     const timer = setTimeout(() => {
       finish(new Error("Timed out while asking Codex to validate PrivacyAI hooks."));
@@ -135,12 +157,17 @@ function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs }) {
 
     child.on("error", error => finish(error));
     child.stdin.on("error", error => finish(error));
-    child.stderr.setEncoding("utf8");
     child.stderr.on("data", chunk => {
-      stderr += chunk;
+      if (settled || !stderr.append(chunk)) tooLarge();
     });
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", chunk => {
+      if (settled) return;
+      stdoutBytes += Buffer.byteLength(chunk, "utf8");
+      if (stdoutBytes > maxBytes) {
+        tooLarge();
+        return;
+      }
       stdoutBuffer += chunk;
       let newline;
       while ((newline = stdoutBuffer.indexOf("\n")) !== -1) {
@@ -161,7 +188,7 @@ function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs }) {
     });
     child.on("exit", code => {
       if (!settled) {
-        finish(new Error(`Codex hook validation exited with code ${code}. ${safeDiagnostic(stderr)}`));
+        finish(new Error(`Codex hook validation exited with code ${code}. ${safeDiagnostic(stderr.text())}`));
       }
     });
 
@@ -180,13 +207,7 @@ function requestCodexHooksList({ codexPath, args, cwd, env, timeoutMs }) {
 }
 
 export function codexEffectiveCwd(args, fallback = process.cwd()) {
-  for (let index = 0; index < args.length; index += 1) {
-    if ((args[index] === "-C" || args[index] === "--cd") && args[index + 1]) {
-      return args[index + 1];
-    }
-    if (args[index].startsWith("--cd=")) return args[index].slice(5);
-  }
-  return fallback;
+  return codexWorkingDirectory(args, fallback);
 }
 
 function tomlString(value) {
@@ -200,4 +221,12 @@ function shellQuote(value) {
 function safeDiagnostic(value) {
   const trimmed = String(value || "").trim();
   return trimmed ? trimmed.slice(-500) : "";
+}
+
+function positiveInteger(value, fallback, label) {
+  const normalized = value == null ? fallback : Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer.`);
+  }
+  return normalized;
 }

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+import { rebaseSessionAdditions as rebaseSdkSessionAdditions } from "@privacy-ai/sdk";
 import { SessionVault } from "./session-vault.js";
 
 export const REINJECT_MARKER_PREFIX = "PRIVACYAI_REINJECT:";
@@ -111,46 +112,8 @@ export async function processPromptSubmission(event, options = {}) {
 }
 
 export function rebaseSessionAdditions(sanitizedPrompt, additions = {}, existing = {}) {
-  if (typeof sanitizedPrompt !== "string") {
-    throw new TypeError("Sanitizer did not return sanitizedPrompt.");
-  }
-
-  let text = sanitizedPrompt;
-  const sessionMap = {};
-  const occupied = new Set([...Object.keys(existing), ...Object.keys(additions)]);
-
-  for (const [dummy, original] of Object.entries(additions)) {
-    if (typeof dummy !== "string" || typeof original !== "string" || !dummy || !original) continue;
-
-    let target = dummy;
-    if (Object.hasOwn(existing, dummy) && existing[dummy] !== original) {
-      target = allocatePrivatePlaceholder(dummy, occupied);
-      text = text.split(dummy).join(target);
-    }
-    occupied.add(target);
-    sessionMap[target] = original;
-  }
-
-  return { sanitizedPrompt: text, sessionMap };
-}
-
-function allocatePrivatePlaceholder(dummy, occupied) {
-  const match = dummy.match(/^\[([A-Z][A-Z0-9_]*)_(\d+)\]$/);
-  const type = match?.[1] || inferPlaceholderType(dummy);
-  let index = match ? Number(match[2]) + 1 : 1;
-  let candidate = `[${type}_${index}]`;
-  while (occupied.has(candidate)) {
-    index += 1;
-    candidate = `[${type}_${index}]`;
-  }
-  return candidate;
-}
-
-function inferPlaceholderType(dummy) {
-  if (/api|key|token|secret|credential/i.test(dummy)) return "API_KEY";
-  if (/email/i.test(dummy)) return "EMAIL";
-  if (/phone|555/.test(dummy)) return "PHONE";
-  return "PRIVATE_VALUE";
+  const result = rebaseSdkSessionAdditions(sanitizedPrompt, additions, existing);
+  return { sanitizedPrompt: result.sanitizedText, sessionMap: result.sessionMap };
 }
 
 export async function createAllowance(runtimeDir, sessionId, prompt) {

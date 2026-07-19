@@ -1,6 +1,6 @@
 import { extractProtectedSpans, findRedactableSubspans } from "./policy/span-policy.js";
 import { classifyDetections, shouldRedact } from "./policy/redaction-policy.js";
-import { generateDummy } from "./dummy-data.js";
+import { allocateUniqueDummy, generateDummy } from "./dummy-data.js";
 
 export class RedactionPlan {
   constructor(originalText) {
@@ -102,16 +102,12 @@ export class RedactionPlan {
   }
 
   createUniqueDummy(type, index) {
-    let dummy = generateDummy(type, index);
-    let slot = index;
     const lowerSource = this.originalText.toLowerCase();
-
-    while (lowerSource.includes(dummy.toLowerCase()) || Object.hasOwn(this.sessionMap, dummy)) {
-      slot += 1;
-      dummy = generateDummy(type, slot);
-    }
-
-    return dummy;
+    return allocateUniqueDummy(
+      type,
+      index,
+      dummy => lowerSource.includes(dummy.toLowerCase()) || Object.hasOwn(this.sessionMap, dummy)
+    );
   }
 
   countTypeInReplacements(type) {

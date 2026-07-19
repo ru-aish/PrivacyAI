@@ -12,6 +12,10 @@ test("published CLI exposes the native wrapper commands", async () => {
   assert.match(result.stdout, /privacyai codex/);
   assert.match(result.stdout, /privacyai agy/);
   assert.match(result.stdout, /privacyai onboard/);
+
+  const version = await run("node", [CLI, "--version"]);
+  assert.equal(version.code, 0);
+  assert.equal(version.stdout.trim(), "privacyai 0.0.2");
 });
 
 function run(command, args) {

@@ -1,8 +1,8 @@
 # PrivacyAI native agent wrapper
 
 This is the user-facing package for PrivacyAI's protected Claude Code, Codex,
-and Antigravity CLI commands. It launches the user's installed official CLI and
-keeps the existing provider login, subscription, and inference route.
+and Antigravity commands. It launches the user's installed official CLI and
+keeps the existing provider account and subscription.
 
 ```bash
 npm install --global @privacy-ai/agent-tui
@@ -12,42 +12,56 @@ privacyai codex
 privacyai agy --print "Summarize this safely"
 ```
 
-During onboarding, PrivacyAI scans Ollama and a running LM Studio local server,
-then lists every usable downloaded LLM/VLM in one numbered menu. Embedding-only
-models are excluded. Ministral 3 3B remains recommended; select any Ollama or LM
-Studio entry by number, or type another Ollama model name to download it.
+Onboarding selects a loopback-local Ollama or LM Studio model for privacy
+classification. Embedding-only models are excluded.
 
-## Claude Code and Codex
+## Codex
 
-The wrapper opens the unchanged native TUI inside a transparent local PTY. It
-registers wildcard pre/post hooks for every tool event exposed by the native
-CLI. Placeholder values are restored recursively before built-in, app, plugin,
-and MCP tools execute, then known real values are sanitized in tool results
-before they return to the task model. Claude hook-disabling launch modes such as
-`--bare` and `--safe-mode` are rejected; a failed Claude tool result that cannot
-be rewritten safely is stopped before the next model request.
+`privacyai codex` keeps stock Codex and the user's normal `CODEX_HOME`, including
+history, skills, plugins, user MCP servers, configuration, and login. PrivacyAI
+routes supported Responses traffic through a nonce-protected localhost gateway:
 
-## Antigravity CLI compatibility
+```text
+stock Codex → local sanitize → OpenAI → local restore → stock Codex
+```
 
-The installed AGY hook API does not currently expose a `UserPromptSubmit` hook,
-tool-input rewriting, or tool-output rewriting. PrivacyAI therefore supports
-fresh one-shot AGY prompts only:
+Normal filesystem, shell, patch, Git, resume, fork, exec, and review workflows
+remain available. The model still sees its normal Codex tool definitions, and no
+extra OpenAI model request is added.
+
+Provider-hosted search, apps/connectors, browser/computer use, images, realtime,
+WebSockets, remote clients, and alternate provider overrides are blocked until
+they have a protected transport boundary.
+
+The previous prompt-only Codex mode remains available as an explicit fallback:
+
+```bash
+privacyai codex --privacy-strict
+```
+
+That mode uses a credential-only temporary home and denies tool-capable paths.
+
+## Claude Code
+
+Claude Code uses native prompt and tool lifecycle hooks plus startup-context
+isolation. Supported tool inputs are restored locally and successful structured
+results are classified before becoming model-visible. A failure path that cannot
+be replaced safely stops before another model request.
+
+## Antigravity
+
+The installed AGY hook API cannot rewrite tool arguments or outputs. PrivacyAI
+therefore supports fresh one-shot prompts only:
 
 ```bash
 privacyai agy --print "your prompt"
 ```
 
-PrivacyAI sanitizes the prompt before AGY starts and temporarily installs a
-wildcard global `PreToolUse` guard. When sanitization creates any private
-mapping, every tool call in that turn is denied because AGY cannot sanitize the
-result. When no private mapping exists, clean tool calls may proceed. Resume,
-interactive-prompt, conversation-reuse, and permission-bypass modes fail closed.
-The global hook file is locked, merged, and restored after the process exits, so
-protected AGY sessions are intentionally serialized.
+The prompt is sanitized before launch and every scoped tool call is denied.
+Interactive, resumed, reused, and permission-bypass modes fail closed.
 
 The implementation lives in `@privacy-ai/agent-bridge`; this package owns only
-the public `privacyai` command so there is one install surface and one tested
-privacy engine.
+the public `privacyai` command.
 
-Current platform support: Linux and macOS. Windows requires a ConPTY backend
-and is intentionally rejected rather than falling back to an unsafe wrapper.
+Current platform support: Linux and macOS. Windows remains intentionally blocked
+until an equivalent tested boundary is available.

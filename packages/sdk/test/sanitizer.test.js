@@ -61,6 +61,16 @@ test("restore replaces dummy stand-ins with original values", () => {
   assert.equal(restored, "Email a@example.com and phone 555-123-4567.");
 });
 
+test("restore does not recursively reinterpret placeholders inside restored originals", () => {
+  assert.equal(
+    restore("[PRIVATE_VALUE_1]", {
+      "[PRIVATE_VALUE_1]": "literal [EMAIL_1], redact new@example.test",
+      "[EMAIL_1]": "existing@example.test"
+    }),
+    "literal [EMAIL_1], redact new@example.test"
+  );
+});
+
 test("client ask uses local AI first, then sends safe prompt without system context", async () => {
   const calls = [];
   const provider = {
@@ -206,7 +216,8 @@ test("enforcement performs case-insensitive replacements to prevent PII leaks of
 
   assert.doesNotMatch(result.sanitizedText, /john.smith@example.com/i);
   assert.match(result.sanitizedText, /contact1@example.com/);
-  assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact2@example.com.");
+  assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact1@example.com.");
+  assert.equal(Object.keys(result.sessionMap).length, 1);
 });
 
 test("ai sanitizer passes conversation context turns to the provider", async () => {
