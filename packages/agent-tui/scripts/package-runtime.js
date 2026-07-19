@@ -35,7 +35,6 @@ if (action === "prepare") {
 
   delete manifest.dependencies["@privacy-ai/agent-bridge"];
   manifest.dependencies["@privacy-ai/sdk"] = sdkManifest.version;
-  delete manifest.scripts;
   await writeFile(backupPath, originalManifest, { flag: "wx", mode: 0o600 });
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
 
