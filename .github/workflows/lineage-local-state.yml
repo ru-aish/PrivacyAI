@@ -44,8 +44,9 @@ jobs:
           node --check packages/agent-bridge/src/lineage/index.js
           node --check packages/agent-bridge/test/fixtures/lineage-child.js
           node --check packages/agent-bridge/test/lineage.test.js
+          node --check packages/agent-bridge/test/lineage-review.test.js
       - name: Test immutable lineage repository
-        run: node --test packages/agent-bridge/test/lineage.test.js
+        run: node --test packages/agent-bridge/test/lineage.test.js packages/agent-bridge/test/lineage-review.test.js
       - name: Test SDK contracts
         run: pnpm --filter @privacy-ai/sdk test
       - name: Test agent bridge
