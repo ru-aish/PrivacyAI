@@ -23,6 +23,7 @@ import {
 import { retryContextStoreOperation } from "./context-store-retry.js";
 import {
   openContextVerificationStore,
+  updateRepositoryThread,
   verificationFingerprint
 } from "./context-verification-store.js";
 import {
@@ -328,7 +329,7 @@ async function handleRequestCore(request, response, context) {
       await context.vault.save(identity.sessionKey, completeMap);
     }
     await runVerificationStoreOperation(context, () =>
-      context.verificationStore.updateThread(identity.sessionKey, () => ({
+      updateRepositoryThread(context.verificationStore, identity.sessionKey, () => ({
         baseSessionMap: currentThread.sessionMap || {},
         parentSessionKeys: identity.parentSessionKeys,
         sessionMap: completeMap,

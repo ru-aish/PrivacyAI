@@ -5,7 +5,11 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { MemoryContextVerificationStore, openContextVerificationStore } from "../src/index.js";
+import {
+  MemoryContextVerificationStore,
+  openContextVerificationStore,
+  updateRepositoryThread
+} from "../src/index.js";
 import { stableJson } from "../src/context-repository/domain.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
@@ -43,6 +47,50 @@ test("explicit database paths preserve caller-owned parent permissions", async t
 test("stable JSON matches JSON.stringify undefined handling", () => {
   assert.equal(stableJson({ a: 1, b: undefined }), '{"a":1}');
   assert.equal(stableJson([1, undefined]), '[1,null]');
+});
+
+test("legacy repository updates serialize by session across store wrappers", async () => {
+  const threads = new Map([["shared", {
+    sessionKey: "shared",
+    parentSessionKeys: [],
+    sessionMap: {},
+    policyFingerprint: "",
+    updatedAt: 0
+  }]]);
+  const savedRecords = [];
+  const createStore = () => ({
+    async loadThread(sessionKey) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+      return structuredClone(threads.get(sessionKey));
+    },
+    async saveThread(sessionKey, record) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+      savedRecords.push(structuredClone(record));
+      threads.set(sessionKey, { ...structuredClone(record), sessionKey });
+      return threads.get(sessionKey);
+    }
+  });
+  const left = createStore();
+  const right = createStore();
+
+  await Promise.all([
+    updateRepositoryThread(left, "shared", current => ({
+      ...current,
+      baseSessionMap: current.sessionMap,
+      sessionMap: { ...current.sessionMap, "[EMAIL_1]": "alice@example.test" }
+    })),
+    updateRepositoryThread(right, "shared", current => ({
+      ...current,
+      baseSessionMap: current.sessionMap,
+      sessionMap: { ...current.sessionMap, "[PHONE_1]": "+1-555-0100" }
+    }))
+  ]);
+
+  assert.deepEqual(threads.get("shared").sessionMap, {
+    "[EMAIL_1]": "alice@example.test",
+    "[PHONE_1]": "+1-555-0100"
+  });
+  assert.equal(savedRecords.some(record => Object.hasOwn(record, "baseSessionMap")), false);
 });
 
 test("same SQLite handle preserves independently derived concurrent additions", async t => {

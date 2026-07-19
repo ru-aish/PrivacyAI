@@ -4,5 +4,6 @@ export {
   MemoryContextVerificationStore,
   SqliteContextVerificationStore,
   openContextVerificationStore,
+  updateRepositoryThread,
   verificationFingerprint
 } from "./context-repository/index.js";

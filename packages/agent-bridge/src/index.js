@@ -26,6 +26,7 @@ export {
   MemoryContextVerificationStore,
   SqliteContextVerificationStore,
   openContextVerificationStore,
+  updateRepositoryThread,
   verificationFingerprint
 } from "./context-verification-store.js";
 export { retryContextStoreOperation } from "./context-store-retry.js";
