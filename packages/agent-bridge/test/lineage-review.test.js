@@ -11,8 +11,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { openLineageRepository } from "../src/lineage/index.js";
+import {
+  normalizeEvent,
+  normalizeMetadata,
+  opaqueIdentity,
+  openLineageRepository
+} from "../src/lineage/index.js";
 import { initializeLineageSchema } from "../src/lineage/schema.js";
+
+const opaque = (namespace, character) => `${namespace}:${character.repeat(32)}`;
 
 test("rejects a symlink component before recursive mkdir creates through it", async t => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-lineage-precreate-symlink-"));
@@ -58,4 +65,52 @@ test("schema initialization retains a safe SQLite contention cause", () => {
       error?.cause?.code === "SQLITE_LOCKED" &&
       !error.message.includes("locked")
   );
+});
+
+test("validation diagnostics never echo unknown input-derived names", () => {
+  const privateName = "private-field-name-DO-NOT-LOG";
+  assert.throws(
+    () => normalizeEvent({
+      sessionId: opaque("session", "a"),
+      eventType: "session_created",
+      reasonCode: "session_start",
+      [privateName]: true
+    }),
+    error =>
+      error?.code === "PRIVACYAI_LINEAGE_INVALID_EVENT" &&
+      !error.message.includes(privateName)
+  );
+  assert.throws(
+    () => normalizeMetadata({ [privateName]: true }),
+    error =>
+      error?.code === "PRIVACYAI_LINEAGE_INVALID_EVENT" &&
+      !error.message.includes(privateName)
+  );
+  assert.throws(
+    () => opaqueIdentity("invalid", privateName),
+    error =>
+      error?.code === "PRIVACYAI_LINEAGE_INVALID_EVENT" &&
+      !error.message.includes(privateName)
+  );
+});
+
+test("closed repositories fail before traversal argument validation", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-lineage-closed-traversal-"));
+  await chmod(root, 0o700);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const repository = await openLineageRepository({
+    lineageDbPath: join(root, "lineage.sqlite3")
+  });
+  repository.close();
+
+  for (const operation of [
+    () => repository.sessionTraversal(opaque("session", "a"), { limit: 0 }),
+    () => repository.valueTraversal(opaque("value", "b"), { limit: 0 })
+  ]) {
+    assert.throws(
+      operation,
+      error => error?.code === "PRIVACYAI_LINEAGE_CLOSED"
+    );
+  }
 });
