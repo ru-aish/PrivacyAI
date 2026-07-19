@@ -29,7 +29,19 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @privacy-ai/cli test
+      - name: Test canonical CLI
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @privacy-ai/cli test 2>&1 | tee cli-test.log
+      - name: Upload failed CLI test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-test-log
+          path: cli-test.log
+          if-no-files-found: error
+          retention-days: 1
       - run: pnpm --filter @privacy-ai/agent-bridge test
       - run: pnpm -r test
       - run: git diff --check
