@@ -10,10 +10,14 @@ export function shieldKnownValues(text, sessionMap) {
   let tokenIndex = 0;
 
   const shielded = replaceKnownText(text, sessionMap, ({ match }) => {
-    let token = `__PRIVACYAI_BOUNDARY_${tokenIndex}__`;
-    tokenIndex += 1;
-    while (occupied.some(value => value.includes(foldCase(token)))) token += "_";
-    occupied.push(foldCase(token));
+    let token;
+    let foldedToken;
+    do {
+      token = `__PRIVACYAI_BOUNDARY_${tokenIndex}__`;
+      tokenIndex += 1;
+      foldedToken = foldCase(token);
+    } while (occupied.some(value => value.includes(foldedToken)));
+    occupied.push(foldedToken);
     replacements.push({ token, source: match });
     return token;
   });

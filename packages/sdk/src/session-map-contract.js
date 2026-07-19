@@ -1,4 +1,4 @@
-import { foldCase } from "./text-matching.js";
+import { escapeRegExp, foldCase } from "./text-matching.js";
 
 const UNSAFE_PLACEHOLDERS = new Set(["__proto__", "prototype", "constructor"]);
 
@@ -59,12 +59,12 @@ export function rebaseSessionAdditions(sanitizedText, additions = {}, existing =
       .map(foldCase)
   );
   const rebasedEntries = [];
-  let text = sanitizedText;
+  const replacements = [];
 
   for (const [placeholder, original] of additionEntries) {
     const existingPlaceholder = existingByOriginal.get(original);
     if (existingPlaceholder) {
-      text = replaceExact(text, placeholder, existingPlaceholder);
+      replacements.push([placeholder, existingPlaceholder]);
       continue;
     }
 
@@ -76,14 +76,14 @@ export function rebaseSessionAdditions(sanitizedText, additions = {}, existing =
       (placeholderCollision && placeholderCollision.original !== original)
     ) {
       target = allocatePrivatePlaceholder(placeholder, occupied);
-      text = replaceExact(text, placeholder, target);
+      replacements.push([placeholder, target]);
     }
     occupied.add(foldCase(target));
     rebasedEntries.push([target, original]);
   }
 
   return {
-    sanitizedText: text,
+    sanitizedText: replaceExactAliases(sanitizedText, replacements),
     sessionMap: normalizeSessionMap(recordFromEntries(rebasedEntries))
   };
 }
@@ -150,8 +150,20 @@ function recordFromEntries(entries) {
   return record;
 }
 
-function replaceExact(text, source, replacement) {
-  return source === replacement ? text : text.split(source).join(replacement);
+function replaceExactAliases(text, replacements) {
+  const entries = replacements
+    .filter(([source, replacement]) => source !== replacement)
+    .sort(([left], [right]) =>
+      right.length - left.length || compareText(left, right)
+    );
+  if (entries.length === 0) return text;
+
+  const replacementsBySource = new Map(entries);
+  const pattern = new RegExp(
+    entries.map(([source]) => escapeRegExp(source)).join("|"),
+    "g"
+  );
+  return text.replace(pattern, source => replacementsBySource.get(source));
 }
 
 function allocatePrivatePlaceholder(placeholder, occupied) {

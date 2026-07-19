@@ -151,22 +151,30 @@ test("sanitizeStructuredValue shields existing placeholders and rebases new coll
   assert.deepEqual(result.sessionMapAdditions, { "[EMAIL_2]": "new@example.test" });
 });
 
-test("sanitizeStructuredValue allocates boundary shields case-insensitively", async () => {
+test("sanitizeStructuredValue allocates distinct boundary shields case-insensitively", async () => {
   const literalBoundary = "__privacyai_boundary_0__";
   const result = await sanitizeStructuredValue(
     { text: `${literalBoundary} and [EMAIL_1]` },
     {
       sessionMap: { "[EMAIL_1]": "existing@example.test" },
       sanitizer: async text => {
-        const generated = text.match(/__PRIVACYAI_BOUNDARY_0___+/)?.[0];
-        assert.ok(generated, "the generated shield should avoid the lowercase literal collision");
-        assert.notEqual(generated.toLocaleLowerCase("en-US"), literalBoundary);
+        assert.equal(text.includes("__PRIVACYAI_BOUNDARY_0___"), false);
+        assert.equal(text.includes("__PRIVACYAI_BOUNDARY_1__"), true);
         return { sanitizedPrompt: text, sessionMap: {} };
       }
     }
   );
 
   assert.deepEqual(result.value, { text: `${literalBoundary} and [EMAIL_1]` });
+});
+
+test("sanitizeStructuredValue makes progress for short known originals", async () => {
+  const result = await sanitizeStructuredValue("a", {
+    sessionMap: { "[PRIVATE_VALUE_1]": "a" },
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+  });
+
+  assert.equal(result.value, "[PRIVATE_VALUE_1]");
 });
 
 test("sanitizeStructuredValue ignores classifier mappings derived from reserved boundary shields", async () => {
@@ -641,6 +649,26 @@ test("rebaseSessionAdditions resolves folded placeholder collisions and rejects 
       { "[PERSON_1]": "alice" }
     ),
     error => error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP"
+  );
+});
+
+test("rebaseSessionAdditions replaces overlapping aliases in one longest-first pass", () => {
+  assert.deepEqual(
+    rebaseSessionAdditions(
+      "contact10 contact1",
+      {
+        contact1: "first@example.test",
+        contact10: "second@example.test"
+      },
+      {
+        "[EMAIL_1]": "first@example.test",
+        "[EMAIL_10]": "second@example.test"
+      }
+    ),
+    {
+      sanitizedText: "[EMAIL_10] [EMAIL_1]",
+      sessionMap: {}
+    }
   );
 });
 
