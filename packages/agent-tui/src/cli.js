@@ -149,7 +149,7 @@ async function runDoctor(args, options) {
     });
   }
 
-  const brokenAgent = agents.some(agent => agent.installed && !agent.ok);
+  const brokenAgent = agents.some(agent => !agent.ok);
   const result = {
     ok: Boolean(loaded.configured && model.ok && !brokenAgent),
     platform: process.platform,
@@ -181,12 +181,13 @@ async function inspectAgents(bridge, options) {
 
   return Promise.all(definitions.map(async definition => {
     let binary = null;
-    for (const candidate of definition.candidates) {
-      binary = await bridge.resolveExecutable(candidate, { path: options.path });
-      if (binary) break;
-    }
-    if (!binary) return { name: definition.name, installed: false, ok: true, binary: null };
     try {
+      for (const candidate of definition.candidates) {
+        binary = await bridge.resolveExecutable(candidate, { path: options.path });
+        if (binary) break;
+      }
+      if (!binary) return { name: definition.name, installed: false, ok: true, binary: null };
+
       const probe = await bridge.verifyNativeExecutable(definition.name, binary, {
         ...options.executableProbeOptions
       });
@@ -200,7 +201,7 @@ async function inspectAgents(bridge, options) {
     } catch (error) {
       return {
         name: definition.name,
-        installed: true,
+        installed: Boolean(binary),
         ok: false,
         binary,
         reason: safeMessage(error)
@@ -329,7 +330,7 @@ function writeDoctor(output, result) {
   }
   output.write(`Local model: ${result.localModel.ok ? "ready" : result.localModel.reason}\n`);
   for (const agent of result.agents) {
-    const state = !agent.installed ? "not installed" : agent.ok ? "ready" : agent.reason;
+    const state = !agent.ok ? agent.reason : agent.installed ? "ready" : "not installed";
     output.write(`Agent ${agent.name}: ${state}\n`);
   }
 }
