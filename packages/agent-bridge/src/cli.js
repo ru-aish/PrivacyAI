@@ -8,6 +8,7 @@ import { runOnboarding } from "./onboard.js";
 export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}) {
   const stdout = options.stdout || process.stdout;
   const stderr = options.stderr || process.stderr;
+  const stdin = options.stdin || process.stdin;
   const [command, ...args] = argv;
 
   try {
@@ -53,9 +54,14 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
       case "antigravity":
         return await (options.launchAgy || launchAgy)(args, options.agyOptions);
       case "onboard":
+        if (options.requireInteractive !== false && (!stdin.isTTY || !stdout.isTTY)) {
+          throw cliUsageError(
+            "PrivacyAI onboarding requires an interactive terminal. Run it from a TTY."
+          );
+        }
         await (options.runOnboarding || runOnboarding)({
           ...options.onboardOptions,
-          input: options.stdin || process.stdin,
+          input: stdin,
           output: stdout
         });
         return 0;
@@ -72,11 +78,12 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
         printHelp(stdout);
         return 0;
       default:
-        throw new Error(`Unknown PrivacyAI command: ${command}\nRun: privacyai --help`);
+        throw cliUsageError(`Unknown PrivacyAI command: ${command}`);
     }
   } catch (error) {
     stderr.write(`${safeMessage(error)}\n`);
-    return 1;
+    if (error?.code === "PRIVACYAI_CLI_USAGE") stderr.write("Run: privacyai --help\n");
+    return bridgeExitCode(error);
   }
 }
 
@@ -84,7 +91,7 @@ async function runDoctor(options) {
   const loaded = await loadPrivacyConfig({ path: options.configPath });
   if (!loaded.configured) {
     options.stdout.write("PrivacyAI configuration: missing\nRun: privacyai onboard\n");
-    return 1;
+    return 3;
   }
 
   const health = await checkPrivacyModel(loaded.config, {
@@ -126,6 +133,16 @@ function safeDiagnosticField(value, fallback) {
 
 function safeMessage(error) {
   return error instanceof Error ? error.message : "PrivacyAI failed safely.";
+}
+
+function cliUsageError(message) {
+  return Object.assign(new Error(message), { code: "PRIVACYAI_CLI_USAGE" });
+}
+
+function bridgeExitCode(error) {
+  if (error?.code === "PRIVACYAI_CLI_USAGE") return 2;
+  if (error?.code === "PRIVACYAI_ONBOARDING_REQUIRED") return 3;
+  return 1;
 }
 
 function positiveQueueCapacity(value, fallback) {
