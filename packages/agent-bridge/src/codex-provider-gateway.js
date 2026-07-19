@@ -38,6 +38,17 @@ import {
   stageCompletedCodexToolCalls
 } from "./codex-mutation-tracker.js";
 import { runCleanupSteps } from "./resource-cleanup.js";
+import {
+  createDownstreamLifecycle,
+  throwIfAborted as throwIfRuntimeAborted
+} from "./runtime/downstream-lifecycle.js";
+import {
+  HOP_BY_HOP_HEADERS,
+  copyHttpHeaders,
+  forwardHttpHeaders
+} from "./runtime/http-headers.js";
+import { trackServerSockets } from "./runtime/http-server.js";
+import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
 import { SessionVault } from "./session-vault.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -49,15 +60,8 @@ const DEFAULT_VERIFICATION_RETRY_TIMEOUT_MS = 2500;
 const MAX_ALIASES_PER_ORIGINAL = 8;
 const CHATGPT_UPSTREAM = "https://chatgpt.com/backend-api/codex";
 const API_UPSTREAM = "https://api.openai.com/v1";
-const HOP_BY_HOP_HEADERS = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
+const CODEX_TRANSPORT_HEADERS = new Set([
+  ...HOP_BY_HOP_HEADERS,
   "host",
   "content-length",
   "content-encoding"
@@ -146,10 +150,7 @@ export async function startCodexProviderGateway(options = {}) {
       writeGatewayFailure(response, error);
     });
   });
-  server.on("connection", socket => {
-    sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
-  });
+  trackServerSockets(server, sockets);
   server.on("upgrade", (_request, socket) => {
     socket.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n");
   });
@@ -206,11 +207,10 @@ export async function startCodexProviderGateway(options = {}) {
 
 
 async function handleRequest(request, response, context) {
-  const lifecycle = createDownstreamLifecycle(request, response);
+  const lifecycle = codexDownstreamLifecycle(request, response);
   const requestContext = {
     ...context,
-    requestSignal: lifecycle.signal,
-    isDownstreamClosed: lifecycle.downstreamClosed
+    requestSignal: lifecycle.signal
   };
   try {
     return await handleRequestCore(request, response, requestContext);
@@ -387,8 +387,7 @@ async function proxyModels(request, response, context, suffix, search) {
   const headers = upstreamHeaders(sanitizedHeaders, upstream, null);
   context.phase = "upstream_connect";
   const upstreamResponse = await requestCodexUpstream(upstream, request.method, headers, null, {
-    downstream: response,
-    isDownstreamClosed: context.isDownstreamClosed,
+    signal: context.requestSignal,
     timeoutMs: context.upstreamTimeoutMs
   });
   context.phase = "upstream_response";
@@ -443,8 +442,7 @@ async function proxyTransformed(
   const headers = upstreamHeaders(sanitizedHeaders, upstream, body.length);
   context.phase = "upstream_connect";
   const upstreamResponse = await requestCodexUpstream(upstream, "POST", headers, body, {
-    downstream: response,
-    isDownstreamClosed: context.isDownstreamClosed,
+    signal: context.requestSignal,
     timeoutMs: context.upstreamTimeoutMs
   });
   context.phase = "upstream_response";
@@ -686,12 +684,9 @@ function upstreamUrl(headers, context, suffix, search) {
 }
 
 function upstreamHeaders(source, upstream, contentLength) {
-  const headers = {};
-  for (const [name, value] of Object.entries(source)) {
-    const normalized = name.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(normalized) || normalized.startsWith("x-forwarded-")) continue;
-    if (value != null) headers[name] = value;
-  }
+  const headers = copyHttpHeaders(source, CODEX_TRANSPORT_HEADERS, {
+    excludedPrefixes: ["x-forwarded-"]
+  });
   headers.host = upstream.host;
   headers["accept-encoding"] = "identity";
   if (contentLength != null) {
@@ -702,12 +697,7 @@ function upstreamHeaders(source, upstream, contentLength) {
 }
 
 function forwardResponseHeaders(response, headers, transformed) {
-  for (const [name, value] of Object.entries(headers)) {
-    const normalized = name.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(normalized)) continue;
-    if (transformed && normalized === "content-length") continue;
-    if (value != null) response.setHeader(name, value);
-  }
+  forwardHttpHeaders(response, headers, CODEX_TRANSPORT_HEADERS);
   if (transformed) {
     response.removeHeader("content-length");
     response.removeHeader("content-encoding");
@@ -719,37 +709,18 @@ function applyLocalResponseSecurityHeaders(response) {
   response.setHeader("x-content-type-options", "nosniff");
 }
 
-function createDownstreamLifecycle(request, response) {
-  const controller = new AbortController();
-  let downstreamClosed = false;
-  const abort = () => {
-    if (controller.signal.aborted || response.writableEnded) return;
-    downstreamClosed = true;
-    controller.abort(gatewayError(
-      "PRIVACYAI_CODEX_CLIENT_DISCONNECTED",
-      "PrivacyAI stopped the Codex request because the client disconnected."
-    ));
-  };
-  request.once("aborted", abort);
-  response.once("close", abort);
-  return {
-    signal: controller.signal,
-    downstreamClosed: () => downstreamClosed,
-    cleanup() {
-      request.off("aborted", abort);
-      response.off("close", abort);
-    }
-  };
+function codexDownstreamLifecycle(request, response) {
+  return createDownstreamLifecycle(request, response, () => gatewayError(
+    "PRIVACYAI_CODEX_CLIENT_DISCONNECTED",
+    "PrivacyAI stopped the Codex request because the client disconnected."
+  ));
 }
 
 function throwIfAborted(signal) {
-  if (!signal?.aborted) return;
-  const reason = signal.reason;
-  if (reason instanceof Error) throw reason;
-  throw gatewayError(
+  throwIfRuntimeAborted(signal, () => gatewayError(
     "PRIVACYAI_REQUEST_ABORTED",
     "PrivacyAI stopped the Codex request because the client disconnected."
-  );
+  ));
 }
 
 function isCancellationError(error) {
@@ -807,46 +778,10 @@ function writeGatewayFailure(response, error) {
 }
 
 function writeWithBackpressure(stream, value) {
-  if (stream.destroyed || stream.writableEnded) {
-    return Promise.reject(gatewayError(
-      "PRIVACYAI_CODEX_CLIENT_DISCONNECTED",
-      "PrivacyAI stopped writing because the Codex client disconnected."
-    ));
-  }
-
-  let accepted;
-  try {
-    accepted = stream.write(value);
-  } catch (error) {
-    return Promise.reject(error);
-  }
-  if (accepted) return Promise.resolve();
-
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      stream.off("drain", onDrain);
-      stream.off("error", onError);
-      stream.off("close", onClose);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = error => {
-      cleanup();
-      reject(error);
-    };
-    const onClose = () => {
-      cleanup();
-      reject(gatewayError(
-        "PRIVACYAI_CODEX_CLIENT_DISCONNECTED",
-        "PrivacyAI stopped writing because the Codex client disconnected."
-      ));
-    };
-    stream.once("drain", onDrain);
-    stream.once("error", onError);
-    stream.once("close", onClose);
-  });
+  return writeRuntimeWithBackpressure(stream, value, () => gatewayError(
+    "PRIVACYAI_CODEX_CLIENT_DISCONNECTED",
+    "PrivacyAI stopped writing because the Codex client disconnected."
+  ));
 }
 
 async function closeGatewayResources(options) {

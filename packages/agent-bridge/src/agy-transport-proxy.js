@@ -5,6 +5,24 @@ import net from "node:net";
 
 import { restoreText } from "@privacy-ai/sdk";
 import { AgySseRestorer } from "./agy-sse-transform.js";
+import { runCleanupSteps } from "./resource-cleanup.js";
+import {
+  createDownstreamLifecycle,
+  throwIfAborted as throwIfRuntimeAborted
+} from "./runtime/downstream-lifecycle.js";
+import { readBoundedHttpBody } from "./runtime/http-body.js";
+import { requestHttpResponse } from "./runtime/http-client.js";
+import {
+  HOP_BY_HOP_HEADERS,
+  copyHttpHeaders,
+  forwardHttpHeaders
+} from "./runtime/http-headers.js";
+import {
+  closeHttpServers,
+  listenOnHost,
+  trackServerSockets
+} from "./runtime/http-server.js";
+import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MODEL_HOST = "daily-cloudcode-pa.googleapis.com";
@@ -23,17 +41,19 @@ const AUDITED_OPAQUE_ROUTES = new Map([
     "/v1internal:setUserSettings"
   ])]
 ]);
-const HOP_BY_HOP_HEADERS = new Set([
-  "connection",
-  "keep-alive",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
+const AGY_TRANSPORT_HEADERS = new Set([
+  ...HOP_BY_HOP_HEADERS,
   "host",
   "content-length"
+]);
+const AGY_MODEL_REQUEST_HEADERS = new Set([
+  ...AGY_TRANSPORT_HEADERS,
+  "content-encoding",
+  "accept-encoding"
+]);
+const AGY_TRANSFORMED_RESPONSE_HEADERS = new Set([
+  ...AGY_TRANSPORT_HEADERS,
+  "content-encoding"
 ]);
 
 export async function startAgyTransportProxy(options = {}) {
@@ -81,22 +101,37 @@ export async function startAgyTransportProxy(options = {}) {
   });
 
   try {
-    await listen(interceptServer, options.interceptPort || 0, LOOPBACK_HOST);
-    await listen(proxyServer, options.proxyPort || 0, LOOPBACK_HOST);
+    await listenOnHost(interceptServer, options.interceptPort || 0, LOOPBACK_HOST);
+    await listenOnHost(proxyServer, options.proxyPort || 0, LOOPBACK_HOST);
   } catch (error) {
-    await closeServers([proxyServer, interceptServer], sockets);
-    if (ownsUpstreamAgent) upstreamAgent.destroy();
+    await closeAgyProxyResources({
+      servers: [proxyServer, interceptServer],
+      sockets,
+      upstreamAgent,
+      ownsUpstreamAgent,
+      primaryError: error
+    });
     throw error;
   }
 
   const proxyAddress = proxyServer.address();
   if (!proxyAddress || typeof proxyAddress === "string") {
-    await closeServers([proxyServer, interceptServer], sockets);
-    if (ownsUpstreamAgent) upstreamAgent.destroy();
-    throw proxyError("PRIVACYAI_AGY_PROXY_ADDRESS", "PrivacyAI could not determine the AGY proxy address.");
+    const error = proxyError(
+      "PRIVACYAI_AGY_PROXY_ADDRESS",
+      "PrivacyAI could not determine the AGY proxy address."
+    );
+    await closeAgyProxyResources({
+      servers: [proxyServer, interceptServer],
+      sockets,
+      upstreamAgent,
+      ownsUpstreamAgent,
+      primaryError: error
+    });
+    throw error;
   }
 
   let closed = false;
+  let closePromise = null;
   return {
     host: LOOPBACK_HOST,
     port: proxyAddress.port,
@@ -108,11 +143,20 @@ export async function startAgyTransportProxy(options = {}) {
       GRPC_DEFAULT_SSL_ROOTS_FILE_PATH: options.authority.trustBundlePath,
       NO_PROXY: mergeNoProxy(options.baseEnv?.NO_PROXY || options.baseEnv?.no_proxy)
     },
-    async close() {
-      if (closed) return;
-      closed = true;
-      await closeServers([proxyServer, interceptServer], sockets);
-      if (ownsUpstreamAgent) upstreamAgent.destroy();
+    close() {
+      if (closed) return Promise.resolve();
+      if (closePromise) return closePromise;
+      closePromise = closeAgyProxyResources({
+        servers: [proxyServer, interceptServer],
+        sockets,
+        upstreamAgent,
+        ownsUpstreamAgent
+      }).then(() => {
+        closed = true;
+      }).finally(() => {
+        closePromise = null;
+      });
+      return closePromise;
     }
   };
 }
@@ -389,36 +433,23 @@ function handleConnect(request, clientSocket, head, context) {
 }
 
 function makeUpstreamRequest(options) {
-  return new Promise((resolve, reject) => {
-    const request = https.request({
-      hostname: options.hostname,
-      port: 443,
-      method: options.method,
-      path: options.path,
-      headers: options.headers,
-      servername: options.hostname,
-      agent: options.agent
-    }, resolve);
-    const abort = () => request.destroy(abortError());
-    if (options.signal) {
-      if (options.signal.aborted) return abort();
-      options.signal.addEventListener("abort", abort, { once: true });
-    }
-    request.once("error", reject);
-    request.once("close", () => options.signal?.removeEventListener("abort", abort));
-    request.end(options.body);
+  return requestHttpResponse(new URL(`https://${options.hostname}${options.path}`), {
+    method: options.method,
+    headers: options.headers,
+    body: options.body,
+    signal: options.signal,
+    abortError,
+    servername: options.hostname,
+    agent: options.agent
   });
 }
 
 export function buildAgyUpstreamHeaders(input, host, contentLength, options = {}) {
-  const output = {};
-  for (const [name, rawValue] of Object.entries(input || {})) {
-    const normalized = name.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(normalized)) continue;
-    if (options.modelRoute && normalized === "content-encoding") continue;
-    if (options.modelRoute && normalized === "accept-encoding") continue;
-    output[normalized] = rawValue;
-  }
+  const output = copyHttpHeaders(
+    input,
+    options.modelRoute ? AGY_MODEL_REQUEST_HEADERS : AGY_TRANSPORT_HEADERS,
+    { lowerCaseNames: true, includeNull: true }
+  );
   output.host = host;
   if (contentLength != null) output["content-length"] = String(contentLength);
   if (options.modelRoute) output["accept-encoding"] = "identity";
@@ -426,79 +457,32 @@ export function buildAgyUpstreamHeaders(input, host, contentLength, options = {}
 }
 
 function forwardResponseHeaders(response, headers, options = {}) {
-  for (const [name, value] of Object.entries(headers || {})) {
-    const normalized = name.toLowerCase();
-    if (HOP_BY_HOP_HEADERS.has(normalized)) continue;
-    if (options.transformed && new Set(["content-encoding", "content-length"]).has(normalized)) continue;
-    if (value != null) response.setHeader(name, value);
-  }
+  forwardHttpHeaders(
+    response,
+    headers,
+    options.transformed ? AGY_TRANSFORMED_RESPONSE_HEADERS : AGY_TRANSPORT_HEADERS
+  );
   response.setHeader("cache-control", "no-store");
 }
 
 function readBody(stream, maxBytes) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let ended = false;
-    let settled = false;
-    const finish = (error, value) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      if (error) reject(error);
-      else resolve(value);
-    };
-    const onData = chunk => {
-      size += chunk.length;
-      if (size > maxBytes) {
-        stream.destroy();
-        finish(proxyError("PRIVACYAI_AGY_BODY_TOO_LARGE", "PrivacyAI blocked an oversized AGY payload."));
-        return;
-      }
-      chunks.push(chunk);
-    };
-    const onEnd = () => {
-      ended = true;
-      finish(null, Buffer.concat(chunks));
-    };
-    const onError = error => finish(error);
-    const onClose = () => {
-      if (!ended) finish(proxyError("PRIVACYAI_AGY_BODY_TRUNCATED", "AGY payload closed before completion."));
-    };
-    const cleanup = () => {
-      stream.off("data", onData);
-      stream.off("end", onEnd);
-      stream.off("error", onError);
-      stream.off("close", onClose);
-    };
-    stream.on("data", onData);
-    stream.once("end", onEnd);
-    stream.once("error", onError);
-    stream.once("close", onClose);
+  return readBoundedHttpBody(stream, maxBytes, {
+    limitAction: "destroy",
+    errors: {
+      tooLarge: () => proxyError(
+        "PRIVACYAI_AGY_BODY_TOO_LARGE",
+        "PrivacyAI blocked an oversized AGY payload."
+      ),
+      truncated: () => proxyError(
+        "PRIVACYAI_AGY_BODY_TRUNCATED",
+        "AGY payload closed before completion."
+      )
+    }
   });
 }
 
 function downstreamLifecycle(request, response) {
-  const controller = new AbortController();
-  const abort = () => {
-    if (!controller.signal.aborted) controller.abort(abortError());
-  };
-  request.once("aborted", abort);
-  response.once("close", abort);
-  return {
-    signal: controller.signal,
-    cleanup() {
-      request.off("aborted", abort);
-      response.off("close", abort);
-    }
-  };
-}
-
-function trackServerSockets(server, sockets) {
-  server.on("connection", socket => {
-    sockets.add(socket);
-    socket.once("close", () => sockets.delete(socket));
-  });
+  return createDownstreamLifecycle(request, response, abortError);
 }
 
 function parseConnectTarget(authority) {
@@ -541,45 +525,23 @@ function mergeNoProxy(value) {
   return items.join(",");
 }
 
-function listen(server, port, host) {
-  return new Promise((resolve, reject) => {
-    const onError = error => reject(error);
-    server.once("error", onError);
-    server.listen(port, host, () => {
-      server.off("error", onError);
-      resolve();
-    });
-  });
-}
-
-function closeServers(servers, sockets) {
-  const closing = servers.map(server => new Promise(resolve => {
-    if (!server.listening) return resolve();
-    server.close(() => resolve());
-  }));
-  for (const server of servers) {
-    server.closeIdleConnections?.();
-    server.closeAllConnections?.();
-  }
-  for (const socket of sockets) socket.destroy();
-  return Promise.all(closing);
-}
-
 function writeWithBackpressure(stream, value) {
-  if (stream.destroyed || stream.writableEnded) return Promise.reject(abortError());
-  if (stream.write(value)) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      stream.off("drain", onDrain);
-      stream.off("error", onError);
-      stream.off("close", onClose);
-    };
-    const onDrain = () => { cleanup(); resolve(); };
-    const onError = error => { cleanup(); reject(error); };
-    const onClose = () => { cleanup(); reject(abortError()); };
-    stream.once("drain", onDrain);
-    stream.once("error", onError);
-    stream.once("close", onClose);
+  return writeRuntimeWithBackpressure(stream, value, abortError);
+}
+
+async function closeAgyProxyResources(options) {
+  await runCleanupSteps([
+    {
+      name: "servers",
+      run: () => closeHttpServers(options.servers, options.sockets)
+    },
+    {
+      name: "upstream-agent",
+      run: () => options.ownsUpstreamAgent ? options.upstreamAgent?.destroy() : undefined
+    }
+  ], {
+    primaryError: options.primaryError,
+    message: "PrivacyAI could not fully close the AGY transport proxy."
   });
 }
 
@@ -641,8 +603,7 @@ function reportError(options, error, phase) {
 }
 
 function throwIfAborted(signal) {
-  if (!signal?.aborted) return;
-  throw signal.reason instanceof Error ? signal.reason : abortError();
+  throwIfRuntimeAborted(signal, abortError);
 }
 
 function abortError() {
