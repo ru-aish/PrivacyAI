@@ -215,10 +215,13 @@ export function inspectLineage(database, schemaVersion, request = {}) {
   }
 
   if (action === "mutations") {
+    const geometryColumns = schemaVersion >= 3
+      ? "operation_type, source_length, next_length,"
+      : "'unknown' AS operation_type, NULL AS source_length, NULL AS next_length,";
     const mutations = database.prepare(`
       SELECT mutation_id, worktree_id, path_hash, expected_content_hash,
              next_content_hash, manifest_hash, status, opaque_reference,
-             operation_type, source_length, next_length,
+             ${geometryColumns}
              committed_reference, created_at, last_used_at
       FROM ledger_file_mutations
       ORDER BY last_used_at DESC, mutation_id ASC

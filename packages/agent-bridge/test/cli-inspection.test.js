@@ -142,3 +142,80 @@ test("CLI inspection returns metadata without stored originals", async t => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("CLI inspection reads pre-v3 mutations without requiring a writable migration", async t => {
+  let sqlite;
+  try {
+    sqlite = await import("node:sqlite");
+  } catch (error) {
+    if (error?.code === "ERR_UNKNOWN_BUILTIN_MODULE" || error?.code === "ERR_MODULE_NOT_FOUND") {
+      t.skip("node:sqlite is unavailable");
+      return;
+    }
+    throw error;
+  }
+
+  const root = await mkdtemp(join(tmpdir(), "privacyai-inspection-v2-"));
+  const path = join(root, "context.sqlite3");
+  let database;
+  try {
+    database = new sqlite.DatabaseSync(path);
+    database.exec(`
+      CREATE TABLE privacyai_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO privacyai_meta VALUES('schema_version', '2');
+      CREATE TABLE threads(session_key TEXT PRIMARY KEY, parent_keys_json TEXT, session_map_json TEXT, policy_fingerprint TEXT, updated_at INTEGER);
+      CREATE TABLE verified_items(cache_key TEXT PRIMARY KEY, content_hash TEXT, artifact_type TEXT, policy_fingerprint TEXT, additions_json TEXT, created_at INTEGER, last_used_at INTEGER, hit_count INTEGER);
+      CREATE TABLE thread_items(session_key TEXT, slot_key TEXT, cache_key TEXT, content_hash TEXT, artifact_type TEXT, last_seen_at INTEGER);
+      CREATE TABLE ledger_worktrees(worktree_id TEXT PRIMARY KEY);
+      CREATE TABLE ledger_manifests(manifest_hash TEXT PRIMARY KEY);
+      CREATE TABLE ledger_file_mutations(
+        mutation_id TEXT PRIMARY KEY,
+        worktree_id TEXT NOT NULL,
+        path_hash TEXT NOT NULL,
+        expected_content_hash TEXT NOT NULL,
+        next_content_hash TEXT NOT NULL,
+        manifest_hash TEXT,
+        status TEXT NOT NULL,
+        opaque_reference TEXT NOT NULL,
+        committed_reference TEXT,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER NOT NULL
+      );
+      INSERT INTO ledger_file_mutations VALUES(
+        'mutation-v2', 'worktree-v2', 'path-v2', 'before-v2', 'after-v2',
+        NULL, 'committed', 'opaque-v2', 'commit-v2', 1, 2
+      );
+    `);
+    database.close();
+    database = null;
+
+    const service = await createCliInspectionService({ verificationDbPath: path });
+    const result = service.inspectLineage({ action: "mutations", limit: 10 });
+    service.close();
+
+    assert.deepEqual(result.mutations, [{
+      mutation_id: "mutation-v2",
+      worktree_id: "worktree-v2",
+      path_hash: "path-v2",
+      expected_content_hash: "before-v2",
+      next_content_hash: "after-v2",
+      manifest_hash: null,
+      status: "committed",
+      opaque_reference: "opaque-v2",
+      operation_type: "unknown",
+      source_length: null,
+      next_length: null,
+      committed_reference: "commit-v2",
+      created_at: 1,
+      last_used_at: 2
+    }]);
+  } finally {
+    try {
+      database?.close();
+    } catch {
+      // Cleanup only.
+    }
+
+    await rm(root, { recursive: true, force: true });
+  }
+});
