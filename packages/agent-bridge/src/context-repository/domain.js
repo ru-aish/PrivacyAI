@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { normalizeSessionMap } from "@privacy-ai/sdk";
-import { collisionError } from "./errors.js";
+import { collisionError, contextStoreError } from "./errors.js";
 
 export { normalizeSessionMap };
 
@@ -23,8 +23,12 @@ export function emptyThread(sessionKey) {
 export function parseJson(value, label) {
   try {
     return JSON.parse(value);
-  } catch {
-    throw new Error(`PrivacyAI found malformed ${label} in its local context database.`);
+  } catch (error) {
+    throw contextStoreError(
+      "PRIVACYAI_CONTEXT_DB_CORRUPT",
+      `PrivacyAI found malformed ${label} in its local context database.`,
+      error
+    );
   }
 }
 
@@ -93,6 +97,15 @@ export function optionalInteger(value) {
   return number;
 }
 
+export function requiredInteger(value, name) {
+  if (value == null) throw new TypeError(`${name} is required.`);
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < 0) {
+    throw new TypeError(`${name} must be a non-negative safe integer.`);
+  }
+  return number;
+}
+
 export const opaque = value => typeof value === "string" ? value : "";
 
 export function positiveInteger(value, fallback, name) {
@@ -121,8 +134,8 @@ export function normalizeManifestEntries(value) {
 
 function normalizeRanges(value, message, referenceName) {
   return (Array.isArray(value) ? value : []).map(item => {
-    const start = optionalInteger(item?.start);
-    const end = optionalInteger(item?.end);
+    const start = requiredInteger(item?.start, "range start");
+    const end = requiredInteger(item?.end, "range end");
     if (end < start || !item?.classification) throw new TypeError(message);
     return { start, end, classification: item.classification, reference: requiredOpaqueReference(item.reference, referenceName) };
   });
@@ -166,9 +179,9 @@ export function normalizeMutationEdits(edits, sourceLength) {
   if (!Array.isArray(edits)) throw new TypeError("mutation edits must be an array.");
   let previousEnd = 0;
   return edits.map(edit => {
-    const start = optionalInteger(edit?.start);
-    const end = optionalInteger(edit?.end);
-    const insertedLength = optionalInteger(edit?.insertedLength);
+    const start = requiredInteger(edit?.start, "mutation edit start");
+    const end = requiredInteger(edit?.end, "mutation edit end");
+    const insertedLength = requiredInteger(edit?.insertedLength, "mutation edit inserted length");
     if (end < start || start < previousEnd || (sourceLength != null && end > sourceLength)) {
       throw new TypeError("mutation edits must be ordered, non-overlapping source ranges.");
     }
@@ -176,8 +189,8 @@ export function normalizeMutationEdits(edits, sourceLength) {
     let lastInsertionEnd = 0;
     const knownInsertions = (edit.knownInsertions || []).map(insertion => {
       const value = {
-        offset: optionalInteger(insertion.offset),
-        length: optionalInteger(insertion.length),
+        offset: requiredInteger(insertion.offset, "insertion offset"),
+        length: requiredInteger(insertion.length, "insertion length"),
         classification: String(insertion.classification || "opaque_reference"),
         reference: requiredOpaqueReference(insertion.reference, "insertion reference")
       };

@@ -41,21 +41,18 @@ export class SessionVault {
         path
       };
     }
-    let parsed;
     try {
-      parsed = JSON.parse(serialized);
+      const parsed = parseStoredObject(serialized);
+      return {
+        version: parsed.version || VAULT_VERSION,
+        sessionId,
+        sessionMap: normalizeSessionMap(parsed.sessionMap),
+        updatedAt: parsed.updatedAt || null,
+        path
+      };
     } catch {
-      const error = new Error("PrivacyAI found malformed data in its local session vault.");
-      error.code = "PRIVACYAI_VAULT_CORRUPT";
-      throw error;
+      throw corruptVaultError();
     }
-    return {
-      version: parsed.version || VAULT_VERSION,
-      sessionId,
-      sessionMap: normalizeSessionMap(parsed.sessionMap),
-      updatedAt: parsed.updatedAt || null,
-      path
-    };
   }
 
   async save(sessionId, sessionMap) {
@@ -112,21 +109,34 @@ export async function loadSessionMap(options = {}) {
   if (options.mapFile || process.env.PRIVACYAI_SESSION_MAP_FILE) {
     const path = resolve(options.mapFile || process.env.PRIVACYAI_SESSION_MAP_FILE);
     const serialized = await readFile(path, "utf8");
-    let parsed;
     try {
-      parsed = JSON.parse(serialized);
+      const parsed = parseStoredObject(serialized);
+      return normalizeSessionMap(parsed.sessionMap || parsed);
     } catch {
       const error = new Error("PrivacyAI found malformed data in its local session map file.");
       error.code = "PRIVACYAI_SESSION_MAP_FILE_CORRUPT";
       throw error;
     }
-    return normalizeSessionMap(parsed.sessionMap || parsed);
   }
 
   const sessionId = options.sessionId;
   if (!sessionId) return {};
   const vault = options.vault || new SessionVault(options);
   return (await vault.load(sessionId)).sessionMap;
+}
+
+function parseStoredObject(serialized) {
+  const value = JSON.parse(serialized);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("stored session data must be an object");
+  }
+  return value;
+}
+
+function corruptVaultError() {
+  const error = new Error("PrivacyAI found malformed data in its local session vault.");
+  error.code = "PRIVACYAI_VAULT_CORRUPT";
+  return error;
 }
 
 async function acquireSessionLock(lockPath, options = {}) {

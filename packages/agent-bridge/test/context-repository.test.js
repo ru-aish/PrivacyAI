@@ -200,6 +200,51 @@ test("memory fallback preserves permissive parent handling while pruning unusabl
   store.close();
 });
 
+test("database-backed geometry requires every non-null integer before storage", async t => {
+  const sqlite = (await opened(t)).store;
+  const memory = new MemoryContextVerificationStore();
+  t.after(() => memory.close());
+
+  for (const store of [sqlite, memory]) {
+    assert.throws(() => store.putPrivacyPlan({
+      contentHash: hash("required-content"),
+      policyFingerprint: hash("required-policy"),
+      spans: [{ end: 1, classification: "token", reference: hash("span") }],
+      editPlan: []
+    }), /range start is required/);
+
+    assert.throws(() => store.stageFileMutation({
+      mutationId: hash("required-mutation"),
+      worktreeId: hash("required-worktree"),
+      pathHash: hash("required-path"),
+      expectedContentHash: hash("required-old"),
+      nextContentHash: hash("required-new"),
+      opaqueReference: hash("required-ref"),
+      edits: [{ start: 0, end: 0 }]
+    }), /inserted length is required/);
+
+    assert.throws(() => store.stageFileMutation({
+      mutationId: hash("required-insertion"),
+      worktreeId: hash("required-worktree"),
+      pathHash: hash("required-path"),
+      expectedContentHash: hash("required-old"),
+      nextContentHash: hash("required-new"),
+      opaqueReference: hash("required-ref"),
+      edits: [{
+        start: 0,
+        end: 0,
+        insertedLength: 1,
+        knownInsertions: [{ length: 1, reference: hash("insertion") }]
+      }]
+    }), /insertion offset is required/);
+  }
+
+  assert.equal(sqlite.database.prepare("SELECT COUNT(*) AS count FROM ledger_privacy_plans").get().count, 0);
+  assert.equal(sqlite.database.prepare("SELECT COUNT(*) AS count FROM ledger_file_mutations").get().count, 0);
+  assert.equal(memory.privacyPlans.size, 0);
+  assert.equal(memory.fileMutations.size, 0);
+});
+
 test("malformed database rows and open failures do not expose private bytes or paths", async t => {
   const { root, path, store } = await opened(t);
   const secret = "PRIVATE-ROW-SECRET-DO-NOT-LOG";
@@ -209,7 +254,7 @@ test("malformed database rows and open failures do not expose private bytes or p
   assert.throws(() => store.loadThread("corrupt-row"), error => {
     const diagnostic = [error?.message, error?.stack, error?.cause?.message, error?.cause?.stack]
       .filter(Boolean).join("\n");
-    return !diagnostic.includes(secret);
+    return error?.code === "PRIVACYAI_CONTEXT_DB_CORRUPT" && !diagnostic.includes(secret);
   });
 
   const privatePathFragment = "private-database-path-fragment";

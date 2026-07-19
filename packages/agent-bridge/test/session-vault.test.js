@@ -61,4 +61,17 @@ test("SessionVault corruption errors never echo stored originals", async () => {
       .filter(Boolean).join("\n");
     return error?.code === "PRIVACYAI_SESSION_MAP_FILE_CORRUPT" && !diagnostic.includes(secret);
   });
+
+  for (const [name, serialized] of [["null", "null"], ["primitive", "42"], ["array", "[]"]]) {
+    await writeFile(vault.pathForSession(name), serialized, { mode: 0o600 });
+    await assert.rejects(
+      vault.load(name),
+      error => error?.code === "PRIVACYAI_VAULT_CORRUPT"
+    );
+    await writeFile(mapFile, serialized, { mode: 0o600 });
+    await assert.rejects(
+      loadSessionMap({ mapFile }),
+      error => error?.code === "PRIVACYAI_SESSION_MAP_FILE_CORRUPT"
+    );
+  }
 });
