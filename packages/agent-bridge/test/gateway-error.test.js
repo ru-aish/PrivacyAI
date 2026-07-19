@@ -142,6 +142,37 @@ test("unknown raw and factory codes fail closed to a safe gateway failure", () =
   assert.equal(factoryUnknown.message, EXPECTED_MESSAGES.fallback);
 });
 
+test("known repository and runtime codes retain legacy gateway compatibility", () => {
+  const codes = [
+    "PRIVACYAI_CONTEXT_DB_UNAVAILABLE",
+    "PRIVACYAI_CONTEXT_DB_WRITE_FAILED",
+    "PRIVACYAI_CONTEXT_DB_CLOSED",
+    "PRIVACYAI_CONTEXT_DB_SCHEMA_UNSUPPORTED",
+    "PRIVACYAI_CONTEXT_DB_CORRUPT",
+    "PRIVACYAI_CONTEXT_DB_RETRY_TIMEOUT",
+    "PRIVACYAI_SESSION_MAP_FILE_CORRUPT",
+    "PRIVACYAI_VAULT_CORRUPT",
+    "PRIVACYAI_VAULT_LOCK_TIMEOUT",
+    "PRIVACYAI_SERVER_CLOSE_TIMEOUT"
+  ];
+
+  for (const code of codes) {
+    const source = Object.assign(new Error(`internal ${PRIVATE_PROMPT}`), { code });
+    const normalized = normalizeGatewayContractError(source);
+    assert.equal(normalized.code, code, code);
+    assert.equal(normalized.category, "privacy_boundary", code);
+    assert.equal(normalized.status, 422, code);
+    assert.equal(normalized.retryable, false, code);
+    assert.equal(normalized.publicMessage, EXPECTED_MESSAGES.boundary, code);
+    assert.equal(normalized.cause, source, code);
+  }
+
+  assert.deepEqual(publicGatewayFailure({ code: "PRIVACYAI_CONTEXT_DB_FUTURE_FAILURE" }), {
+    code: "PRIVACYAI_CODEX_GATEWAY_FAILURE",
+    category: "gateway"
+  });
+});
+
 test("canonical normalization keeps stable identity, phase, and safe diagnostics", () => {
   const storage = createPrivacyError({
     code: "PRIVACYAI_STORAGE_FAILURE",

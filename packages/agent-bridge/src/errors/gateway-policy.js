@@ -33,6 +33,16 @@ const CODE_CATEGORIES = new Map([
   ["PRIVACYAI_CODEX_BODY_ABORTED", "client_cancelled"],
   ["PRIVACYAI_REQUEST_ABORTED", "client_cancelled"],
   ["PRIVACYAI_STORAGE_FAILURE", "storage"],
+  ["PRIVACYAI_CONTEXT_DB_UNAVAILABLE", "privacy_boundary"],
+  ["PRIVACYAI_CONTEXT_DB_WRITE_FAILED", "privacy_boundary"],
+  ["PRIVACYAI_CONTEXT_DB_CLOSED", "privacy_boundary"],
+  ["PRIVACYAI_CONTEXT_DB_SCHEMA_UNSUPPORTED", "privacy_boundary"],
+  ["PRIVACYAI_CONTEXT_DB_CORRUPT", "privacy_boundary"],
+  ["PRIVACYAI_CONTEXT_DB_RETRY_TIMEOUT", "privacy_boundary"],
+  ["PRIVACYAI_SESSION_MAP_FILE_CORRUPT", "privacy_boundary"],
+  ["PRIVACYAI_VAULT_CORRUPT", "privacy_boundary"],
+  ["PRIVACYAI_VAULT_LOCK_TIMEOUT", "privacy_boundary"],
+  ["PRIVACYAI_SERVER_CLOSE_TIMEOUT", "privacy_boundary"],
   ["PRIVACYAI_INTERNAL_FAILURE", "internal"],
   ["PRIVACYAI_CODEX_GATEWAY_FAILURE", "gateway"]
 ]);
