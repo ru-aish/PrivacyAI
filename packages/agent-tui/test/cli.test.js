@@ -179,6 +179,37 @@ test("doctor distinguishes broken installed agents from absent optional agents",
   assert.equal(result.agents.find(agent => agent.name === "claude").installed, false);
 });
 
+test("doctor isolates executable discovery failures per agent", async () => {
+  const stdout = capture();
+  const stderr = capture();
+  const bridgeModule = {
+    loadPrivacyConfig: async () => ({
+      configured: true,
+      path: "/tmp/privacyai-config.json",
+      config: { provider: "ollama", model: "local-model" }
+    }),
+    checkPrivacyModel: async () => ({ ok: true }),
+    resolveExecutable: async name => {
+      if (name === "claude") throw new Error("Executable discovery failed safely.");
+      return null;
+    },
+    verifyNativeExecutable: async () => ({ version: null })
+  };
+
+  const code = await runPrivacyAiCli(["doctor", "--json"], {
+    stdout: stdout.stream,
+    stderr: stderr.stream,
+    bridgeModule
+  });
+  assert.equal(code, CLI_EXIT_CODES.failure);
+  assert.equal(stderr.text(), "");
+  const result = JSON.parse(stdout.text());
+  const claude = result.agents.find(agent => agent.name === "claude");
+  assert.equal(claude.installed, false);
+  assert.equal(claude.ok, false);
+  assert.equal(claude.reason, "Executable discovery failed safely.");
+});
+
 test("cache and lineage inspection keep metadata on stdout and close the service", async () => {
   let closeCount = 0;
   const inspectionService = {
