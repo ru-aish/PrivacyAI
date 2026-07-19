@@ -108,4 +108,44 @@ console.log(safePrompt);
 * **Web Demo:** [apps/web-demo/README.md](apps/web-demo/README.md)
 * **Extension Source:** [apps/browser-extension/README.md](apps/browser-extension/README.md)
 * **Architecture Docs:** [docs/architecture.md](docs/architecture.md)
+* **P0 Visual Review:** [interactive problem → solution walkthrough](docs/p0-context-privacy-review.html) · [mobile preview](docs/p0-context-privacy-review-preview.png)
 * **Code Examples:** [examples/README.md](examples/README.md)
+
+## Native Claude Code, Codex, and Antigravity protection
+
+PrivacyAI can wrap the user's installed official CLI without replacing its
+provider login:
+
+```bash
+npm install --global @privacy-ai/agent-tui
+privacyai onboard
+privacyai claude
+privacyai codex
+privacyai agy --print "your prompt"
+```
+
+Codex now defaults to a bidirectional loopback Responses gateway. It keeps the
+normal `CODEX_HOME`, account, model, history, skills, plugins, user MCP servers,
+filesystem, shell, patch, Git, resume, fork, exec, and review workflows. On
+Unix-like systems, inside an interactive `privacyai codex` TUI, `/resume`,
+`/resume --all`, `/resume --last`,
+`/fork`, `/fork --all`, and `/fork --last` restart stock Codex through the same
+protected gateway. The shell forms `privacyai codex resume ...` and
+`privacyai codex fork ...` remain available. Running raw `codex resume` or
+`codex fork` bypasses PrivacyAI and may submit unsanitized local history.
+Model-visible request content is sanitized locally; streamed assistant text and
+completed tool arguments are restored before stock Codex consumes them. The
+gateway adds no second OpenAI model turn. Provider-hosted search/apps/browser,
+images, realtime/WebSockets, remote clients, and alternate provider routes remain
+disabled until they have an equivalent protected boundary. The prior prompt-only
+Codex mode remains available with `privacyai codex --privacy-strict`.
+
+Claude Code continues to use startup isolation plus supported native prompt/tool
+hooks. AGY now defaults to a process-scoped selective HTTPS boundary around the
+stock CLI: normal files, terminal, browser, MCPs, account, model, and native tool
+execution remain available while supported model-bound text/JSON is sanitized
+locally and streamed output is restored before AGY consumes it. The earlier
+fresh one-shot, tool-denied behavior remains available as
+`privacyai agy --privacy-strict`. All hosts fail closed when a provider-facing
+boundary cannot be verified. See `docs/native-agent-tui-wrapper.md` for
+architecture, tests, and limitations.

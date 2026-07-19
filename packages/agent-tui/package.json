@@ -1,0 +1,27 @@
+{
+  "name": "@privacy-ai/agent-tui",
+  "version": "0.0.2",
+  "description": "PrivacyAI wrapper for Claude Code, Codex, and Antigravity CLI.",
+  "type": "module",
+  "bin": {
+    "privacyai": "./bin/privacyai.js"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@privacy-ai/agent-bridge": "workspace:0.0.2"
+  },
+  "engines": {
+    "node": ">=18.18"
+  },
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "license": "MIT"
+}

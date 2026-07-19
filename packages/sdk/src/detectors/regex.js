@@ -22,13 +22,28 @@ const PATTERNS = [
   },
   {
     type: "PHONE",
+    confidence: 0.94,
+    regex: /(?<![\dA-Za-z])\+\d{1,3}(?:[\s.-]?\d){8,14}(?!\d)/g
+  },
+  {
+    type: "PHONE",
+    confidence: 0.88,
+    regex: /\b[6-9]\d{4}[\s.-]?\d{5}\b/g
+  },
+  {
+    type: "PHONE",
     confidence: 0.85,
-    regex: /(?:\+\d{1,3}[-.\s()]*)?(?:\(?\d{2,5}\)?[-.\s()]*){1,3}\d{4}\b/g
+    regex: /(?:\+\d{1,3}[-.\s()]*)?(?:\(?\d{2,5}\)?[-.\s()]*){1,3}\d{4}\b/g,
+    validate: (value) => {
+      const digits = value.replace(/\D/g, "");
+      return digits.length >= 8 && digits.length <= 15;
+    }
   },
   {
     type: "PHONE",
     confidence: 0.82,
-    regex: /\b\d{3}[-.]\d{4}\b/g
+    regex: /\b(?:phone|tel|telephone|mobile)\s*[:=]?\s*(\d{3}[-.]\d{4})\b/gi,
+    valueGroup: 1
   },
   {
     type: "API_KEY",
@@ -82,7 +97,7 @@ const PATTERNS = [
   {
     type: "URL_CREDENTIAL",
     confidence: 0.97,
-    regex: /(?:https?:\/\/|ftp:\/\/)(?:[^@\/]+):([^@]+)@/g,
+    regex: /(?:https?:\/\/|ftp:\/\/)(?:[^@\/\s]+):([^@\/\s]+)@/g,
     valueGroup: 1
   },
   {
@@ -94,19 +109,19 @@ const PATTERNS = [
   {
     type: "CONNECTION_STRING_CREDENTIAL",
     confidence: 0.96,
-    regex: /\b(?:postgres(?:ql)?|mysql|mongodb|redis|amqp|kafka):\/\/([^:]+):([^@]+)@/g,
+    regex: /\b(?:postgres(?:ql)?|mysql|mongodb|redis|amqp|kafka):\/\/([^:\/\s]+):([^@\/\s]+)@/g,
     valueGroup: 1
   },
   {
     type: "CONNECTION_STRING_CREDENTIAL",
     confidence: 0.96,
-    regex: /\b(?:postgres(?:ql)?|mysql|mongodb|redis|amqp|kafka):\/\/(?:[^:]+):([^@]+)@/g,
+    regex: /\b(?:postgres(?:ql)?|mysql|mongodb|redis|amqp|kafka):\/\/(?:[^:\/\s]+):([^@\/\s]+)@/g,
     valueGroup: 1
   },
   {
     type: "CONNECTION_STRING_CREDENTIAL",
     confidence: 0.95,
-    regex: /\bredis:\/\/:([^@]+)@/g,
+    regex: /\bredis:\/\/:([^@\/\s]+)@/g,
     valueGroup: 1
   },
   {
@@ -128,16 +143,16 @@ const PATTERNS = [
   }
 ];
 
-const ORG_REGEX = /\b([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,4}\s+(?:Inc|LLC|Ltd|Corp|Corporation|Company|Labs|Systems|Bank|Hospital|University))\b/g;
-const PERSON_REGEX = /\b(?:Dr\.?\s+|Prof\.?\s+|Mr\.?\s+|Ms\.?\s+|Mrs\.?\s+)?([A-Z][a-z]+(?:[-'][A-Z][a-z]+)?\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?(?:\s+(?:Jr\.?|Sr\.?|III|IV))?)\b/g;
-const CONTACT_PERSON_REGEX = /\bContact\s+([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+)\s+at\b/g;
-const CONTEXT_NAME_REGEX = /\b(?:my name is\s+|name['"]?\s*:\s*['"]?)([A-Z][A-Za-z'’-]+(?:\s+[A-Z][A-Za-z'’-]+)+?)(?=[,'".}]|\s+(?:and|my|with|at|from|in)\b|$)/gi;
-const CONTEXT_PATIENT_REGEX = /\b(?:patient|customer|employee)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+?)(?=[,'".}]|\s+(?:reported|said|has|is|was)\b|$)/gi;
-const CONTEXT_COMPANY_REGEX = /\b(?:company['"]?\s*:\s*['"]?|my company is\s+)([A-Z][A-Za-z0-9&.'-]*(?:\s+[A-Z][A-Za-z0-9&.'-]*){0,3}?)(?=[,'".}]|\s+(?:and|my|with|at)\b|$)/gi;
-const CONTEXT_CITY_REGEX = /\b(?:city['"]?\s*:\s*['"]|live in\s+|located in\s+)([A-Z][A-Za-z .'-]+?)(?=[,'".}]|\s+(?:and|my|with|at)\b|$)/gi;
+const ORG_REGEX = /\b([A-Z][A-Za-z0-9&.'-]*(?:[ \t]+[A-Z][A-Za-z0-9&.'-]*){0,4}[ \t]+(?:Inc|LLC|Ltd|Corp|Corporation|Company|Labs|Systems|Bank|Hospital|University))\b/g;
+const PERSON_REGEX = /\b(?:Dr\.?[ \t]+|Prof\.?[ \t]+|Mr\.?[ \t]+|Ms\.?[ \t]+|Mrs\.?[ \t]+)?([A-Z][a-z]+(?:[-'][A-Z][a-z]+)?[ \t]+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?(?:[ \t]+(?:Jr\.?|Sr\.?|III|IV))?)\b/g;
+const CONTACT_PERSON_REGEX = /\bContact[ \t]+([A-Z][A-Za-z'’-]+(?:[ \t]+[A-Z][A-Za-z'’-]+)+)[ \t]+at\b/g;
+const CONTEXT_NAME_REGEX = /\b(?:my name is[ \t]+|name['"]?[ \t]*:[ \t]*['"]?)([A-Z][A-Za-z'’-]+(?:[ \t]+[A-Z][A-Za-z'’-]+)+?)(?=[,'".}]|[ \t]+(?:and|my|with|at|from|in)\b|$)/gi;
+const CONTEXT_PATIENT_REGEX = /\b(?:patient|customer|employee)[ \t]+([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)+?)(?=[,'".}]|[ \t]+(?:reported|said|has|is|was)\b|$)/gi;
+const CONTEXT_COMPANY_REGEX = /\b(?:company['"]?[ \t]*:[ \t]*['"]?|my company is[ \t]+)([A-Z][A-Za-z0-9&.'-]*(?:[ \t]+[A-Z][A-Za-z0-9&.'-]*){0,3}?)(?=[,'".}]|[ \t]+(?:and|my|with|at)\b|$)/gi;
+const CONTEXT_CITY_REGEX = /\b(?:city['"]?[ \t]*:[ \t]*['"]|live in[ \t]+|located in[ \t]+)([A-Z][A-Za-z .'-]+?)(?=[,'".}]|[ \t]+(?:and|my|with|at)\b|$)/gi;
 const CONTEXT_ZIP_REGEX = /\bzip['"]?\s*:\s*['"]?(\d{5}(?:-\d{4})?)/gi;
 const COMMON_LOCATION_REGEX = /\b(New York|Berlin|Boston|San Francisco|Seattle|London|Paris|Mumbai|Delhi|Bengaluru|Tokyo)\b/g;
-const CONTEXT_NAME_DOB_REGEX = /\b(?:name|DOB)\s*:\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g;
+const CONTEXT_NAME_DOB_REGEX = /\b(?:name|DOB)[ \t]*:[ \t]*([A-Z][a-z]+(?:[ \t]+[A-Z][a-z]+)?)\b/g;
 
 export class RegexDetector {
   detect(text) {

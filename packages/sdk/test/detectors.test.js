@@ -110,3 +110,35 @@ test("preserves common technical terms and public names", () => {
   const results = detect("Using React, TypeScript, and GitHub");
   assert.ok(results.every(d => d.type !== "PERSON"));
 });
+
+test("detects Indian and international phone formats", () => {
+  const indian = detect("Call me at +91 98765 43210 or 98765 43210.");
+  assert.ok(indian.some(d => d.type === "PHONE" && d.value === "+91 98765 43210"));
+  assert.ok(indian.some(d => d.type === "PHONE" && d.value === "98765 43210"));
+
+  const uk = detect("Backup number: +44 20 7946 0958");
+  assert.ok(uk.some(d => d.type === "PHONE" && d.value === "+44 20 7946 0958"));
+});
+
+
+test("does not join capitalized words across lines into a person name", () => {
+  const results = detect("name:\nOutput Schema");
+  assert.equal(results.some(d => d.type === "PERSON" && /\r|\n/.test(d.value)), false);
+});
+
+test("does not classify short numeric protocol fragments as phone numbers", () => {
+  const results = detect("versions 0.144.1 and limits 100-2000 with id 123-4567");
+  assert.equal(results.some(d => d.type === "PHONE"), false);
+  const explicit = detect("phone: 123-4567");
+  assert.equal(explicit.some(d => d.type === "PHONE" && d.value === "123-4567"), true);
+});
+
+
+test("credential patterns never cross whitespace or newline boundaries", () => {
+  const text = "Example http://public-host/path\nlong documentation block @example.test";
+  const results = detect(text);
+  assert.equal(results.some(d => ["URL_CREDENTIAL", "CONNECTION_STRING_CREDENTIAL"].includes(d.type)), false);
+
+  const real = detect("postgres://alice:secret-pass@db.internal:5432/app");
+  assert.equal(real.some(d => d.type === "CONNECTION_STRING_CREDENTIAL" && d.value === "secret-pass"), true);
+});

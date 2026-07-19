@@ -1,0 +1,1498 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#e8f6f4">
+  <title>PrivacyAI P0 — Context Privacy Gateway</title>
+  <style>
+    :root {
+      --paper: #f7fbfa;
+      --paper-deep: #e8f6f4;
+      --ink: #142d36;
+      --ink-soft: #45606a;
+      --line: #b8d1d0;
+      --safe: #0a7b78;
+      --safe-soft: #d5f0ec;
+      --danger: #b44338;
+      --danger-soft: #f8dfda;
+      --warn: #9b6b0e;
+      --warn-soft: #f8edc8;
+      --provider: #4f5f91;
+      --provider-soft: #e4e8f6;
+      --white: #ffffff;
+      --shadow: 0 18px 50px rgba(20, 45, 54, 0.10);
+      --radius: 22px;
+      --mono: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --display: "Arial Narrow", "Roboto Condensed", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--paper);
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(20, 45, 54, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(20, 45, 54, 0.035) 1px, transparent 1px),
+        var(--paper);
+      background-size: 24px 24px;
+      font-family: var(--sans);
+      line-height: 1.55;
+      overflow-x: hidden;
+    }
+
+    a { color: inherit; }
+    button { font: inherit; }
+
+    .skip-link {
+      position: fixed;
+      left: 12px;
+      top: 12px;
+      z-index: 100;
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: var(--ink);
+      color: var(--white);
+      transform: translateY(-180%);
+      transition: transform 160ms ease;
+    }
+
+    .skip-link:focus { transform: translateY(0); }
+
+    .shell {
+      width: min(1180px, calc(100% - 28px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 50;
+      backdrop-filter: blur(16px);
+      background: rgba(247, 251, 250, 0.88);
+      border-bottom: 1px solid rgba(184, 209, 208, 0.75);
+    }
+
+    .topbar-inner {
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--ink);
+      border-radius: 9px;
+      background: var(--safe-soft);
+      font-family: var(--mono);
+      font-size: 12px;
+      box-shadow: 4px 4px 0 var(--ink);
+    }
+
+    .brand small {
+      display: block;
+      color: var(--ink-soft);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .chip,
+    .top-link {
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--white);
+      padding: 7px 10px;
+      font-size: 11px;
+      font-weight: 800;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .chip { color: var(--safe); }
+    .top-link { display: none; }
+
+    .hero {
+      padding: 46px 0 34px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      color: var(--safe);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 22px;
+      height: 2px;
+      background: currentColor;
+    }
+
+    h1,
+    h2,
+    h3,
+    p { margin-top: 0; }
+
+    h1 {
+      max-width: 930px;
+      margin-bottom: 18px;
+      font-family: var(--display);
+      font-size: clamp(42px, 11vw, 96px);
+      line-height: 0.93;
+      letter-spacing: -0.055em;
+      text-transform: uppercase;
+    }
+
+    h1 .accent {
+      display: block;
+      color: var(--safe);
+      -webkit-text-stroke: 1px var(--safe);
+    }
+
+    .hero-lede {
+      max-width: 730px;
+      margin-bottom: 24px;
+      color: var(--ink-soft);
+      font-size: clamp(17px, 4.4vw, 22px);
+      line-height: 1.45;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 32px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 46px;
+      padding: 11px 16px;
+      border: 1px solid var(--ink);
+      border-radius: 12px;
+      background: var(--ink);
+      color: var(--white);
+      font-weight: 800;
+      text-decoration: none;
+      box-shadow: 4px 4px 0 var(--line);
+      transition: transform 150ms ease, box-shadow 150ms ease;
+    }
+
+    .button.secondary {
+      background: var(--white);
+      color: var(--ink);
+    }
+
+    .button:hover { transform: translate(-2px, -2px); box-shadow: 6px 6px 0 var(--line); }
+    .button:focus-visible,
+    .mode-button:focus-visible,
+    .threat-button:focus-visible,
+    .commit-toggle:focus-visible,
+    a:focus-visible {
+      outline: 3px solid var(--warn);
+      outline-offset: 3px;
+    }
+
+    .membrane {
+      position: relative;
+      overflow: hidden;
+      border: 1px solid var(--ink);
+      border-radius: var(--radius);
+      background: var(--white);
+      box-shadow: var(--shadow);
+    }
+
+    .membrane::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: linear-gradient(90deg, rgba(180, 67, 56, 0.06) 0 48%, rgba(10, 123, 120, 0.06) 52% 100%);
+    }
+
+    .membrane-head {
+      position: relative;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 6px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .membrane-head span:last-child { text-align: right; }
+
+    .boundary-label {
+      color: var(--safe);
+      text-align: center;
+    }
+
+    .membrane-body {
+      position: relative;
+      display: grid;
+      grid-template-columns: 1fr 18px 1fr;
+      min-height: 300px;
+    }
+
+    .membrane-side {
+      padding: 18px 12px;
+      min-width: 0;
+    }
+
+    .boundary {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .boundary::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: repeating-linear-gradient(to bottom, var(--safe) 0 8px, transparent 8px 15px);
+    }
+
+    .shield {
+      position: relative;
+      z-index: 2;
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 2px solid var(--safe);
+      border-radius: 50%;
+      background: var(--paper);
+      color: var(--safe);
+      font-weight: 900;
+      box-shadow: 0 0 0 5px var(--paper);
+    }
+
+    .stream {
+      display: grid;
+      gap: 10px;
+    }
+
+    .token {
+      min-width: 0;
+      padding: 10px 11px;
+      border-radius: 12px;
+      border: 1px solid currentColor;
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+      animation: token-in 500ms both;
+      animation-delay: var(--delay, 0ms);
+    }
+
+    .token.danger { color: var(--danger); background: var(--danger-soft); }
+    .token.safe { color: var(--safe); background: var(--safe-soft); }
+    .token.neutral { color: var(--provider); background: var(--provider-soft); }
+
+    .stream-label {
+      margin: 14px 0 8px;
+      color: var(--ink-soft);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .small-note {
+      margin: 14px 0 0;
+      color: var(--ink-soft);
+      font-size: 12px;
+    }
+
+    @keyframes token-in {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    section {
+      padding: 52px 0;
+      scroll-margin-top: 74px;
+    }
+
+    .section-heading {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 26px;
+    }
+
+    .section-heading h2 {
+      margin-bottom: 0;
+      font-family: var(--display);
+      font-size: clamp(34px, 8vw, 58px);
+      line-height: 0.98;
+      letter-spacing: -0.04em;
+      text-transform: uppercase;
+    }
+
+    .section-heading p {
+      max-width: 720px;
+      margin-bottom: 0;
+      color: var(--ink-soft);
+      font-size: 16px;
+    }
+
+    .problem-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .problem-card {
+      position: relative;
+      overflow: hidden;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.9);
+    }
+
+    .problem-card::after {
+      content: attr(data-index);
+      position: absolute;
+      right: 12px;
+      top: -8px;
+      color: rgba(180, 67, 56, 0.10);
+      font-family: var(--display);
+      font-size: 74px;
+      font-weight: 900;
+      line-height: 1;
+    }
+
+    .problem-icon {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 18px;
+      border-radius: 10px;
+      background: var(--danger-soft);
+      color: var(--danger);
+      font-family: var(--mono);
+      font-weight: 900;
+    }
+
+    .problem-card h3 {
+      position: relative;
+      z-index: 1;
+      margin-bottom: 7px;
+      font-size: 17px;
+    }
+
+    .problem-card p {
+      position: relative;
+      z-index: 1;
+      margin-bottom: 0;
+      color: var(--ink-soft);
+      font-size: 14px;
+    }
+
+    .before-after {
+      overflow: hidden;
+      border: 1px solid var(--ink);
+      border-radius: var(--radius);
+      background: var(--white);
+      box-shadow: var(--shadow);
+    }
+
+    .mode-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-bottom: 1px solid var(--ink);
+    }
+
+    .mode-button {
+      min-height: 48px;
+      border: 0;
+      background: var(--white);
+      color: var(--ink-soft);
+      font-weight: 900;
+      cursor: pointer;
+    }
+
+    .mode-button + .mode-button { border-left: 1px solid var(--ink); }
+    .mode-button[aria-selected="true"] { background: var(--ink); color: var(--white); }
+
+    .mode-panel { display: none; padding: 18px; }
+    .mode-panel.active { display: block; }
+
+    .flow {
+      display: grid;
+      gap: 12px;
+    }
+
+    .flow-node {
+      position: relative;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--paper);
+    }
+
+    .flow-node strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 14px;
+    }
+
+    .flow-node span {
+      display: block;
+      color: var(--ink-soft);
+      font-size: 12px;
+    }
+
+    .flow-node.danger { border-color: var(--danger); background: var(--danger-soft); }
+    .flow-node.safe { border-color: var(--safe); background: var(--safe-soft); }
+    .flow-node.provider { border-color: var(--provider); background: var(--provider-soft); }
+
+    .flow-arrow {
+      display: grid;
+      place-items: center;
+      color: var(--ink-soft);
+      font-family: var(--mono);
+      font-weight: 900;
+    }
+
+    .system-map {
+      display: grid;
+      gap: 14px;
+    }
+
+    .system-stage {
+      padding: 18px;
+      border: 1px solid var(--ink);
+      border-radius: 18px;
+      background: var(--white);
+    }
+
+    .stage-head {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .stage-marker {
+      flex: 0 0 auto;
+      min-width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 10px;
+      background: var(--ink);
+      color: var(--white);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .stage-head h3 { margin: 1px 0 2px; font-size: 17px; }
+    .stage-head p { margin: 0; color: var(--ink-soft); font-size: 13px; }
+
+    .stage-points {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+
+    .stage-points span {
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: var(--paper-deep);
+      color: var(--ink-soft);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+    }
+
+    .system-connector {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-left: 16px;
+      color: var(--safe);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .system-connector::before {
+      content: "";
+      width: 2px;
+      height: 22px;
+      background: var(--safe);
+    }
+
+    .agent-matrix {
+      display: grid;
+      gap: 12px;
+    }
+
+    .agent-card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--white);
+    }
+
+    .agent-card header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 15px;
+    }
+
+    .agent-name {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .agent-badge {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--ink);
+      border-radius: 12px;
+      background: var(--paper-deep);
+      font-family: var(--mono);
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .agent-card h3 { margin: 0; font-size: 18px; }
+
+    .coverage-tag {
+      padding: 5px 8px;
+      border-radius: 999px;
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+
+    .coverage-tag.full { color: var(--safe); background: var(--safe-soft); }
+    .coverage-tag.isolated { color: var(--warn); background: var(--warn-soft); }
+
+    .agent-path {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-bottom: 14px;
+    }
+
+    .agent-path span {
+      position: relative;
+      min-height: 58px;
+      display: grid;
+      place-items: center;
+      padding: 8px 4px;
+      border-radius: 10px;
+      background: var(--paper-deep);
+      color: var(--ink-soft);
+      text-align: center;
+      font-family: var(--mono);
+      font-size: 9px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+
+    .agent-path span:not(:last-child)::after {
+      content: "›";
+      position: absolute;
+      right: -7px;
+      z-index: 2;
+      color: var(--ink);
+      font-size: 18px;
+    }
+
+    .agent-card p { margin-bottom: 0; color: var(--ink-soft); font-size: 13px; }
+
+    .threat-lab {
+      display: grid;
+      gap: 14px;
+    }
+
+    .threat-list {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding: 2px 2px 10px;
+      scrollbar-width: thin;
+    }
+
+    .threat-button {
+      flex: 0 0 auto;
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--white);
+      color: var(--ink-soft);
+      font-size: 12px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+
+    .threat-button[aria-selected="true"] {
+      border-color: var(--danger);
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
+
+    .threat-display {
+      padding: 18px;
+      border: 1px solid var(--ink);
+      border-radius: var(--radius);
+      background: var(--white);
+      box-shadow: var(--shadow);
+    }
+
+    .threat-display h3 { margin-bottom: 8px; font-size: 21px; }
+    .threat-display > p { color: var(--ink-soft); font-size: 14px; }
+
+    .threat-steps {
+      display: grid;
+      gap: 9px;
+      margin-top: 18px;
+    }
+
+    .threat-step {
+      display: grid;
+      grid-template-columns: 30px 1fr;
+      gap: 10px;
+      align-items: start;
+      padding: 11px;
+      border-radius: 12px;
+      background: var(--paper);
+    }
+
+    .threat-step b {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border-radius: 9px;
+      background: var(--ink);
+      color: var(--white);
+      font-family: var(--mono);
+      font-size: 10px;
+    }
+
+    .threat-step strong { display: block; margin-bottom: 2px; font-size: 13px; }
+    .threat-step span { color: var(--ink-soft); font-size: 12px; }
+
+    .boundary-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .boundary-card {
+      padding: 18px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: var(--white);
+    }
+
+    .boundary-card.safe { border-top: 5px solid var(--safe); }
+    .boundary-card.stop { border-top: 5px solid var(--danger); }
+    .boundary-card.limit { border-top: 5px solid var(--provider); }
+
+    .boundary-card h3 { margin-bottom: 8px; font-size: 18px; }
+    .boundary-card p { margin-bottom: 12px; color: var(--ink-soft); font-size: 13px; }
+
+    .boundary-card ul {
+      display: grid;
+      gap: 7px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      font-size: 12px;
+    }
+
+    .boundary-card li {
+      position: relative;
+      padding-left: 19px;
+    }
+
+    .boundary-card li::before {
+      content: "•";
+      position: absolute;
+      left: 4px;
+      color: currentColor;
+      font-weight: 900;
+    }
+
+    .evidence {
+      overflow: hidden;
+      border: 1px solid var(--ink);
+      border-radius: var(--radius);
+      background: var(--ink);
+      color: var(--white);
+      box-shadow: var(--shadow);
+    }
+
+    .evidence-head {
+      padding: 18px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+    }
+
+    .evidence-head h3 { margin-bottom: 5px; font-size: 22px; }
+    .evidence-head p { margin-bottom: 0; color: #bcd0d5; font-size: 13px; }
+
+    .test-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .test-stat {
+      min-width: 0;
+      padding: 18px 10px;
+      text-align: center;
+    }
+
+    .test-stat + .test-stat { border-left: 1px solid rgba(255, 255, 255, 0.18); }
+
+    .test-stat strong {
+      display: block;
+      color: #8fe1d7;
+      font-family: var(--display);
+      font-size: clamp(34px, 9vw, 52px);
+      line-height: 1;
+    }
+
+    .test-stat span {
+      display: block;
+      margin-top: 6px;
+      color: #bcd0d5;
+      font-family: var(--mono);
+      font-size: 9px;
+      line-height: 1.3;
+      text-transform: uppercase;
+    }
+
+    .review-strip {
+      display: grid;
+      gap: 8px;
+      padding: 14px 18px 18px;
+      border-top: 1px solid rgba(255, 255, 255, 0.18);
+      color: #dce8ea;
+      font-size: 12px;
+    }
+
+    .review-strip span {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+    }
+
+    .review-strip i {
+      flex: 0 0 auto;
+      width: 18px;
+      height: 18px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--safe);
+      color: white;
+      font-style: normal;
+      font-size: 10px;
+      font-weight: 900;
+    }
+
+    .commit-list {
+      display: grid;
+      gap: 8px;
+    }
+
+    .commit {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--white);
+    }
+
+    .commit-toggle {
+      width: 100%;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 13px;
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .commit-hash {
+      padding: 5px 7px;
+      border-radius: 7px;
+      background: var(--paper-deep);
+      color: var(--safe);
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 900;
+    }
+
+    .commit-title {
+      min-width: 0;
+      font-size: 12px;
+      font-weight: 800;
+      overflow-wrap: anywhere;
+    }
+
+    .commit-arrow { transition: transform 160ms ease; }
+    .commit-toggle[aria-expanded="true"] .commit-arrow { transform: rotate(90deg); }
+
+    .commit-body {
+      display: none;
+      padding: 0 13px 13px 13px;
+      color: var(--ink-soft);
+      font-size: 12px;
+    }
+
+    .commit-body.open { display: block; }
+
+    .final-cta {
+      margin: 54px 0 28px;
+      padding: 24px 18px;
+      border: 1px solid var(--ink);
+      border-radius: var(--radius);
+      background: var(--safe-soft);
+      box-shadow: 8px 8px 0 var(--ink);
+    }
+
+    .final-cta h2 {
+      margin-bottom: 10px;
+      font-family: var(--display);
+      font-size: clamp(32px, 8vw, 52px);
+      line-height: 1;
+      letter-spacing: -0.04em;
+      text-transform: uppercase;
+    }
+
+    .final-cta p { max-width: 680px; color: var(--ink-soft); }
+
+    footer {
+      padding: 24px 0 42px;
+      color: var(--ink-soft);
+      font-family: var(--mono);
+      font-size: 10px;
+      text-align: center;
+    }
+
+    .js .reveal {
+      opacity: 0;
+      transform: translateY(18px);
+      transition: opacity 500ms ease, transform 500ms ease;
+    }
+
+    .js .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (min-width: 640px) {
+      .shell { width: min(1180px, calc(100% - 48px)); }
+      .top-link { display: inline-flex; }
+      .hero { padding-top: 70px; }
+      .membrane-side { padding: 24px; }
+      .problem-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .flow { grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch; }
+      .flow-arrow { transform: none; }
+      .agent-matrix { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .boundary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .review-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (min-width: 900px) {
+      .hero-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(480px, 1.1fr);
+        gap: 44px;
+        align-items: end;
+      }
+
+      .hero-copy { padding-bottom: 20px; }
+      .membrane-body { min-height: 390px; }
+      .problem-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+      .problem-card { min-height: 245px; }
+      .section-heading { grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); align-items: end; }
+      .section-heading p { justify-self: end; }
+      .system-map { grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: stretch; }
+      .system-connector {
+        padding: 0;
+        justify-content: center;
+        writing-mode: vertical-rl;
+      }
+      .system-connector::before { width: 22px; height: 2px; }
+      .threat-lab { grid-template-columns: 250px 1fr; }
+      .threat-list { display: grid; align-content: start; overflow: visible; }
+      .threat-button { width: 100%; text-align: left; border-radius: 12px; }
+      .threat-display { min-height: 360px; }
+      .final-cta { padding: 38px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+      .js .reveal { opacity: 1; transform: none; }
+      .token { animation: none !important; }
+    }
+  </style>
+  <script>document.documentElement.classList.add('js');</script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <div class="brand" aria-label="PrivacyAI P0 review">
+        <span class="brand-mark" aria-hidden="true">P0</span>
+        <span>PrivacyAI <small>Context privacy gateway</small></span>
+      </div>
+      <div class="top-actions">
+        <span class="chip">PR #17 · open</span>
+        <a class="top-link" href="https://github.com/ru-aish/PrivacyAI/pull/17">View pull request ↗</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div class="shell hero-layout">
+        <div class="hero-copy">
+          <div class="eyebrow">Implementation review · P0</div>
+          <h1>The prompt was safe. <span class="accent">The context was not.</span></h1>
+          <p class="hero-lede">
+            PrivacyAI already sanitized what a user typed. P0 closes the quieter paths that could still place real secrets in an agent model’s context: tool results, failures, files, startup instructions, resumed sessions, and race-prone local state.
+          </p>
+          <div class="hero-actions">
+            <a class="button" href="#problem">See the leak paths ↓</a>
+            <a class="button secondary" href="#solution">See the architecture</a>
+          </div>
+        </div>
+
+        <div class="membrane reveal" aria-label="Raw context transformed into safe provider context">
+          <div class="membrane-head">
+            <span>Local machine</span>
+            <span class="boundary-label">Privacy membrane</span>
+            <span>Model context</span>
+          </div>
+          <div class="membrane-body">
+            <div class="membrane-side">
+              <div class="stream">
+                <div class="token danger" style="--delay: 80ms">real.person@example.test</div>
+                <div class="token danger" style="--delay: 160ms">sk_live_project_secret</div>
+                <div class="token danger" style="--delay: 240ms">"owner": "Ada Lovelace"</div>
+              </div>
+              <div class="stream-label">Could also arrive through</div>
+              <div class="stream">
+                <div class="token neutral" style="--delay: 320ms">tool failure · @Dockerfile · CLAUDE.md</div>
+              </div>
+            </div>
+            <div class="boundary"><span class="shield" aria-hidden="true">✓</span></div>
+            <div class="membrane-side">
+              <div class="stream">
+                <div class="token safe" style="--delay: 160ms">contact1@example.com</div>
+                <div class="token safe" style="--delay: 240ms">gsk_dummy_1_redacted</div>
+                <div class="token safe" style="--delay: 320ms">"owner": "[PERSON_1]"</div>
+              </div>
+              <p class="small-note">Stable placeholders cross the boundary. Originals remain in a local, private session vault.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="problem">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <div>
+            <div class="eyebrow">The problem</div>
+            <h2>One sanitizer. Five bypass routes.</h2>
+          </div>
+          <p>A prompt-only filter protects the front door, but agent CLIs build context from many sources after that first check. Any one of them can reintroduce the original value.</p>
+        </div>
+
+        <div class="problem-grid">
+          <article class="problem-card reveal" data-index="1">
+            <div class="problem-icon">T→</div>
+            <h3>Tool results</h3>
+            <p>A tool can discover a new email, key, identifier, or name that never appeared in the user’s prompt.</p>
+          </article>
+          <article class="problem-card reveal" data-index="2">
+            <div class="problem-icon">!</div>
+            <h3>Failure channels</h3>
+            <p>Error text and failed tool output can be inserted into the next model turn without passing through the success path.</p>
+          </article>
+          <article class="problem-card reveal" data-index="3">
+            <div class="problem-icon">@</div>
+            <h3>Native expansion</h3>
+            <p><code>@file</code>, shell escapes, attachments, slash commands, resume, and fork can add local context after sanitization.</p>
+          </article>
+          <article class="problem-card reveal" data-index="4">
+            <div class="problem-icon">CFG</div>
+            <h3>Startup context</h3>
+            <p>Instructions, skills, plugins, MCP configuration, memory, and project files can silently become provider-bound context.</p>
+          </article>
+          <article class="problem-card reveal" data-index="5">
+            <div class="problem-icon">↻</div>
+            <h3>State races</h3>
+            <p>Concurrent writers, stale locks, and recycled process IDs can lose mappings or let an old process delete a new owner’s lock.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="before-after">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <div>
+            <div class="eyebrow">Behavior change</div>
+            <h2>Before and after P0</h2>
+          </div>
+          <p>Switch the view to compare the old trust assumption with the new enforced boundary.</p>
+        </div>
+
+        <div class="before-after reveal">
+          <div class="mode-tabs" role="tablist" aria-label="Before and after comparison">
+            <button class="mode-button" id="before-tab" role="tab" aria-selected="true" aria-controls="before-panel" data-mode="before">Before P0</button>
+            <button class="mode-button" id="after-tab" role="tab" aria-selected="false" aria-controls="after-panel" data-mode="after">After P0</button>
+          </div>
+
+          <div class="mode-panel active" id="before-panel" role="tabpanel" aria-labelledby="before-tab">
+            <div class="flow">
+              <div class="flow-node safe"><strong>Prompt sanitizer</strong><span>User text becomes placeholders.</span></div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-node danger"><strong>Native agent runtime</strong><span>Files, failures, tools, and startup context can add originals again.</span></div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-node provider"><strong>Provider context</strong><span>Safe prompt + potentially unsafe hidden context.</span></div>
+            </div>
+          </div>
+
+          <div class="mode-panel" id="after-panel" role="tabpanel" aria-labelledby="after-tab">
+            <div class="flow">
+              <div class="flow-node safe"><strong>Prompt + context gateway</strong><span>Prompts, structured results, keys, and known originals are checked.</span></div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-node safe"><strong>Hook or isolation policy</strong><span>Rewrite where supported. Deny the tool when the host cannot guarantee a safe boundary.</span></div>
+              <div class="flow-arrow">→</div>
+              <div class="flow-node provider"><strong>Provider context</strong><span>Placeholders only, or the turn is stopped fail-closed.</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="solution">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <div>
+            <div class="eyebrow">The solution</div>
+            <h2>A boundary around every model-visible path</h2>
+          </div>
+          <p>P0 combines local classification, stable reversible state, native lifecycle hooks, and deliberate isolation for hosts that cannot safely rewrite every channel.</p>
+        </div>
+
+        <div class="system-map">
+          <article class="system-stage reveal">
+            <div class="stage-head">
+              <div class="stage-marker">01</div>
+              <div><h3>Classify locally</h3><p>Complete atomic payloads are examined before provider visibility.</p></div>
+            </div>
+            <div class="stage-points"><span>values</span><span>object keys</span><span>failures</span><span>oversize deny</span></div>
+          </article>
+          <div class="system-connector">stable mapping</div>
+          <article class="system-stage reveal">
+            <div class="stage-head">
+              <div class="stage-marker">02</div>
+              <div><h3>Persist safely</h3><p>Newly discovered private values extend one session map without lost updates.</p></div>
+            </div>
+            <div class="stage-points"><span>0600 files</span><span>atomic rename</span><span>owner token</span><span>PID reuse</span></div>
+          </article>
+          <div class="system-connector">enforce boundary</div>
+          <article class="system-stage reveal">
+            <div class="stage-head">
+              <div class="stage-marker">03</div>
+              <div><h3>Rewrite or deny</h3><p>Claude receives sanitized output. Codex and AGY isolate tools where rewriting is incomplete.</p></div>
+            </div>
+            <div class="stage-points"><span>pre-tool restore</span><span>post-tool sanitize</span><span>failure hook</span><span>prompt-only mode</span></div>
+          </article>
+          <div class="system-connector">verify context</div>
+          <article class="system-stage reveal">
+            <div class="stage-head">
+              <div class="stage-marker">04</div>
+              <div><h3>Audit startup</h3><p>Implicit context is minimized, scanned, and canary-checked before the agent starts.</p></div>
+            </div>
+            <div class="stage-points"><span>credential-only home</span><span>skills scan</span><span>MCP scan</span><span>Codex capture</span></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="agents">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <div>
+            <div class="eyebrow">Host-aware policy</div>
+            <h2>Same privacy goal. Different safe mechanics.</h2>
+          </div>
+          <p>P0 does not pretend every CLI exposes the same lifecycle. It uses the strongest trustworthy boundary each host actually provides.</p>
+        </div>
+
+        <div class="agent-matrix">
+          <article class="agent-card reveal">
+            <header>
+              <div class="agent-name"><div class="agent-badge">CL</div><h3>Claude Code</h3></div>
+              <span class="coverage-tag full">structured gateway</span>
+            </header>
+            <div class="agent-path"><span>restore tool input</span><span>run local tool</span><span>sanitize output</span></div>
+            <p>Success output is rewritten. Failed or batched private output stops the turn. Project instructions, skills, commands, agents, plugins, settings, and MCP context are preflighted.</p>
+          </article>
+
+          <article class="agent-card reveal">
+            <header>
+              <div class="agent-name"><div class="agent-badge">CX</div><h3>Codex</h3></div>
+              <span class="coverage-tag isolated">prompt-only isolation</span>
+            </header>
+            <div class="agent-path"><span>sanitize prompt</span><span>deny tool calls</span><span>audit startup</span></div>
+            <p>Because every failure and control-channel result cannot be reliably rewritten, production mode denies tools. Startup serialization is captured, classified, and tested with a local canary.</p>
+          </article>
+
+          <article class="agent-card reveal">
+            <header>
+              <div class="agent-name"><div class="agent-badge">AG</div><h3>Antigravity</h3></div>
+              <span class="coverage-tag isolated">one-shot isolation</span>
+            </header>
+            <div class="agent-path"><span>sanitize one-shot</span><span>scope hook by env</span><span>deny all tools</span></div>
+            <p>AGY cannot rewrite tool arguments or outputs. P0 allows fresh one-shot prompts only, keeps its session token out of persisted argv, and denies every scoped tool call.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="threats">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <div>
+            <div class="eyebrow">Threat walkthrough</div>
+            <h2>What happens at the edge cases?</h2>
+          </div>
+          <p>Select a failure mode to see how P0 handles it without relying on optimistic assumptions.</p>
+        </div>
+
+        <div class="threat-lab reveal">
+          <div class="threat-list" role="tablist" aria-label="Threat scenarios">
+            <button class="threat-button" role="tab" aria-selected="true" data-threat="tool-secret">New secret in tool output</button>
+            <button class="threat-button" role="tab" aria-selected="false" data-threat="failure">Private failure output</button>
+            <button class="threat-button" role="tab" aria-selected="false" data-threat="context">@file or resumed context</button>
+            <button class="threat-button" role="tab" aria-selected="false" data-threat="lock">Concurrent vault writers</button>
+            <button class="threat-button" role="tab" aria-selected="false" data-threat="endpoint">Fake loopback hostname</button>
+          </div>
+
+          <article class="threat-display" aria-live="polite">
+            <h3 id="threat-title">A tool discovers a secret the prompt never contained</h3>
+            <p id="threat-summary">The result is treated as one atomic model-visible payload, not as trusted local output.</p>
+            <div class="threat-steps" id="threat-steps"></div>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="guarantee">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <div>
+            <div class="eyebrow">Security contract</div>
+            <h2>What P0 guarantees — and what it does not claim</h2>
+          </div>
+          <p>The implementation distinguishes supported protection, deliberate fail-closed behavior, and one remaining transport-level limitation.</p>
+        </div>
+
+        <div class="boundary-grid">
+          <article class="boundary-card safe reveal">
+            <h3>Protected</h3>
+            <p>Paths with a trustworthy rewrite or preflight boundary.</p>
+            <ul>
+              <li>Prompts and stable placeholders</li>
+              <li>Claude tool input, success output, and failure gating</li>
+              <li>Structured values and object keys</li>
+              <li>Startup files, skills, commands, agents, plugins, MCP configuration</li>
+              <li>Loopback-local sanitizer endpoints</li>
+            </ul>
+          </article>
+          <article class="boundary-card stop reveal">
+            <h3>Stopped fail-closed</h3>
+            <p>Unsafe ambiguity does not become a silent pass-through.</p>
+            <ul>
+              <li>Unresolved placeholders</li>
+              <li>Invalid or shape-changing sanitized JSON</li>
+              <li>Oversized atomic results</li>
+              <li>Native @file, shell, attachment, resume, and fork ingress</li>
+              <li>Tool paths without a reliable output replacement boundary</li>
+            </ul>
+          </article>
+          <article class="boundary-card limit reveal">
+            <h3>Remaining limitation</h3>
+            <p>Codex startup serialization is inspected, but P0 does not claim universal interception of every final encrypted request.</p>
+            <ul>
+              <li>Stronger coverage needs an upstream request hook</li>
+              <li>Alternatively, a maintained host patch</li>
+              <li>Or a local provider proxy at the transport boundary</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="evidence">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <div>
+            <div class="eyebrow">Verification</div>
+            <h2>Tested as a security boundary, not a happy-path demo</h2>
+          </div>
+          <p>The final branch includes regression coverage for concurrency, PID reuse, malformed context, prototype-like keys, UTF-8 stream boundaries, native ingress, and bot-raised security findings.</p>
+        </div>
+
+        <div class="evidence reveal">
+          <div class="evidence-head"><h3>Repository-wide result</h3><p>Final P0 branch validation before PR handoff.</p></div>
+          <div class="test-grid">
+            <div class="test-stat"><strong>83</strong><span>SDK passed</span></div>
+            <div class="test-stat"><strong>67</strong><span>Agent bridge passed</span></div>
+            <div class="test-stat"><strong>1</strong><span>CLI passed</span></div>
+          </div>
+          <div class="review-strip">
+            <span><i>✓</i>3 optional environment-dependent integrations skipped, not failed.</span>
+            <span><i>✓</i>Gemini Code Assist and CodeRabbit findings reviewed individually.</span>
+            <span><i>✓</i>18 root review threads acknowledged with fixes or fail-closed rationale.</span>
+            <span><i>✓</i>Incremental CodeRabbit check succeeded with no new root findings.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="commits">
+      <div class="shell">
+        <div class="section-heading reveal">
+          <div>
+            <div class="eyebrow">Reversible checkpoints</div>
+            <h2>Every major step has its own commit</h2>
+          </div>
+          <p>The implementation can be inspected or reverted by concern instead of being delivered as one opaque patch.</p>
+        </div>
+
+        <div class="commit-list reveal">
+          <div class="commit">
+            <button class="commit-toggle" aria-expanded="false"><span class="commit-hash">b16b7116</span><span class="commit-title">Sanitize newly discovered tool context</span><span class="commit-arrow">›</span></button>
+            <div class="commit-body">Introduced atomic context classification, stable session-map extension, and placeholder shielding.</div>
+          </div>
+          <div class="commit">
+            <button class="commit-toggle" aria-expanded="false"><span class="commit-hash">ab8e5d2d</span><span class="commit-title">Isolate unsupported context boundaries</span><span class="commit-arrow">›</span></button>
+            <div class="commit-body">Added prompt-only safety for hosts whose native APIs cannot guarantee every model-visible result path.</div>
+          </div>
+          <div class="commit">
+            <button class="commit-toggle" aria-expanded="false"><span class="commit-hash">db7982fc</span><span class="commit-title">Close native context bypasses</span><span class="commit-arrow">›</span></button>
+            <div class="commit-body">Blocked context-loading flags, slash commands, resume/fork paths, attachments, file expansion, and shell escapes.</div>
+          </div>
+          <div class="commit">
+            <button class="commit-toggle" aria-expanded="false"><span class="commit-hash">85f52aa3</span><span class="commit-title">Define the P0 privacy boundary</span><span class="commit-arrow">›</span></button>
+            <div class="commit-body">Aligned documentation with the actual guarantee and documented the transport-level limitation.</div>
+          </div>
+          <div class="commit">
+            <button class="commit-toggle" aria-expanded="false"><span class="commit-hash">c441c102</span><span class="commit-title">Register Claude failure hook</span><span class="commit-arrow">›</span></button>
+            <div class="commit-body">Connected the official PostToolUseFailure event so failed tool output cannot bypass the gateway.</div>
+          </div>
+          <div class="commit">
+            <button class="commit-toggle" aria-expanded="false"><span class="commit-hash">67ea3042</span><span class="commit-title">Address focused automated security review</span><span class="commit-arrow">›</span></button>
+            <div class="commit-body">Closed compact-short-flag bypasses, improved startup output accounting, and validated session IDs early.</div>
+          </div>
+          <div class="commit">
+            <button class="commit-toggle" aria-expanded="false"><span class="commit-hash">8be5c5a6</span><span class="commit-title">Resolve full security review findings</span><span class="commit-arrow">›</span></button>
+            <div class="commit-body">Hardened loopback checks, lock ownership, PID reuse, AGY token handling, UTF-8 draining, generated placeholders, structured keys, and PTY EOF behavior.</div>
+          </div>
+        </div>
+
+        <div class="final-cta reveal">
+          <div class="eyebrow">Ready for owner review</div>
+          <h2>PR #17 is open, clean, and intentionally unmerged.</h2>
+          <p>The implementation, review fixes, tests, and security rationale are on <code>feature/p0-context-privacy-gateway</code>. The repository owner retains final merge control.</p>
+          <a class="button" href="https://github.com/ru-aish/PrivacyAI/pull/17">Open PR #17 ↗</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell">PrivacyAI · P0 implementation review · generated from the final PR branch</footer>
+
+  <script>
+    const threatData = {
+      "tool-secret": {
+        title: "A tool discovers a secret the prompt never contained",
+        summary: "The result is treated as one atomic model-visible payload, not as trusted local output.",
+        steps: [
+          ["Detect", "The complete structured result, including object keys, is sent only to the local classifier."],
+          ["Map", "New private values receive stable placeholders without rotating placeholders already in the session."],
+          ["Persist", "The session vault merges additions transactionally under an owner-checked lock."],
+          ["Return", "Claude receives sanitized structured output. If the shape cannot be preserved, the turn stops."]
+        ]
+      },
+      failure: {
+        title: "A failed tool returns private error context",
+        summary: "Failure output is not assumed safe simply because the tool did not succeed.",
+        steps: [
+          ["Hook", "Claude’s PostToolUseFailure event is registered in generated settings."],
+          ["Inspect", "Known originals and newly discovered private values are checked before another model request."],
+          ["Gate", "Unsafe failed or batched output blocks the turn when the host cannot replace it reliably."],
+          ["Isolate", "Codex and AGY deny tools in production privacy mode because their failure boundaries are incomplete."]
+        ]
+      },
+      context: {
+        title: "A native client tries to add files or prior context",
+        summary: "Context added after prompt sanitization is blocked at the native ingress boundary.",
+        steps: [
+          ["Recognize", "@README.md, @Dockerfile, shell escapes, attachments, slash commands, resume, and fork are identified."],
+          ["Block", "The raw prompt is not reinjected into a mode that can expand unclassified local context."],
+          ["Minimize", "Credential-only runtime homes exclude history, memory, plugins, and unrelated configuration."],
+          ["Preflight", "Claude context sources are scanned; Codex serialized startup input is captured and canary-checked."]
+        ]
+      },
+      lock: {
+        title: "Two processes update the same private session map",
+        summary: "The vault now protects both data integrity and lock ownership across crashes and PID reuse.",
+        steps: [
+          ["Claim", "A unique lock record stores PID, process-start identity, timestamp, and a random owner token."],
+          ["Serialize", "Only one updater reads, merges, and atomically renames the private session record at a time."],
+          ["Recover", "Dead or recycled-PID owners are detected instead of leaving a permanent stale lock."],
+          ["Release", "A process deletes the lock only when the exact record it owns is still present."]
+        ]
+      },
+      endpoint: {
+        title: "A remote hostname pretends to be loopback",
+        summary: "Prefix matching is no longer enough to qualify a sanitizer as local.",
+        steps: [
+          ["Parse", "The base URL is parsed with the platform URL implementation."],
+          ["Validate", "Only localhost, .localhost, IPv6 ::1, or a real IPv4 address in 127.0.0.0/8 is accepted."],
+          ["Reject", "Names such as 127.0.0.1.attacker.example are treated as remote and blocked by default."],
+          ["Override", "Remote sanitizers require an explicit opt-in because raw prompts are sent to that component."]
+        ]
+      }
+    };
+
+    function renderThreat(key) {
+      const data = threatData[key];
+      document.getElementById('threat-title').textContent = data.title;
+      document.getElementById('threat-summary').textContent = data.summary;
+      document.getElementById('threat-steps').innerHTML = data.steps.map((step, index) => `
+        <div class="threat-step">
+          <b>${String(index + 1).padStart(2, '0')}</b>
+          <div><strong>${step[0]}</strong><span>${step[1]}</span></div>
+        </div>
+      `).join('');
+    }
+
+    renderThreat('tool-secret');
+
+    document.querySelectorAll('.mode-button').forEach(button => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.mode-button').forEach(item => item.setAttribute('aria-selected', 'false'));
+        document.querySelectorAll('.mode-panel').forEach(panel => panel.classList.remove('active'));
+        button.setAttribute('aria-selected', 'true');
+        document.getElementById(`${button.dataset.mode}-panel`).classList.add('active');
+      });
+    });
+
+    document.querySelectorAll('.threat-button').forEach(button => {
+      button.addEventListener('click', () => {
+        document.querySelectorAll('.threat-button').forEach(item => item.setAttribute('aria-selected', 'false'));
+        button.setAttribute('aria-selected', 'true');
+        renderThreat(button.dataset.threat);
+      });
+    });
+
+    document.querySelectorAll('.commit-toggle').forEach(button => {
+      button.addEventListener('click', () => {
+        const expanded = button.getAttribute('aria-expanded') === 'true';
+        button.setAttribute('aria-expanded', String(!expanded));
+        button.nextElementSibling.classList.toggle('open', !expanded);
+      });
+    });
+
+    const observer = 'IntersectionObserver' in window
+      ? new IntersectionObserver(entries => {
+          entries.forEach(entry => {
+            if (entry.isIntersecting) {
+              entry.target.classList.add('visible');
+              observer.unobserve(entry.target);
+            }
+          });
+        }, { threshold: 0.12 })
+      : null;
+
+    document.querySelectorAll('.reveal').forEach(element => {
+      if (observer) observer.observe(element);
+      else element.classList.add('visible');
+    });
+  </script>
+</body>
+</html>

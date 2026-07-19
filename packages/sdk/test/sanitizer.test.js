@@ -37,6 +37,20 @@ test("ai sanitizer returns safe_prompt and session_map from local AI", async () 
   assert.equal(result.privacySource, "ai-sanitizer");
 });
 
+test("ai sanitizer drops empty session-map originals instead of looping", async () => {
+  const sanitizer = new PrivacySanitizer({
+    provider: mockPrivacyProvider({
+      safe_prompt: "Public text",
+      session_map: { "[PRIVATE_VALUE_1]": "" }
+    }),
+    loadEnv: false
+  });
+
+  const result = await sanitizer.sanitize("Public text");
+  assert.equal(result.sanitizedText, "Public text");
+  assert.deepEqual(result.sessionMap, {});
+});
+
 test("restore replaces dummy stand-ins with original values", () => {
   const text = "Email contact1@example.com and phone +1 (555) 010-0001.";
   const restored = restore(text, {
@@ -45,6 +59,16 @@ test("restore replaces dummy stand-ins with original values", () => {
   });
 
   assert.equal(restored, "Email a@example.com and phone 555-123-4567.");
+});
+
+test("restore does not recursively reinterpret placeholders inside restored originals", () => {
+  assert.equal(
+    restore("[PRIVATE_VALUE_1]", {
+      "[PRIVATE_VALUE_1]": "literal [EMAIL_1], redact new@example.test",
+      "[EMAIL_1]": "existing@example.test"
+    }),
+    "literal [EMAIL_1], redact new@example.test"
+  );
 });
 
 test("client ask uses local AI first, then sends safe prompt without system context", async () => {
@@ -78,7 +102,7 @@ test("client ask uses local AI first, then sends safe prompt without system cont
 
   assert.equal(calls.length, 2);
   assert.equal(calls[1].messages.length, 1);
-  assert.equal(calls[1].messages[0].content, "Please email contact1@example.com.");
+  assert.equal(calls[1].messages[0].content, "Please email Alex Morgan at contact1@example.com.");
   assert.equal(result.finalText, "I will email alice@example.com with a concise update.");
 });
 
@@ -100,7 +124,7 @@ test("ai sanitizer redacts AWS and stripe-style secrets when local AI returns JS
 
   assert.doesNotMatch(result.sanitizedText, /AKIA4QW7J2KEXAMPLE/);
   assert.doesNotMatch(result.sanitizedText, /sk_live_abc123def456/);
-  assert.equal(result.sessionMap.sk_dummy_1_redacted, "sk_live_abc123def456");
+  assert.equal(result.sessionMap.gsk_dummy_1_redacted, "sk_live_abc123def456");
 });
 
 test("enforcement replaces vague stand-ins like API key with concrete dummy values", async () => {
@@ -193,6 +217,7 @@ test("enforcement performs case-insensitive replacements to prevent PII leaks of
   assert.doesNotMatch(result.sanitizedText, /john.smith@example.com/i);
   assert.match(result.sanitizedText, /contact1@example.com/);
   assert.equal(result.sanitizedText, "My email is contact1@example.com. Send info to contact1@example.com.");
+  assert.equal(Object.keys(result.sessionMap).length, 1);
 });
 
 test("ai sanitizer passes conversation context turns to the provider", async () => {
@@ -268,7 +293,7 @@ test("protected URL spans are not corrupted by same value elsewhere", async () =
   const result = await sanitizer.sanitize(text);
   assert.match(result.sanitizedText, /redis:\/\/:[^@]+@10\.0\.1\.4:6379/);
   assert.match(result.sanitizedText, /Preserve host 10\.0\.1\.4\./);
-  assert.ok(result.sessionMap["API_KEY_1"]);
+  assert.ok(Object.values(result.sessionMap).includes("redispass"));
 });
 test("enforcement does not leak URL query token when AI JSON misses it", async () => {
   const text = "https://api.example.com/callback?token=abc123secret456&tab=oauth";

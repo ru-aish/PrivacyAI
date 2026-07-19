@@ -1,13 +1,34 @@
 import { ProviderError } from "../errors.js";
 import { normalizeBaseURL } from "../config.js";
 import { getFetch } from "../fetch.js";
+import {
+  DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
+  DEFAULT_OLLAMA_KEEP_ALIVE,
+  OLLAMA_MEMORY_FALLBACK_CONTEXT_TOKENS,
+  normalizeLocalModelContextTokens,
+  normalizeOllamaKeepAlive
+} from "../local-model-policy.js";
+import { createProviderAbortContext, providerCancellationError } from "./abort.js";
 
 export class OllamaProvider {
   constructor(options = {}) {
     this.baseURL = normalizeOllamaBaseURL(options.baseURL || "http://127.0.0.1:11434");
     this.model = options.model || "qwen3.5:2b";
     this.timeoutMs = options.timeoutMs || 60000;
-    this.numCtx = options.numCtx || 4096;
+    this.numCtx = normalizeLocalModelContextTokens(
+      options.numCtx,
+      DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS
+    );
+    const hasExplicitFallback = options.fallbackNumCtx != null;
+    this.fallbackNumCtx = normalizeLocalModelContextTokens(
+      options.fallbackNumCtx,
+      Math.min(OLLAMA_MEMORY_FALLBACK_CONTEXT_TOKENS, this.numCtx)
+    );
+    if (hasExplicitFallback && this.fallbackNumCtx >= this.numCtx) {
+      throw new TypeError("Ollama fallbackNumCtx must be smaller than numCtx.");
+    }
+    this.activeNumCtx = this.numCtx;
+    this.keepAlive = normalizeOllamaKeepAlive(options.keepAlive, DEFAULT_OLLAMA_KEEP_ALIVE);
     this.think = options.think ?? false;
     this.fetch = getFetch(options.fetch);
 
@@ -16,9 +37,33 @@ export class OllamaProvider {
     }
   }
 
-  async chat(request) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+  async chat(request = {}) {
+    const explicitContext = request.numCtx != null;
+    const requestedContext = explicitContext
+      ? normalizeLocalModelContextTokens(request.numCtx)
+      : this.activeNumCtx;
+
+    try {
+      return await this.chatWithContext(request, requestedContext);
+    } catch (error) {
+      if (
+        explicitContext ||
+        !isOllamaMemoryError(error) ||
+        requestedContext <= this.fallbackNumCtx
+      ) {
+        throw error;
+      }
+
+      const response = await this.chatWithContext(request, this.fallbackNumCtx);
+      // Activate the smaller runner only after a successful retry. This keeps
+      // subsequent calls stable without hiding a failed fallback.
+      this.activeNumCtx = this.fallbackNumCtx;
+      return response;
+    }
+  }
+
+  async chatWithContext(request, numCtx) {
+    const abortContext = createProviderAbortContext(request.signal, this.timeoutMs);
 
     try {
       const response = await this.fetch(`${this.baseURL}/api/chat`, {
@@ -34,15 +79,19 @@ export class OllamaProvider {
           options: {
             temperature: request.temperature ?? 0.2,
             num_predict: request.maxTokens,
-            num_ctx: request.numCtx || this.numCtx
-          }
+            num_ctx: numCtx
+          },
+          keep_alive: normalizeOllamaKeepAlive(request.keepAlive, this.keepAlive)
         }),
-        signal: controller.signal
+        signal: abortContext.signal
       });
 
       const bodyText = await response.text();
       if (!response.ok) {
-        throw new ProviderError(`Ollama returned HTTP ${response.status}`, bodyText);
+        throw new ProviderError(`Ollama returned HTTP ${response.status}`, {
+          status: response.status,
+          bodyText
+        });
       }
 
       let body;
@@ -63,19 +112,31 @@ export class OllamaProvider {
         provider: {
           baseURL: this.baseURL,
           model: request.model || this.model,
-          type: "ollama"
+          type: "ollama",
+          numCtx
         }
       };
     } catch (error) {
-      if (error.name === "AbortError") {
+      if (abortContext.externallyAborted()) {
+        throw providerCancellationError(ProviderError, abortContext.externalReason());
+      }
+      if (abortContext.didTimeout() || error.name === "AbortError") {
         throw new ProviderError(`Ollama request timed out after ${this.timeoutMs}ms.`);
       }
       if (error instanceof ProviderError) throw error;
       throw new ProviderError("Ollama request failed.", error);
     } finally {
-      clearTimeout(timer);
+      abortContext.cleanup();
     }
   }
+}
+
+function isOllamaMemoryError(error) {
+  if (!(error instanceof ProviderError)) return false;
+  const status = Number(error.details?.status);
+  if (Number.isInteger(status) && status < 500) return false;
+  const text = `${error.message || ""}\n${error.details?.bodyText || ""}`;
+  return /(?:not enough (?:system )?memory|requires more system memory|out of memory|failed to allocate|memory allocation failed|insufficient (?:system )?memory)/i.test(text);
 }
 
 function normalizeOllamaBaseURL(baseURL) {

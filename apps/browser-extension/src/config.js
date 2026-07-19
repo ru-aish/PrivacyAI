@@ -1,6 +1,6 @@
 export function getEffectiveConfig(data = {}) {
   const config = {
-    provider: data.provider || "openai-compatible",
+    provider: normalizeProvider(data.provider),
     model: data.model || "gemini-1.5-flash",
     baseUrl: data.baseUrl || "https://generativelanguage.googleapis.com/v1beta/openai",
     apiKey: data.apiKey || "",
@@ -14,6 +14,11 @@ export function getEffectiveConfig(data = {}) {
   }
 
   return config;
+}
+
+function normalizeProvider(provider) {
+  if (!provider || provider === "custom") return "openai-compatible";
+  return provider;
 }
 
 export function hasRemoteProvider(data = {}) {
