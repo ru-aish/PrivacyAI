@@ -2,20 +2,20 @@ import { resolvePositiveDuration } from "./duration.js";
 import { destroyStream } from "./stream-io.js";
 
 export function readBoundedHttpBody(stream, maxBytes, options = {}) {
-  const chunks = [];
-  const idleTimeoutMs = options.idleTimeoutMs == null
-    ? null
-    : resolvePositiveDuration(
-      options.idleTimeoutMs,
-      options.idleTimeoutMs,
-      options.idleTimeoutLabel || "HTTP body idle timeout"
-    );
-  let size = 0;
-  let settled = false;
-  let ended = false;
-  let idleTimer = null;
-
   return new Promise((resolve, reject) => {
+    const chunks = [];
+    const idleTimeoutMs = options.idleTimeoutMs == null
+      ? null
+      : resolvePositiveDuration(
+        options.idleTimeoutMs,
+        options.idleTimeoutMs,
+        options.idleTimeoutLabel || "HTTP body idle timeout"
+      );
+    let size = 0;
+    let settled = false;
+    let ended = false;
+    let idleTimer = null;
+
     const cleanup = () => {
       if (idleTimer) clearTimeout(idleTimer);
       stream.off("data", onData);

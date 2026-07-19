@@ -69,6 +69,39 @@ test("runtime servers tolerate repeated ephemeral start and close cycles without
   }
 });
 
+test("bounded HTTP body configuration errors reject without retaining resources", async () => {
+  const stream = new PassThrough();
+  const observedEvents = ["data", "end", "error", "aborted", "close"];
+  const originalSetTimeout = globalThis.setTimeout;
+  let timeoutCalls = 0;
+  let result;
+
+  globalThis.setTimeout = (...args) => {
+    timeoutCalls += 1;
+    return originalSetTimeout(...args);
+  };
+  try {
+    assert.doesNotThrow(() => {
+      result = readBoundedHttpBody(stream, 100, {
+        idleTimeoutMs: 0,
+        idleTimeoutLabel: "test body idle timeout",
+        errors: { aborted: () => codedError("ABORTED") }
+      });
+    });
+    assert.equal(typeof result?.then, "function");
+    await assert.rejects(
+      result,
+      error => error instanceof TypeError &&
+        error.message === "test body idle timeout must be an integer between 1 and 1800000 milliseconds."
+    );
+    assert.equal(timeoutCalls, 0);
+    for (const event of observedEvents) assert.equal(stream.listenerCount(event), 0);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+    stream.destroy();
+  }
+});
+
 test("bounded HTTP bodies preserve limit, truncation, abort, and idle errors", async () => {
   const oversized = new PassThrough();
   const oversizedRead = readBoundedHttpBody(oversized, 3, {
