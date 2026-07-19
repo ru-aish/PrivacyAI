@@ -166,6 +166,7 @@ export class SqliteLineageRepository {
   }
 
   sessionTraversal(sessionId, options = {}) {
+    this.assertOpen();
     const limit = queryLimit(options);
     return this.#many(
       `${EVENT_SELECT}
@@ -178,6 +179,7 @@ export class SqliteLineageRepository {
   }
 
   valueTraversal(valueId, options = {}) {
+    this.assertOpen();
     const limit = queryLimit(options);
     const normalized = queryIdentity(valueId, "valueId");
     return this.#many(
