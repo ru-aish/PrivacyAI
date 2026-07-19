@@ -7,7 +7,8 @@ import {
   readFile,
   readdir,
   rm,
-  symlink
+  symlink,
+  writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -22,7 +23,14 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const sourceManifestBefore = await readFile(join(PACKAGE_ROOT, "package.json"), "utf8");
+  const sourceManifest = JSON.parse(sourceManifestBefore);
   const sdkManifest = JSON.parse(await readFile(join(SDK_ROOT, "package.json"), "utf8"));
+  assert.equal(
+    sourceManifest.dependencies["@privacy-ai/agent-bridge"],
+    `workspace:${sdkManifest.version}`
+  );
+  assert.equal(sourceManifest.dependencies["@privacy-ai/sdk"], undefined);
+
   const packed = await runProcess("npm", ["pack", "--pack-destination", root], {
     cwd: PACKAGE_ROOT
   });
@@ -58,6 +66,34 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
   await mkdir(scopeRoot, { recursive: true });
   await symlink(SDK_ROOT, join(scopeRoot, "sdk"), "dir");
 
+  // A published CLI and its runtime are one release unit. Neither an npm
+  // sibling nor a source-tree sibling may replace the bundled bridge.
+  const packageSibling = join(scopeRoot, "agent-bridge");
+  await mkdir(join(packageSibling, "src"), { recursive: true });
+  await writeFile(
+    join(packageSibling, "package.json"),
+    JSON.stringify({
+      name: "@privacy-ai/agent-bridge",
+      version: "999.0.0",
+      type: "module",
+      exports: { ".": "./src/index.js", "./cli": "./src/cli.js" }
+    })
+  );
+  for (const filename of ["index.js", "cli.js"]) {
+    await writeFile(
+      join(packageSibling, "src", filename),
+      'throw new Error("MALICIOUS_SIBLING_BRIDGE_LOADED");\n'
+    );
+  }
+  const developmentSibling = join(unpacked, "agent-bridge", "src");
+  await mkdir(developmentSibling, { recursive: true });
+  for (const filename of ["index.js", "cli.js"]) {
+    await writeFile(
+      join(developmentSibling, filename),
+      'throw new Error("MALICIOUS_SIBLING_BRIDGE_LOADED");\n'
+    );
+  }
+
   const binary = join(packageRoot, "bin", "privacyai.js");
   const version = await runProcess("node", [binary, "--version"]);
   assert.equal(version.code, 0, version.stderr);
@@ -70,7 +106,10 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
   assert.equal(inspection.code, 1);
   assert.equal(inspection.stdout, "");
   assert.match(inspection.stderr, /not initialized; nothing to inspect/);
-  assert.doesNotMatch(inspection.stderr, /ERR_MODULE_NOT_FOUND|missing its internal agent runtime/);
+  assert.doesNotMatch(
+    inspection.stderr,
+    /MALICIOUS_SIBLING_BRIDGE_LOADED|ERR_MODULE_NOT_FOUND|missing its internal agent runtime/
+  );
   await assert.rejects(access(database), error => error?.code === "ENOENT");
 
   assert.equal(
