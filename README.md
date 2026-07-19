@@ -8,7 +8,9 @@ It consists of a developer SDK (`@privacy-ai/sdk`), a browser extension to prote
 
 ## 👥 For Users (Quick Extension Install)
 
-Since the extension is currently in development and not yet published on the official web stores, you can download and run it manually in your browser.
+Firefox users can install PrivacyAI Shield from the official add-ons page: [PrivacyAI Shield on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/privacyai-shield/).
+
+You can also download and run the extension manually in your browser.
 
 ### 1. Download the Extension Package
 * Go to the **Releases** section of this GitHub repository.
@@ -24,10 +26,17 @@ Since the extension is currently in development and not yet published on the off
 4. Select the extracted folder containing the extension files.
 
 ### 3. Install in Firefox
+Install from [PrivacyAI Shield on Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/privacyai-shield/), or load a local build manually:
+
 1. Open Firefox and go to `about:debugging`.
 2. Click **This Firefox** on the left menu.
 3. Click the **Load Temporary Add-on...** button.
 4. Select the `manifest.json` file inside your extracted Firefox folder (or select the `.zip` file directly).
+
+### Firefox Permission Notice
+Firefox shows "Access your data" for the supported AI chat sites because the extension must run a content script on those pages to sanitize prompts before they are submitted. This is site access, not data collection.
+
+The Firefox package declares no data collection through Mozilla's `data_collection_permissions` field. Localhost permissions are only used to talk to local model servers such as Ollama or LM Studio.
 
 ---
 
