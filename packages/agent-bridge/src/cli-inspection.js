@@ -276,6 +276,9 @@ function threadMetadata(row) {
 }
 
 function scalarCount(database, table) {
+  if (!REQUIRED_TABLES.includes(table)) {
+    throw new TypeError("Unsupported inspection count table.");
+  }
   return Number(database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count || 0);
 }
 
