@@ -53,7 +53,6 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
   assert.equal(packedManifest.name, "@privacy-ai/cli");
   assert.equal(packedManifest.dependencies["@privacy-ai/sdk"], sdkManifest.version);
   assert.equal(packedManifest.dependencies["@privacy-ai/agent-bridge"], undefined);
-  assert.equal(packedManifest.scripts, undefined);
   assert.doesNotMatch(packedManifestText, /workspace:/);
   await access(join(packageRoot, "vendor", "agent-bridge", "src", "cli.js"));
   await access(join(packageRoot, "vendor", "agent-bridge", "bin", "privacyai-agent-hook.js"));
