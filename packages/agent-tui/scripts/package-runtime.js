@@ -33,7 +33,8 @@ if (action === "prepare") {
     throw new Error("PrivacyAI CLI prepack requires the internal workspace bridge dependency.");
   }
 
-  manifest.dependencies = { "@privacy-ai/sdk": sdkManifest.version };
+  delete manifest.dependencies["@privacy-ai/agent-bridge"];
+  manifest.dependencies["@privacy-ai/sdk"] = sdkManifest.version;
   delete manifest.scripts;
   await writeFile(backupPath, originalManifest, { flag: "wx", mode: 0o600 });
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
