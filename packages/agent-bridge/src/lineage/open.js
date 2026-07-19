@@ -116,6 +116,7 @@ export async function openLineageRepository(options = {}) {
 }
 
 async function ensureStorageDirectory(path, options) {
+  await assertNoSymlinkComponents(path);
   await mkdir(path, { recursive: true, mode: 0o700 });
   await assertNoSymlinkComponents(path);
   const info = await lstat(path);
@@ -140,12 +141,16 @@ async function ensureStorageDirectory(path, options) {
 async function assertNoSymlinkComponents(path) {
   let current = resolve(path);
   while (true) {
-    const info = await lstat(current);
-    if (info.isSymbolicLink()) {
-      throw lineageError(
-        "PRIVACYAI_LINEAGE_UNSAFE_PATH",
-        "PrivacyAI lineage storage path must not contain symlinks."
-      );
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) {
+        throw lineageError(
+          "PRIVACYAI_LINEAGE_UNSAFE_PATH",
+          "PrivacyAI lineage storage path must not contain symlinks."
+        );
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
     }
     const parent = dirname(current);
     if (parent === current) return;
