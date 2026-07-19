@@ -2,6 +2,7 @@
   "name": "@privacy-ai/agent-bridge",
   "version": "0.0.2",
   "description": "Local prompt and tool privacy engine for native agent CLIs.",
+  "private": true,
   "type": "module",
   "main": "./src/index.js",
   "exports": {
