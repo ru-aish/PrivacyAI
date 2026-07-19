@@ -1,3 +1,4 @@
+import { createLegacyVerificationStore } from "./legacy-verification-store.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { once } from "node:events";
@@ -365,6 +366,33 @@ test("AGY controller stages function calls and commits matching next-turn respon
     mutation.nextContentHash,
     controller.policyFingerprint
   ).spans.length, 1);
+});
+
+test("AGY controller preserves legacy injected verification stores without updateThread", async t => {
+  const root = await createTestTempDir("privacyai-agy-legacy-store-");
+  const { store: verificationStore } = createLegacyVerificationStore();
+  assert.equal(typeof verificationStore.updateThread, "undefined");
+
+  const controller = await createAgySessionController({
+    sanitizer: deterministicSanitizer,
+    imageSanitizer: {
+      sanitize: async value => ({ inlineData: value, changed: false, sessionMapAdditions: {} })
+    },
+    verificationStore,
+    vault: new SessionVault({ baseDir: join(root, "vault") }),
+    policyFingerprint: "legacy-store-policy"
+  });
+  t.after(async () => {
+    await controller.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const result = await controller.transform(sampleRequest());
+  assert.equal(JSON.stringify(result.body).includes(PRIVATE_EMAIL), false);
+  assert.equal(
+    verificationStore.loadThread("agy:session-123").sessionMap["[EMAIL_1]"],
+    PRIVATE_EMAIL
+  );
 });
 
 test("AGY session controllers atomically merge concurrent mappings", async t => {

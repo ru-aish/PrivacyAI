@@ -10,6 +10,7 @@ import {
 } from "./agy-request-transform.js";
 import {
   openContextVerificationStore,
+  updateRepositoryThread,
   verificationFingerprint
 } from "./context-verification-store.js";
 import {
@@ -121,11 +122,12 @@ export async function createAgySessionController(options = {}) {
           );
           completeMap = persisted.sessionMap;
         }
-        context.verificationStore.saveThread(sessionKey, {
+        await updateRepositoryThread(context.verificationStore, sessionKey, () => ({
+          baseSessionMap: currentThread.sessionMap || {},
           parentSessionKeys: [],
           sessionMap: completeMap,
           policyFingerprint: context.policyFingerprint
-        });
+        }));
         commitVerificationWrites(cache, result.cacheWrites, {
           maxEntries: context.maxCacheEntriesPerSession,
           verificationStore: context.verificationStore

@@ -12,6 +12,7 @@ import {
   publicGatewayMessage
 } from "../src/gateway-error.js";
 import { selectPreferredAddress } from "../src/codex-http-transport.js";
+import { createLegacyVerificationStore } from "./legacy-verification-store.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
 import {
@@ -2686,6 +2687,12 @@ test("gateway maintenance pruning uses shared request state", async t => {
     saveThread(key, value) {
       threads.set(key, value);
     },
+    updateThread(key, updater) {
+      const current = this.loadThread(key);
+      const value = updater(structuredClone(current));
+      threads.set(key, value);
+      return value;
+    },
     getVerification(key, policyFingerprint) {
       const value = records.get(key);
       return value?.policyFingerprint === policyFingerprint ? value : undefined;
@@ -2745,6 +2752,44 @@ test("gateway maintenance pruning uses shared request state", async t => {
     await response.text();
   }
   assert.equal(prunes, 1);
+});
+
+test("Codex gateway preserves legacy injected verification stores without updateThread", async t => {
+  const { store: verificationStore } = createLegacyVerificationStore();
+  assert.equal(typeof verificationStore.updateThread, "undefined");
+
+  const upstream = await startServer(async (request, response) => {
+    const body = await readRequestJson(request);
+    assert.equal(JSON.stringify(body).includes(PRIVATE_EMAIL), false);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.output_text.delta", item_id: "legacy-store", delta: "ok" }) +
+      sse({ type: "response.completed", response: { id: "legacy-store", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    verificationStore,
+    baseDir: await createTestTempDir("privacyai-gateway-legacy-store-"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true,
+    policyFingerprint: "legacy-store-policy"
+  });
+  t.after(() => gateway.close());
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(sampleRequest())
+  });
+  assert.equal(response.status, 200, await response.text());
+  assert.equal(
+    verificationStore.loadThread("codex-provider:thread-123").sessionMap["[EMAIL_1]"],
+    PRIVATE_EMAIL
+  );
 });
 
 test("Codex provider args force loopback Responses transport and disable unsupported provider-hosted tools", () => {

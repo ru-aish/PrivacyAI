@@ -1,3 +1,5 @@
+import { timeoutError } from "./context-repository/errors.js";
+
 const DEFAULT_BUSY_TIMEOUT_MS = 25;
 const MAX_BUSY_TIMEOUT_MS = 1000;
 const DEFAULT_RETRY_TIMEOUT_MS = 2500;
@@ -23,15 +25,20 @@ export async function retryContextStoreOperation(operation, options = {}) {
     DEFAULT_RETRY_TIMEOUT_MS,
     "context-store retry timeout"
   );
-  const deadline = Date.now() + timeoutMs;
+  const deadline = options.deadlineAt == null ? Date.now() + timeoutMs : Number(options.deadlineAt);
+  if (!Number.isSafeInteger(deadline)) throw new TypeError("context-store retry deadline must be a safe integer timestamp.");
   let delayMs = DEFAULT_RETRY_DELAY_MS;
+  let firstAttempt = true;
 
   while (true) {
     throwIfAborted(options.signal);
+    if (!firstAttempt && Date.now() >= deadline) throw timeoutError();
+    firstAttempt = false;
     try {
       return await operation();
     } catch (error) {
-      if (!isSqliteContentionError(error) || Date.now() >= deadline) throw error;
+      if (!isSqliteContentionError(error)) throw error;
+      if (Date.now() >= deadline) throw timeoutError();
       await abortableDelay(
         Math.min(delayMs, Math.max(1, deadline - Date.now())),
         options.signal
