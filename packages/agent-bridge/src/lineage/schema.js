@@ -200,7 +200,8 @@ export function initializeLineageSchema(db) {
     if (String(error?.code || "").startsWith("PRIVACYAI_LINEAGE_")) throw error;
     throw lineageError(
       "PRIVACYAI_LINEAGE_SCHEMA_INVALID",
-      "PrivacyAI could not initialize its lineage schema."
+      "PrivacyAI could not initialize its lineage schema.",
+      error
     );
   }
   validateSchema(db);
