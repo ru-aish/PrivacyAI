@@ -21,6 +21,40 @@ test("CLI help directs resume and fork through the protected wrapper", () => {
   assert.match(text, /\/fork \[--all\|--last\|id\]/);
 });
 
+test("Claude CLI uses the same provider registry dispatch path", async () => {
+  const launchOptions = { marker: "claude" };
+  const code = await runPrivacyAiCli(["claude", "--continue"], {
+    launchOptions,
+    launchNativeTui: async (flavor, args, options) => {
+      assert.equal(flavor, "claude");
+      assert.deepEqual(args, ["--continue"]);
+      assert.notEqual(options, launchOptions);
+      assert.equal(options.marker, "claude");
+      return 7;
+    }
+  });
+  assert.equal(code, 7);
+});
+
+test("CLI resolves AGY and Antigravity through the same provider adapter", async () => {
+  const agyOptions = { marker: "preserved" };
+  const stderr = new PassThrough();
+  for (const command of ["agy", "antigravity"]) {
+    const code = await runPrivacyAiCli([command, "--continue"], {
+      agyOptions,
+      stderr,
+      launchAgy: async (args, options) => {
+        assert.deepEqual(args, ["--continue"]);
+        assert.notEqual(options, agyOptions);
+        assert.equal(options.marker, "preserved");
+        assert.equal(options.stderr, stderr);
+        return 19;
+      }
+    });
+    assert.equal(code, 19);
+  }
+});
+
 test("Codex CLI prints only structured privacy-safe gateway diagnostics", async () => {
   const stderr = new PassThrough();
   let text = "";
