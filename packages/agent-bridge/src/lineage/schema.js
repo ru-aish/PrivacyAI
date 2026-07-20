@@ -198,13 +198,20 @@ export function initializeLineageSchema(db) {
   } catch (error) {
     rollbackWithoutMasking(db);
     if (String(error?.code || "").startsWith("PRIVACYAI_LINEAGE_")) throw error;
+    if (isBusy(error)) throw error;
     throw lineageError(
       "PRIVACYAI_LINEAGE_SCHEMA_INVALID",
       "PrivacyAI could not initialize its lineage schema.",
       error
     );
   }
-  validateSchema(db);
+  validateLineageSchema(db);
+}
+
+function isBusy(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return error?.code === "SQLITE_BUSY" || error?.code === "SQLITE_LOCKED" ||
+    message.includes("database is locked") || message.includes("database is busy");
 }
 
 function validateSchemaVersion(db) {
@@ -232,7 +239,7 @@ function validateSchemaVersion(db) {
   }
 }
 
-function validateSchema(db) {
+export function validateLineageSchema(db) {
   for (const [table, expected] of Object.entries(TABLE_COLUMNS)) {
     const actual = db.prepare(`PRAGMA table_info(${table})`).all().map(column => column.name);
     if (actual.length !== expected.length || actual.some((name, index) => name !== expected[index])) {

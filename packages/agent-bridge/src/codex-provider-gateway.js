@@ -50,6 +50,7 @@ import {
 import { trackServerSockets } from "./runtime/http-server.js";
 import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
 import { SessionVault } from "./session-vault.js";
+import { recordLineage } from "./lineage/recorder.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
@@ -323,6 +324,11 @@ async function handleRequestCore(request, response, context) {
       onArtifactComplete: context.onSanitizerArtifactComplete,
       onSchemaTrace: context.onSchemaTrace
     });
+    const lineageHandle = await recordLineage(context.lineageRecorder, "protectedRequest", {
+      sessionKey: identity.sessionKey, provider: "codex", operation: "responses.create",
+      model: typeof body.model === "string" ? body.model : undefined,
+      additions: result.sessionMapAdditions, cacheWrites: result.cacheWrites, signal: context.requestSignal
+    });
     throwIfAborted(context.requestSignal);
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
     if (!sessionMapsEqual(currentVault?.sessionMap || {}, completeMap)) {
@@ -363,7 +369,8 @@ async function handleRequestCore(request, response, context) {
     return {
       body: result.body,
       sessionMap: completeMap,
-      sessionKey: identity.sessionKey
+      sessionKey: identity.sessionKey,
+      lineageHandle
     };
   });
 
@@ -377,7 +384,8 @@ async function handleRequestCore(request, response, context) {
     Buffer.from(JSON.stringify(transformed.body)),
     transformed.sessionMap,
     transformed.body.stream === true,
-    transformed.sessionKey
+    transformed.sessionKey,
+    transformed.lineageHandle
   );
 }
 
@@ -435,7 +443,8 @@ async function proxyTransformed(
   body,
   sessionMap,
   expectsSse,
-  sessionKey
+  sessionKey,
+  lineageHandle
 ) {
   const upstream = upstreamUrl(request.headers, context, suffix, search);
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
@@ -451,6 +460,9 @@ async function proxyTransformed(
 
   const contentType = String(upstreamResponse.headers["content-type"] || "").toLowerCase();
   const statusCode = upstreamResponse.statusCode || 502;
+  await recordLineage(context.lineageRecorder, "providerResponse", lineageHandle, {
+    success: statusCode >= 200 && statusCode < 300, signal: context.requestSignal
+  });
   const headerlessExpectedSse =
     expectsSse && contentType.trim() === "" && statusCode >= 200 && statusCode < 300;
   if (contentType.includes("text/event-stream") || headerlessExpectedSse) {
@@ -459,6 +471,7 @@ async function proxyTransformed(
       forceContentType: headerlessExpectedSse,
       sessionKey
     });
+    await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal: context.requestSignal });
     return;
   }
 
@@ -510,6 +523,7 @@ async function proxyTransformed(
   forwardResponseHeaders(response, upstreamResponse.headers, true);
   response.writeHead(statusCode);
   response.end(restoredBody);
+  await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal: context.requestSignal });
 }
 
 async function proxySseResponse(

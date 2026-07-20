@@ -46,13 +46,22 @@ export class SqliteLineageRepository {
     this.persistent = true;
     this.closed = false;
     this.clock = typeof options.clock === "function" ? options.clock : Date.now;
+    this.busyRetryTimeoutMs = positiveDuration(options.lineageRetryTimeoutMs, 10_000);
+    this.signal = options.signal;
     this.statements = prepareStatements(database);
   }
 
-  append(input) {
+  async append(input, options = {}) {
     this.assertOpen();
     const candidate = normalizeEvent(input, { now: this.clock });
+    const signal = options.signal || this.signal;
+    return retryBusy(() => this.#appendOnce(candidate), {
+      timeoutMs: this.busyRetryTimeoutMs,
+      signal
+    });
+  }
 
+  #appendOnce(candidate) {
     try {
       return withImmediateTransaction(this.database, () => {
         this.#assertAppendable(candidate);
@@ -119,6 +128,7 @@ export class SqliteLineageRepository {
       });
     } catch (error) {
       if (String(error?.code || "").startsWith("PRIVACYAI_LINEAGE_")) throw error;
+      if (isBusy(error)) throw error;
       throw lineageError(
         "PRIVACYAI_LINEAGE_WRITE_FAILED",
         "PrivacyAI could not append its local lineage event.",
@@ -357,6 +367,52 @@ export class SqliteLineageRepository {
     this.assertOpen();
     return this.database.prepare(sql).all(...args).map(parseStoredEvent);
   }
+}
+
+async function retryBusy(action, { timeoutMs, signal }) {
+  const deadline = Date.now() + timeoutMs;
+  let delay = 2;
+  while (true) {
+    if (signal?.aborted) throw lineageError("PRIVACYAI_LINEAGE_ABORTED", "PrivacyAI lineage operation was cancelled.");
+    try {
+      return action();
+    } catch (error) {
+      if (!isBusy(error)) throw error;
+      if (Date.now() >= deadline) {
+        throw lineageError("PRIVACYAI_LINEAGE_BUSY", "PrivacyAI lineage storage remained busy.", error);
+      }
+      await wait(Math.min(delay, Math.max(1, deadline - Date.now())), signal);
+      delay = Math.min(delay * 2, 50);
+    }
+  }
+}
+
+function wait(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, ms);
+    function done() { signal?.removeEventListener("abort", aborted); resolve(); }
+    function aborted() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", aborted);
+      reject(lineageError("PRIVACYAI_LINEAGE_ABORTED", "PrivacyAI lineage operation was cancelled."));
+    }
+    if (signal) signal.addEventListener("abort", aborted, { once: true });
+  });
+}
+
+function isBusy(error) {
+  const message = String(error?.message || "").toLowerCase();
+  return error?.code === "SQLITE_BUSY" || error?.code === "SQLITE_LOCKED" ||
+    message.includes("database is locked") || message.includes("database is busy");
+}
+
+function positiveDuration(value, fallback) {
+  if (value == null) return fallback;
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number <= 0 || number > 60_000) {
+    throw lineageError("PRIVACYAI_LINEAGE_INVALID_OPTIONS", "lineageRetryTimeoutMs must be a positive integer no greater than 60000.");
+  }
+  return number;
 }
 
 function prepareStatements(database) {

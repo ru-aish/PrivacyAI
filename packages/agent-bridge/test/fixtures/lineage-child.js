@@ -10,7 +10,7 @@ if (mode === "open") {
 }
 
 if (mode === "append") {
-  repository.append({
+  await repository.append({
     eventId,
     sessionId,
     eventType: "cache_miss",

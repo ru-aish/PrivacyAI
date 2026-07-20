@@ -14,7 +14,7 @@ import {
 const lineage = await openLineageRepository();
 const sessionId = createLineageId("session");
 
-const session = lineage.append({
+const session = await lineage.append({
   sessionId,
   eventType: "session_created",
   reasonCode: "session_start"
@@ -120,9 +120,9 @@ responsibility of the existing session-vault architecture, not lineage.
 
 ## Repository API
 
-`openLineageRepository(options?)` returns a synchronous append/query repository:
+`openLineageRepository(options?)` returns an append/query repository:
 
-- `append(event)` atomically appends one immutable event and any session, value,
+- `await append(event, { signal? })` atomically appends one immutable event and any session, value,
   or placeholder identity created by that event.
 - `lookup(eventId)` returns one event or `undefined`.
 - `lookupSession(sessionId)`, `lookupValue(valueId)`, and
@@ -149,6 +149,26 @@ insert, and any session/value/placeholder origin insert commit as one SQLite
 transaction. Missing parents, duplicate event/session/value/placeholder
 identities, and mismatched placeholder/value references roll back without a
 partial event.
+
+SQLite's synchronous operations use only a short per-attempt busy timeout.
+Opening and appending retry contention with asynchronous backoff up to the
+bounded wall-clock timeout (`lineageRetryTimeoutMs`, default 10 seconds), and
+accept `AbortSignal` cancellation. Exhausted contention returns
+`PRIVACYAI_LINEAGE_BUSY`; corrupt storage remains distinct.
+
+## Production recorder and inspection
+
+Production request paths accept an optional narrow `lineageRecorder` with
+`protectedRequest`, `providerResponse`, and `restoration` methods. Codex and
+Antigravity invoke this boundary after protected request creation and around
+provider/restore activity; those adapters never import SQLite. Use
+`createLineageRecorder(repository)` to connect the durable repository.
+
+`openLineageInspection({ lineageDbPath })` opens only an existing database in
+SQLite read-only immutable mode. It never creates directories, database files,
+WAL/SHM sidecars, schemas, migrations, repairs, or permission changes. Missing
+state returns `PRIVACYAI_LINEAGE_NOT_FOUND`; corrupt or incompatible state
+returns a stable sanitized lineage error.
 
 The database uses foreign keys, WAL mode, `synchronous=FULL`, a bounded SQLite
 busy timeout, and monotonically increasing repository `recordedAt` values.

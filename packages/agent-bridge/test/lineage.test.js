@@ -22,6 +22,8 @@ import {
   normalizeEvent,
   normalizeMetadata,
   openLineageRepository,
+  openLineageInspection,
+  createLineageRecorder,
   stableJson
 } from "../src/lineage/index.js";
 
@@ -103,19 +105,19 @@ function assignEvent(extra = {}) {
   };
 }
 
-function seed(repository) {
-  const session = repository.append(sessionEvent());
-  const value = repository.append(protectEvent());
-  const placeholder = repository.append(assignEvent());
+async function seed(repository) {
+  const session = await repository.append(sessionEvent());
+  const value = await repository.append(protectEvent());
+  const placeholder = await repository.append(assignEvent());
   return { session, value, placeholder };
 }
 
 test("records a complete immutable lineage and traverses it by session, value, cause, and time", async t => {
   let clock = 1_000;
   const { repository } = await fixture(t, { clock: () => clock++ });
-  const { session, value, placeholder } = seed(repository);
+  const { session, value, placeholder } = await seed(repository);
 
-  const transformation = repository.append({
+  const transformation = await repository.append({
     eventId: eventId("d"),
     sessionId: ids.session,
     eventType: "transformation",
@@ -130,7 +132,7 @@ test("records a complete immutable lineage and traverses it by session, value, c
     reasonCode: "policy_application",
     metadata: { itemCount: 1, success: true }
   });
-  const cacheMiss = repository.append({
+  const cacheMiss = await repository.append({
     eventId: eventId("e"),
     sessionId: ids.session,
     eventType: "cache_miss",
@@ -142,7 +144,7 @@ test("records a complete immutable lineage and traverses it by session, value, c
     reasonCode: "cache_lookup",
     metadata: { cacheHit: false }
   });
-  const request = repository.append({
+  const request = await repository.append({
     eventId: eventId("f"),
     sessionId: ids.session,
     eventType: "provider_request",
@@ -157,7 +159,7 @@ test("records a complete immutable lineage and traverses it by session, value, c
     reasonCode: "provider_dispatch",
     metadata: { attempt: 1, streaming: true }
   });
-  const response = repository.append({
+  const response = await repository.append({
     eventId: eventId("1"),
     sessionId: ids.session,
     eventType: "provider_response",
@@ -171,7 +173,7 @@ test("records a complete immutable lineage and traverses it by session, value, c
     reasonCode: "provider_completion",
     metadata: { success: true }
   });
-  const restoration = repository.append({
+  const restoration = await repository.append({
     eventId: eventId("2"),
     sessionId: ids.session,
     eventType: "restoration",
@@ -243,7 +245,7 @@ test("records a complete immutable lineage and traverses it by session, value, c
 
 test("enforces unique origins, parent references, and atomic append validation", async t => {
   const { repository } = await fixture(t);
-  seed(repository);
+  await seed(repository);
 
   const failures = [
     [{ ...sessionEvent(), eventId: eventId("d") }, "PRIVACYAI_LINEAGE_DUPLICATE_SESSION"],
@@ -303,16 +305,16 @@ test("enforces unique origins, parent references, and atomic append validation",
   ];
 
   for (const [candidate, code] of failures) {
-    assert.throws(() => repository.append(candidate), error => error?.code === code);
+    await assert.rejects(() => repository.append(candidate), error => error?.code === code);
     assert.equal(repository.lookup(candidate.eventId), undefined);
   }
 
-  assert.throws(
+  await assert.rejects(
     () => repository.append(assignEvent()),
     error => error?.code === "PRIVACYAI_LINEAGE_DUPLICATE_EVENT"
   );
 
-  const secondValue = repository.append({
+  const secondValue = await repository.append({
     eventId: eventId("d"),
     sessionId: ids.session,
     eventType: "value_protected",
@@ -322,7 +324,7 @@ test("enforces unique origins, parent references, and atomic append validation",
     policyRef: ids.policy,
     reasonCode: "policy_match"
   });
-  assert.throws(() => repository.append({
+  await assert.rejects(() => repository.append({
     eventId: eventId("e"),
     sessionId: ids.session,
     eventType: "restoration",
@@ -340,11 +342,11 @@ test("rejects arbitrary text fields and serializes safe diagnostics deterministi
   const { path, repository } = await fixture(t);
   const secret = "raw-secret-fixture-DO-NOT-PERSIST";
 
-  assert.throws(
+  await assert.rejects(
     () => repository.append({ ...sessionEvent(), rawPrompt: secret }),
     error => error?.code === "PRIVACYAI_LINEAGE_INVALID_EVENT"
   );
-  assert.throws(
+  await assert.rejects(
     () => repository.append({ ...sessionEvent(), sessionId: `session:${secret}` }),
     error => error?.code === "PRIVACYAI_LINEAGE_INVALID_EVENT"
   );
@@ -364,7 +366,7 @@ test("rejects arbitrary text fields and serializes safe diagnostics deterministi
   assert.deepEqual(normalized.metadata, { attempt: 2, success: true });
   assert.equal(stableJson({ z: 1, a: undefined, b: [1, undefined] }), '{"b":[1,null],"z":1}');
 
-  repository.append(sessionEvent({ metadata: { success: true, attempt: 2 } }));
+  await repository.append(sessionEvent({ metadata: { success: true, attempt: 2 } }));
   repository.close();
   const bytes = Buffer.concat([
     await readFile(path),
@@ -376,7 +378,7 @@ test("rejects arbitrary text fields and serializes safe diagnostics deterministi
 
 test("SQLite tables and repository APIs prevent historical mutation or deletion", async t => {
   const { repository } = await fixture(t);
-  seed(repository);
+  await seed(repository);
 
   assert.throws(
     () => repository.database.prepare(
@@ -398,7 +400,7 @@ test("SQLite tables and repository APIs prevent historical mutation or deletion"
     () => repository.lookup(eventId("b")),
     error => error?.code === "PRIVACYAI_LINEAGE_CLOSED"
   );
-  assert.throws(
+  await assert.rejects(
     () => repository.append(sessionEvent()),
     error => error?.code === "PRIVACYAI_LINEAGE_CLOSED"
   );
@@ -450,7 +452,7 @@ test("schema mismatch, unsupported versions, malformed files, and corrupted rows
 
   const corruptRowPath = join(root, "row.sqlite3");
   repository = await openLineageRepository({ lineageDbPath: corruptRowPath });
-  repository.append(sessionEvent());
+  await repository.append(sessionEvent());
   repository.database.exec("DROP TRIGGER lineage_events_no_update");
   repository.database.prepare(
     "UPDATE lineage_events SET metadata_json = ? WHERE event_id = ?"
@@ -489,7 +491,7 @@ test("multiple processes append concurrently without losing events", async t => 
   t.after(() => rm(root, { recursive: true, force: true }));
 
   let repository = await openLineageRepository({ lineageDbPath: path });
-  const parent = repository.append(sessionEvent());
+  const parent = await repository.append(sessionEvent());
   repository.close();
 
   const jobs = Array.from({ length: 8 }, (_, index) => runChild([
@@ -518,7 +520,7 @@ test("an interrupted uncommitted write is absent after recovery and later append
   t.after(() => rm(root, { recursive: true, force: true }));
 
   let repository = await openLineageRepository({ lineageDbPath: path });
-  const parent = repository.append(sessionEvent());
+  const parent = await repository.append(sessionEvent());
   repository.close();
 
   const interruptedEventId = opaque("event", "7");
@@ -537,7 +539,7 @@ test("an interrupted uncommitted write is absent after recovery and later append
 
   repository = await openLineageRepository({ lineageDbPath: path });
   assert.equal(repository.lookup(interruptedEventId), undefined);
-  const committed = repository.append({
+  const committed = await repository.append({
     eventId: opaque("event", "8"),
     sessionId: ids.session,
     eventType: "cache_write",
@@ -561,7 +563,7 @@ test("storage permissions are private while explicit safe parent permissions are
   t.after(() => rm(root, { recursive: true, force: true }));
 
   const repository = await openLineageRepository({ lineageDbPath: path });
-  repository.append(sessionEvent());
+  await repository.append(sessionEvent());
   repository.close();
 
   assert.equal((await stat(parent)).mode & 0o777, 0o755);
@@ -623,6 +625,45 @@ test("public exports expose the lineage contract without exposing database row i
   const generated = createLineageId("event");
   assert.match(generated, /^event:[0-9a-f-]{36}$/);
   assert.equal(Object.hasOwn(normalizeEvent(sessionEvent()), "rowId"), false);
+});
+
+test("read-only inspection never creates or mutates lineage state", async t => {
+  const { path, repository } = await fixture(t);
+  await seed(repository);
+  repository.close();
+  const before = await Promise.all([path, `${path}-wal`, `${path}-shm`].map(async candidate => {
+    try { const info = await stat(candidate); return [candidate, info.size, info.mtimeMs]; } catch { return [candidate, null]; }
+  }));
+  const inspection = await openLineageInspection({ lineageDbPath: path });
+  assert.equal(inspection.chronological().length, 3);
+  assert.throws(() => inspection.database.exec("INSERT INTO lineage_events DEFAULT VALUES"));
+  inspection.close();
+  const after = await Promise.all([path, `${path}-wal`, `${path}-shm`].map(async candidate => {
+    try { const info = await stat(candidate); return [candidate, info.size, info.mtimeMs]; } catch { return [candidate, null]; }
+  }));
+  assert.deepEqual(after, before);
+  await assert.rejects(
+    () => openLineageInspection({ lineageDbPath: join(dirname(path), "missing.sqlite3") }),
+    error => error?.code === "PRIVACYAI_LINEAGE_NOT_FOUND"
+  );
+});
+
+test("recorder persists only opaque lifecycle references for protected provider traffic", async t => {
+  const { path, repository } = await fixture(t);
+  const recorder = createLineageRecorder(repository);
+  const secret = "raw-value-must-never-reach-lineage";
+  const handle = await recorder.protectedRequest({
+    sessionKey: "in-memory-session", provider: "codex", operation: "responses.create", model: "gpt-5",
+    additions: { "[EMAIL_1]": secret }, cacheWrites: [["ignored", { original: secret }]]
+  });
+  await recorder.providerResponse(handle, { success: true });
+  await recorder.restoration(handle, { restoredCount: 1 });
+  assert.deepEqual(repository.chronological().map(event => event.eventType), [
+    "session_created", "value_protected", "placeholder_assigned", "cache_write", "provider_request", "provider_response", "restoration"
+  ]);
+  repository.close();
+  const bytes = await readFile(path);
+  assert.equal(bytes.includes(Buffer.from(secret)), false);
 });
 
 function runChild(args) {

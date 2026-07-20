@@ -23,6 +23,7 @@ import {
   trackServerSockets
 } from "./runtime/http-server.js";
 import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
+import { recordLineage } from "./lineage/recorder.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MODEL_HOST = "daily-cloudcode-pa.googleapis.com";
@@ -228,6 +229,7 @@ async function handleInterceptedRequest(request, response, context) {
       upstream,
       transformed.sessionMap,
       transformed.sessionKey,
+      transformed.lineageHandle,
       context,
       lifecycle.signal
     );
@@ -321,10 +323,12 @@ async function proxyModelResponse(
   upstream,
   sessionMap,
   sessionKey,
+  lineageHandle,
   context,
   signal
 ) {
   const status = upstream.statusCode || 502;
+  await recordLineage(context.lineageRecorder, "providerResponse", lineageHandle, { success: status >= 200 && status < 300, signal });
   const contentType = String(upstream.headers["content-type"] || "").toLowerCase();
   const contentEncoding = String(upstream.headers["content-encoding"] || "identity").toLowerCase();
   if (contentEncoding !== "identity" && contentEncoding !== "") {
@@ -365,6 +369,7 @@ async function proxyModelResponse(
     );
     for (const value of finalOutput) await writeWithBackpressure(response, value);
     response.end();
+    await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal });
     return;
   }
 
@@ -376,6 +381,7 @@ async function proxyModelResponse(
   forwardResponseHeaders(response, upstream.headers, { transformed: textual });
   response.writeHead(status);
   response.end(body);
+  await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal });
 }
 
 async function stageAgyToolCalls(sessionController, sessionKey, calls) {

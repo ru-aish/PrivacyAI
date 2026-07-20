@@ -138,7 +138,9 @@ export {
   LINEAGE_SCHEMA_VERSION,
   SqliteLineageRepository,
   createLineageId,
+  createLineageRecorder,
   normalizeEvent as normalizeLineageEvent,
+  openLineageInspection,
   openLineageRepository,
   opaqueIdentity as normalizeLineageIdentity,
   stableJson as stableLineageJson

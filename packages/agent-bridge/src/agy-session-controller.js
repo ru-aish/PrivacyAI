@@ -25,6 +25,7 @@ import {
   sessionVerificationCache
 } from "./model-session-state.js";
 import { SessionVault } from "./session-vault.js";
+import { recordLineage } from "./lineage/recorder.js";
 
 export async function createAgySessionController(options = {}) {
   if (typeof options.sanitizer !== "function") {
@@ -112,6 +113,10 @@ export async function createAgySessionController(options = {}) {
           onBatchComplete: context.onSanitizerBatchComplete,
           onArtifactComplete: context.onSanitizerArtifactComplete
         });
+        const lineageHandle = await recordLineage(context.lineageRecorder, "protectedRequest", {
+          sessionKey, provider: "antigravity", operation: "generate_content",
+          additions: result.sessionMapAdditions, cacheWrites: result.cacheWrites, signal: requestOptions.signal
+        });
         throwIfAborted(requestOptions.signal);
 
         const candidateMap = mergeAgySessionMaps(sessionMap, result.sessionMapAdditions);
@@ -140,7 +145,7 @@ export async function createAgySessionController(options = {}) {
         if (typeof context.onSanitizedRequest === "function") {
           await context.onSanitizedRequest(result.body, { sessionKey });
         }
-        return { body: result.body, sessionKey, sessionMap: completeMap };
+        return { body: result.body, sessionKey, sessionMap: completeMap, lineageHandle };
       }));
     },
     async stageToolCalls(sessionKey, calls) {

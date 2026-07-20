@@ -1,4 +1,6 @@
 export { openLineageRepository } from "./open.js";
+export { openLineageInspection } from "./inspection.js";
+export { createLineageRecorder, recordLineage } from "./recorder.js";
 export { SqliteLineageRepository } from "./sqlite-repository.js";
 export {
   LINEAGE_EVENT_TYPES,
