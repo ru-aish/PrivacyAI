@@ -86,7 +86,7 @@ export async function launchAgy(userArgs = [], options = {}) {
   let primaryError;
   const ownsLineageRepository = !options.lineageRecorder && !options.lineageRepository;
   try {
-    lineageRepository = options.lineageRecorder ? undefined : await openLineageRepository({
+    lineageRepository = options.lineageRecorder ? undefined : await (options.openLineageRepository || openLineageRepository)({
       lineageRepository: options.lineageRepository,
       lineageDbPath: options.lineageDbPath,
       lineageBusyTimeoutMs: options.lineageBusyTimeoutMs,

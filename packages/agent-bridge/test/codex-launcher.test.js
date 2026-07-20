@@ -35,6 +35,7 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   const events = [];
   const progress = [];
   let closed = 0;
+  let lineageClosed = 0;
   let gatewayOptions;
   let spawned;
 
@@ -48,6 +49,10 @@ test("Codex gateway preflights static and rendered context before spawning", asy
     onLaunchProgress: event => progress.push(event),
     verifyNativeExecutable: async () => ({ version: "test" }),
     sanitizer: passThroughSanitizer,
+    openLineageRepository: async () => ({
+      async append(event) { return event; },
+      close() { lineageClosed += 1; }
+    }),
     verificationStore,
     auditCodexStaticStartupContext: async options => {
       events.push("static");
@@ -90,6 +95,8 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   assert.equal(result, 0);
   assert.deepEqual(events, ["static", "gateway", "render", "spawn"]);
   assert.equal(closed, 1);
+  assert.equal(lineageClosed, 1);
+  assert.equal(typeof gatewayOptions.lineageRecorder?.protectedRequest, "function");
   assert.equal(spawned.command, "/fake/stock-codex");
   assert.equal(spawned.options.env.CODEX_HOME, codexHome);
   assert.equal(spawned.args.includes("exec"), true);

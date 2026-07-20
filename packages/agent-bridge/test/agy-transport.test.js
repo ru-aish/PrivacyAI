@@ -22,6 +22,7 @@ import { hookFileMutationId } from "../src/hook-file-mutation.js";
 import { createEphemeralTlsAuthority } from "../src/ephemeral-tls-authority.js";
 import { mergeSessionMaps } from "../src/model-session-state.js";
 import { SessionVault } from "../src/session-vault.js";
+import { createLineageRecorder, openLineageRepository } from "../src/lineage/index.js";
 
 const PRIVATE_EMAIL = "alice.private@example.test";
 const PRIVATE_KEY = "agy-local-secret-key";
@@ -993,6 +994,51 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   assert.match(unknownRoute.body, /PRIVACYAI_AGY_UNSUPPORTED_HOST_ROUTE/);
   assert.equal(observed.length, 2);
   assert.equal(imageCalls.length, 4);
+});
+
+test("AGY transport records real TLS proxy lifecycle without retaining secrets", async t => {
+  const root = await createTestTempDir("privacyai-agy-lineage-transport-");
+  const lineageDbPath = join(root, "lineage.sqlite3");
+  const secret = "agy-lineage-raw-secret-4d2f8a";
+  const placeholder = "[LINEAGE_AGY_SECRET_1]";
+  const repository = await openLineageRepository({ lineageDbPath });
+  const recorder = createLineageRecorder(repository);
+  let requests = 0;
+  const runtime = await startAgyTransportRuntime({
+    sanitizer: async text => ({ sanitizedPrompt: text.replaceAll(secret, placeholder), sessionMap: text.includes(secret) ? { [placeholder]: secret } : {} }),
+    baseEnv: {}, baseDir: join(root, "vault"), tmpDir: root, cwd: root,
+    verificationStore: new MemoryContextVerificationStore(), lineageRecorder: recorder,
+    createSessionController: async options => {
+      assert.equal(options.lineageRecorder, recorder);
+      return createAgySessionController(options);
+    },
+    requestUpstream: async request => {
+      requests += 1;
+      assert.equal(request.body.toString("utf8").includes(secret), false);
+      assert.equal(request.body.toString("utf8").includes(placeholder), true);
+      const upstream = Readable.from([Buffer.from(sseEvent(textEvent(`result ${placeholder}`))), Buffer.from(sseEvent(finishEvent()))]);
+      upstream.statusCode = 200;
+      upstream.headers = { "content-type": "text/event-stream", "content-encoding": "identity" };
+      return upstream;
+    }
+  });
+  t.after(async () => { await runtime.close(); repository.close(); await rm(root, { recursive: true, force: true }); });
+  const request = minimalRequest(`secret=${secret}`, "agy-lineage-session", "agy-lineage-request");
+  for (let index = 0; index < 2; index += 1) {
+    const response = await proxyHttpRequest(runtime, request);
+    assert.match(response.statusLine, /^HTTP\/1\.1 200/);
+    assert.equal(response.body.includes(secret), true);
+  }
+  assert.equal(requests, 2);
+  const types = repository.chronological().map(event => event.eventType);
+  for (const [type, count] of Object.entries({ session_created: 1, value_protected: 1, placeholder_assigned: 1, cache_miss: 1, cache_write: 1, cache_hit: 1, provider_request: 2, provider_response: 2, restoration: 2 })) {
+    assert.equal(types.filter(value => value === type).length, count, type);
+  }
+  await runtime.close(); repository.close();
+  for (const candidate of [lineageDbPath, `${lineageDbPath}-wal`, `${lineageDbPath}-shm`]) {
+    try { assert.equal((await readFile(candidate)).includes(Buffer.from(secret)), false, candidate); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
 });
 
 test("AGY transport proxy forwards the audited metrics route opaquely", async t => {

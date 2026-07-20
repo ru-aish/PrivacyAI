@@ -113,14 +113,18 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   let ownsLineageRepository = false;
 
   try {
-    if (flavor === "codex" && codexInvocation.mode === "gateway") {
+    // The native Codex launch lock protects every Codex invocation.  Lineage
+    // is provider-gateway traffic only, but must not narrow that lock scope.
+    if (flavor === "codex") {
       launchLock = await (options.acquireNativeLaunchLock || acquireNativeLaunchLock)(
         flavor,
         cwd,
         options
       );
+    }
+    if (flavor === "codex" && codexInvocation.mode === "gateway") {
       if (!options.lineageRecorder) {
-        lineageRepository = await openLineageRepository({
+        lineageRepository = await (options.openLineageRepository || openLineageRepository)({
           lineageRepository: options.lineageRepository,
           lineageDbPath: options.lineageDbPath,
           lineageBusyTimeoutMs: options.lineageBusyTimeoutMs,

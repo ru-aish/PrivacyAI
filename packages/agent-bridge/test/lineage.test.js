@@ -12,7 +12,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -534,20 +534,25 @@ test("public SQLite append retries asynchronously, exhausts safely, and honours 
 
   const exhausted = new DatabaseSync(path); exhausted.exec("BEGIN EXCLUSIVE");
   try {
+    const exhaustedAt = Date.now();
     await assert.rejects(() => repository.append({
       eventId: eventId("e"), sessionId: ids.session, eventType: "cache_miss", occurredAt: 32,
       parentEventId: parent.eventId, cacheRef: opaque("cache", "e"), operation: "read", reasonCode: "cache_lookup"
     }), error => error?.code === "PRIVACYAI_LINEAGE_BUSY" &&
       ["SQLITE_BUSY", "SQLITE_LOCKED"].includes(error.cause?.code) &&
       !/locked|busy/i.test(String(error.cause?.message || "")));
+    assert.ok(Date.now() - exhaustedAt < 500, "bounded retry must not exceed its retry window");
     assert.deepEqual(lineageCounts(repository), { ...before, events: before.events + 1 });
     const aborter = new AbortController();
     const pending = repository.append({
       eventId: eventId("f"), sessionId: ids.session, eventType: "cache_miss", occurredAt: 33,
       parentEventId: parent.eventId, cacheRef: opaque("cache", "f"), operation: "read", reasonCode: "cache_lookup"
     }, { signal: aborter.signal });
+    const cancelledAt = Date.now();
     setTimeout(() => aborter.abort(), 20);
     await assert.rejects(() => pending, error => error?.code === "PRIVACYAI_LINEAGE_ABORTED");
+    assert.ok(Date.now() - cancelledAt < 250, "cancellation must interrupt retry promptly");
+    assert.ok(beats > 0, "cancelled retry must leave the event loop responsive");
     assert.deepEqual(lineageCounts(repository), { ...before, events: before.events + 1 });
   } finally { exhausted.exec("ROLLBACK"); exhausted.close(); }
 });
@@ -568,11 +573,18 @@ test("public SQLite schema initialization retries, exhausts, and cancels without
   await rm(path, { force: true });
   const blocked = new DatabaseSync(path); blocked.exec("BEGIN EXCLUSIVE");
   try {
+    const exhaustedAt = Date.now();
     await assert.rejects(() => openLineageRepository({ lineageDbPath: path, lineageBusyTimeoutMs: 10, lineageRetryTimeoutMs: 25 }), error => error?.code === "PRIVACYAI_LINEAGE_BUSY");
+    assert.ok(Date.now() - exhaustedAt < 300, "schema retry must remain bounded");
     const aborter = new AbortController();
+    let cancellationBeats = 0; const cancellationHeartbeat = setInterval(() => { cancellationBeats += 1; }, 2);
     const opening = openLineageRepository({ lineageDbPath: path, lineageBusyTimeoutMs: 10, lineageRetryTimeoutMs: 500, signal: aborter.signal });
+    const cancelledAt = Date.now();
     setTimeout(() => aborter.abort(), 15);
     await assert.rejects(() => opening, error => error?.code === "PRIVACYAI_LINEAGE_ABORTED");
+    clearInterval(cancellationHeartbeat);
+    assert.ok(Date.now() - cancelledAt < 250, "schema cancellation must interrupt retry promptly");
+    assert.ok(cancellationBeats > 0, "schema cancellation retry must keep the event loop responsive");
   } finally { blocked.exec("ROLLBACK"); blocked.close(); }
   const verify = new DatabaseSync(path);
   assert.equal(verify.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'privacyai_lineage_meta'").get().count, 0);
@@ -831,23 +843,28 @@ function waitForExit(child) {
 }
 
 async function lineageFilesSnapshot(path) {
-  return Promise.all([path, `${path}-wal`, `${path}-shm`].map(async candidate => {
+  const directory = dirname(path);
+  const entries = await (async () => {
     try {
-      const info = await stat(candidate);
-      return [candidate, info.size, info.mtimeMs, info.mode & 0o777];
+      return await (await import("node:fs/promises")).readdir(directory, { withFileTypes: true });
     } catch (error) {
-      if (error?.code === "ENOENT") return [candidate, null, null, null];
+      if (error?.code === "ENOENT") return [];
       throw error;
     }
-  }));
+  })();
+  return Promise.all(entries.map(async entry => {
+    const candidate = join(directory, entry.name);
+    const info = await stat(candidate);
+    return [entry.name, entry.isFile() ? "file" : entry.isDirectory() ? "directory" : "other", info.size, info.mtimeMs, info.mode & 0o777];
+  })).then(snapshot => snapshot.sort((left, right) => left[0].localeCompare(right[0])));
 }
 
 function lineageCounts(repository) {
-  const events = repository.chronological();
+  const database = repository.database;
   return {
-    events: events.length,
-    sessions: events.filter(event => event.eventType === "session_created").length,
-    values: events.filter(event => event.eventType === "value_protected").length,
-    placeholders: events.filter(event => event.eventType === "placeholder_assigned").length
+    events: database.prepare("SELECT count(*) AS count FROM lineage_events").get().count,
+    sessions: database.prepare("SELECT count(*) AS count FROM lineage_sessions").get().count,
+    values: database.prepare("SELECT count(*) AS count FROM lineage_values").get().count,
+    placeholders: database.prepare("SELECT count(*) AS count FROM lineage_placeholders").get().count
   };
 }

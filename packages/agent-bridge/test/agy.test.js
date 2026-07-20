@@ -253,6 +253,7 @@ test("AGY transport launch preserves native arguments and cleans up the runtime"
   let warning = "";
   stderr.on("data", chunk => { warning += chunk; });
   let runtimeClosed = false;
+  let lineageClosed = 0;
   let observed;
   const sanitizer = async () => {
     throw new Error("transport launcher must not pre-sanitize the CLI prompt");
@@ -272,8 +273,13 @@ test("AGY transport launch preserves native arguments and cleans up the runtime"
     }),
     checkPrivacyModel: async () => ({ ok: true }),
     sanitizer,
+    openLineageRepository: async () => ({
+      async append(event) { return event; },
+      close() { lineageClosed += 1; }
+    }),
     startAgyTransportRuntime: async options => {
       assert.equal(options.sanitizer, sanitizer);
+      assert.equal(typeof options.lineageRecorder?.protectedRequest, "function");
       assert.equal(options.maxContextChars, 13312);
       return {
         env: {
@@ -292,6 +298,7 @@ test("AGY transport launch preserves native arguments and cleans up the runtime"
 
   assert.equal(code, 17);
   assert.equal(runtimeClosed, true);
+  assert.equal(lineageClosed, 1);
   assert.equal(observed.binary, "/test/agy");
   assert.deepEqual(observed.childArgs, args);
   assert.equal(observed.options.cwd, root);
