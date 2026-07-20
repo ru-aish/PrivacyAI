@@ -14,12 +14,14 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      PRIVACYAI_CONTEXT_DB: ${{ runner.temp }}/privacyai/context-v4.db
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Prepare isolated state
+        run: |
+          mkdir -p "$RUNNER_TEMP/privacyai"
+          echo "PRIVACYAI_CONTEXT_DB=$RUNNER_TEMP/privacyai/context-v4.db" >> "$GITHUB_ENV"
       - uses: pnpm/action-setup@v4
         with:
           version: 10
