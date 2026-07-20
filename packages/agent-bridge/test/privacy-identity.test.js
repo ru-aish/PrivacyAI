@@ -241,6 +241,107 @@ test("fresh installs and rotations share one mutation order", {
   await assertEventuallyNoRotationLocks(root);
 });
 
+test("rotation rescans older predecessors when its immediate predecessor disappears", {
+  timeout: 10_000
+}, async t => {
+  const root = await createTestTempDir("privacyai-identity-predecessor-rescan-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const initial = await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  const processStart = await readProcessStartIdentity(process.pid);
+  const firstToken = "00000000-0000-4000-8000-000000000011";
+  const secondToken = "00000000-0000-4000-8000-000000000012";
+  const firstPath = rotationParticipantPath(root, process.pid, processStart, firstToken);
+  const secondPath = rotationParticipantPath(root, process.pid, processStart, secondToken);
+  await writeRotationParticipant(firstPath, {
+    pid: process.pid,
+    processStart,
+    token: firstToken,
+    choosing: false,
+    ticket: 1
+  });
+  await writeRotationParticipant(secondPath, {
+    pid: process.pid,
+    processStart,
+    token: secondToken,
+    choosing: false,
+    ticket: 2
+  });
+
+  let settled = false;
+  const observed = rotateInstallationPrivacyIdentityKey({ identityBaseDir: root }).then(
+    value => ({ status: "fulfilled", value }),
+    error => ({ status: "rejected", error })
+  );
+  observed.then(() => { settled = true; });
+  await waitForRotationParticipantTicket(root, 3);
+  await new Promise(resolveDelay => setTimeout(resolveDelay, 100));
+  assert.equal(settled, false);
+
+  await rm(secondPath);
+  await new Promise(resolveDelay => setTimeout(resolveDelay, 200));
+  const bypassedFirstPredecessor = settled;
+  const whileBlocked = await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  await rm(firstPath);
+  const outcome = await observed;
+
+  assert.equal(bypassedFirstPredecessor, false);
+  assert.equal(whileBlocked.keyId, initial.keyId);
+  assert.equal(outcome.status, "fulfilled", String(outcome.error));
+  assert.notEqual(outcome.value.keyId, initial.keyId);
+  await assertEventuallyNoRotationLocks(root);
+});
+
+test("rotation retries participant snapshots across choosing record replacement", {
+  timeout: 15_000
+}, async t => {
+  const root = await createTestTempDir("privacyai-identity-choosing-replacement-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const initial = await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  const processStart = await readProcessStartIdentity(process.pid);
+  const token = "00000000-0000-4000-8000-000000000013";
+  const lockPath = rotationParticipantPath(root, process.pid, processStart, token);
+  const serialized = `${JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    processStart,
+    createdAt: Date.now(),
+    token,
+    choosing: true,
+    ticket: null
+  })}\n`;
+  await writeFile(lockPath, serialized, { mode: 0o600 });
+
+  let stopReplacing = false;
+  const replacementPath = join(root, `.rotation-replacement-${process.pid}`);
+  const replacements = (async () => {
+    while (!stopReplacing) {
+      await writeFile(replacementPath, serialized, { mode: 0o600 });
+      await rename(replacementPath, lockPath);
+    }
+    await rm(replacementPath, { force: true });
+  })();
+
+  let settled = false;
+  const observed = rotateInstallationPrivacyIdentityKey({ identityBaseDir: root }).then(
+    value => ({ status: "fulfilled", value }),
+    error => ({ status: "rejected", error })
+  );
+  observed.then(() => { settled = true; });
+  await waitForRotationParticipantTicket(root, 1, lockPath);
+  await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+  const treatedReplacementAsAbsence = settled;
+
+  stopReplacing = true;
+  await replacements;
+  await rm(lockPath, { force: true });
+  const outcome = await observed;
+
+  assert.equal(treatedReplacementAsAbsence, false);
+  assert.equal(outcome.status, "fulfilled", String(outcome.error));
+  assert.equal(outcome.value.previousKeyId, initial.keyId);
+  await assertEventuallyNoRotationLocks(root);
+});
+
 test("rotation recovers a lock owned by a dead process", async t => {
   const root = await createTestTempDir("privacyai-identity-dead-rotation-lock-");
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -603,6 +704,43 @@ function rotationParticipantPath(root, pid, processStart, token) {
     root,
     `key-v1.json.rotation.${pid}.${processStart || "unknown"}.${token}.lock`
   );
+}
+
+async function writeRotationParticipant(path, participant) {
+  await writeFile(path, `${JSON.stringify({
+    version: 1,
+    pid: participant.pid,
+    processStart: participant.processStart,
+    createdAt: Date.now(),
+    token: participant.token,
+    choosing: participant.choosing,
+    ticket: participant.ticket
+  })}\n`, { mode: 0o600 });
+}
+
+async function waitForRotationParticipantTicket(
+  root,
+  expectedTicket,
+  excludedPath = null,
+  timeoutMs = 2_000
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    for (const name of await rotationLockNames(root)) {
+      const path = join(root, name);
+      if (path === excludedPath) continue;
+      try {
+        const record = JSON.parse(await readFile(path, "utf8"));
+        if (record.choosing === false && record.ticket === expectedTicket) return path;
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+      }
+    }
+    if (Date.now() >= deadline) {
+      assert.fail(`Expected identity rotation ticket ${expectedTicket} before timeout.`);
+    }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 10));
+  }
 }
 
 async function rotationLockNames(root) {

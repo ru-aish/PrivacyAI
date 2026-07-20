@@ -502,7 +502,7 @@ async function acquireIdentityRotationLock(storage, options = {}) {
 
   try {
     await writePrivateIdentityLock(path, serialized);
-    const participants = await readIdentityRotationParticipants(storage);
+    const participants = await readIdentityRotationParticipants(storage, deadline, signal);
     const maximumTicket = participants.reduce(
       (maximum, participant) => participant.record?.choosing
         ? maximum
@@ -560,51 +560,53 @@ function serializeIdentityRotationParticipant(participant) {
 }
 
 async function waitForIdentityRotationTurn(storage, owner, deadline, signal) {
-  let predecessor;
   while (true) {
     await assertIdentityRotationParticipantOwned(owner);
-    const participants = await readIdentityRotationParticipants(storage);
+    const participants = await readIdentityRotationParticipants(storage, deadline, signal);
     const choosing = participants.some(
       participant => participant.name !== owner.name &&
         (participant.record == null || participant.record.choosing)
     );
-    if (!choosing) {
-      predecessor = participants
-        .filter(participant =>
-          participant.name !== owner.name &&
-          identityRotationPriorityCompare(participant.record, owner) < 0
-        )
-        .sort((left, right) => identityRotationPriorityCompare(left.record, right.record))
-        .at(-1);
-      break;
+    if (choosing) {
+      await waitForIdentityRotationRetry(deadline, signal);
+      continue;
     }
-    await waitForIdentityRotationRetry(deadline, signal);
-  }
 
-  if (predecessor == null) return;
-  while (true) {
-    await assertIdentityRotationParticipantOwned(owner);
-    const participant = await readIdentityRotationParticipant(
-      predecessor.path,
-      predecessor.name,
-      predecessor.owner
-    );
-    if (participant == null) return;
-    if (!await isSameLiveProcess(predecessor.owner)) {
-      await rm(predecessor.path, { force: true });
-      return;
-    }
-    const record = validateIdentityRotationParticipantRecord(
-      participant.record,
-      predecessor.owner
-    );
-    if (record == null) {
-      const ageMs = Math.max(0, Date.now() - participant.metadata.mtimeMs);
-      if (ageMs >= IDENTITY_ROTATION_LOCK_INCOMPLETE_GRACE_MS) {
-        throw corruptIdentityStoreError();
+    const predecessor = participants
+      .filter(participant =>
+        participant.name !== owner.name &&
+        identityRotationPriorityCompare(participant.record, owner) < 0
+      )
+      .sort((left, right) => identityRotationPriorityCompare(left.record, right.record))
+      .at(-1);
+    if (predecessor == null) return;
+
+    while (true) {
+      await assertIdentityRotationParticipantOwned(owner);
+      const participant = await readIdentityRotationParticipant(
+        predecessor.path,
+        predecessor.name,
+        predecessor.owner,
+        deadline,
+        signal
+      );
+      if (participant == null) break;
+      if (!await isSameLiveProcess(predecessor.owner)) {
+        await rm(predecessor.path, { force: true });
+        break;
       }
+      const record = validateIdentityRotationParticipantRecord(
+        participant.record,
+        predecessor.owner
+      );
+      if (record == null) {
+        const ageMs = Math.max(0, Date.now() - participant.metadata.mtimeMs);
+        if (ageMs >= IDENTITY_ROTATION_LOCK_INCOMPLETE_GRACE_MS) {
+          throw corruptIdentityStoreError();
+        }
+      }
+      await waitForIdentityRotationRetry(deadline, signal);
     }
-    await waitForIdentityRotationRetry(deadline, signal);
   }
 }
 
@@ -627,7 +629,7 @@ async function waitForIdentityRotationRetry(deadline, signal) {
   await identityRotationLockDelay(signal);
 }
 
-async function readIdentityRotationParticipants(storage) {
+async function readIdentityRotationParticipants(storage, deadline, signal) {
   const prefix = `${storage.keyName}.rotation.`;
   const entries = await readdir(storage.operationDirectoryPath, { withFileTypes: true });
   const participants = [];
@@ -637,7 +639,13 @@ async function readIdentityRotationParticipants(storage) {
     const owner = identityRotationParticipantOwner(entry.name, prefix);
     if (owner == null) throw corruptIdentityStoreError();
     const path = join(storage.operationDirectoryPath, entry.name);
-    const participant = await readIdentityRotationParticipant(path, entry.name, owner);
+    const participant = await readIdentityRotationParticipant(
+      path,
+      entry.name,
+      owner,
+      deadline,
+      signal
+    );
     if (participant == null) continue;
 
     if (!await isSameLiveProcess(owner)) {
@@ -656,17 +664,24 @@ async function readIdentityRotationParticipants(storage) {
   return participants;
 }
 
-async function readIdentityRotationParticipant(path, name, owner) {
+async function readIdentityRotationParticipant(path, name, owner, deadline, signal) {
   let metadata;
   let serialized;
-  try {
-    metadata = await lstat(path);
-    validateIdentityLockFile(metadata);
-    serialized = await readIdentityLockBytes(path);
-  } catch (error) {
-    if (error?.code === "ENOENT" || error?.code === "PRIVACYAI_IDENTITY_KEY_CHANGED") return null;
-    if (error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT") throw error;
-    throw corruptIdentityStoreError(error);
+  while (true) {
+    try {
+      metadata = await lstat(path);
+      validateIdentityLockFile(metadata);
+      serialized = await readIdentityLockBytes(path);
+      break;
+    } catch (error) {
+      if (error?.code === "ENOENT") return null;
+      if (error?.code === "PRIVACYAI_IDENTITY_KEY_CHANGED") {
+        await waitForIdentityRotationRetry(deadline, signal);
+        continue;
+      }
+      if (error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT") throw error;
+      throw corruptIdentityStoreError(error);
+    }
   }
 
   let record = null;
