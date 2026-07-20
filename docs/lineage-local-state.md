@@ -164,11 +164,12 @@ Antigravity invoke this boundary after protected request creation and around
 provider/restore activity; those adapters never import SQLite. Use
 `createLineageRecorder(repository)` to connect the durable repository.
 
-`openLineageInspection({ lineageDbPath })` opens only an existing database in
-SQLite read-only immutable mode. It never creates directories, database files,
-WAL/SHM sidecars, schemas, migrations, repairs, or permission changes. Missing
-state returns `PRIVACYAI_LINEAGE_NOT_FOUND`; corrupt or incompatible state
-returns a stable sanitized lineage error.
+`openLineageInspection({ lineageDbPath })` opens only an existing database with
+SQLite's read-only connection mode. It can observe committed WAL frames from a
+live writer, while never creating directories, database files, WAL/SHM
+sidecars, schemas, migrations, repairs, or permission changes. Missing state
+returns `PRIVACYAI_LINEAGE_NOT_FOUND`; corrupt or incompatible state returns a
+stable sanitized lineage error.
 
 The database uses foreign keys, WAL mode, `synchronous=FULL`, a bounded SQLite
 busy timeout, and monotonically increasing repository `recordedAt` values.

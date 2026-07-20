@@ -1,7 +1,6 @@
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-
 import { lineageError } from "./domain.js";
 import { validateLineageSchema, validateSchemaVersion } from "./schema.js";
 import { SqliteLineageRepository } from "./sqlite-repository.js";
@@ -27,9 +26,16 @@ export async function openLineageInspection(options = {}) {
       throw lineageError("PRIVACYAI_LINEAGE_UNSAFE_PATH", "PrivacyAI lineage inspection requires a regular database file.");
     }
     const sqlite = await import("node:sqlite");
-    // immutable=1 prevents SQLite's WAL read machinery from creating -wal/-shm
-    // sidecars. Inspection is intentionally a snapshot, never a live repair.
-    database = new sqlite.DatabaseSync(`${pathToFileURL(path).href}?immutable=1`, { readOnly: true });
+    const walPresent = await regularSidecar(path + "-wal");
+    const shmPresent = await regularSidecar(path + "-shm");
+    if (walPresent !== shmPresent) {
+      throw lineageError("PRIVACYAI_LINEAGE_BUSY", "PrivacyAI lineage storage does not have a complete read-only WAL snapshot.");
+    }
+    // Existing WAL+SHM files let SQLite consume live committed frames without
+    // creating sidecars. A clean database uses immutable mode so a read-only
+    // open cannot create WAL machinery merely because its header selects WAL.
+    const source = walPresent ? path : pathToFileURL(path).href + "?immutable=1";
+    database = new sqlite.DatabaseSync(source, { readOnly: true });
     validateSchemaVersion(database);
     validateLineageSchema(database);
     const repository = new SqliteLineageRepository(database, path, { readOnly: true, lineageRetryTimeoutMs: 1 });
@@ -58,5 +64,18 @@ export async function openLineageInspection(options = {}) {
       throw lineageError("PRIVACYAI_LINEAGE_CORRUPT", "PrivacyAI lineage storage is corrupt or is not a SQLite database.");
     }
     throw lineageError("PRIVACYAI_LINEAGE_SCHEMA_INVALID", "PrivacyAI lineage storage is incompatible with this PrivacyAI release.");
+  }
+}
+
+async function regularSidecar(path) {
+  try {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) {
+      throw lineageError("PRIVACYAI_LINEAGE_UNSAFE_PATH", "PrivacyAI lineage inspection requires regular SQLite sidecars.");
+    }
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
   }
 }

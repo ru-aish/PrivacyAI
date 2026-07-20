@@ -31,17 +31,24 @@ async function stateFor(repository, sessions, token, signal) {
   let state = sessions.get(token);
   if (state) return state;
   state = { sessionId: createLineageId("session"), parentEventId: null, placeholders: new Map() };
-  sessions.set(token, state);
   await append(repository, state, { eventType: "session_created", reasonCode: "session_start" }, signal);
+  sessions.set(token, state);
   return state;
 }
 async function recordPlaceholder(repository, state, placeholder, signal) {
-  if (state.placeholders.has(placeholder)) return;
-  const valueId = createLineageId("value");
-  const placeholderId = createLineageId("placeholder");
-  state.placeholders.set(placeholder, { valueId, placeholderId });
-  await append(repository, state, { eventType: "value_protected", valueId, transformation: "local_sanitizer", reasonCode: "policy_match" }, signal);
-  await append(repository, state, { eventType: "placeholder_assigned", valueId, placeholderId, placeholder, reasonCode: "identity_assigned" }, signal);
+  let reference = state.placeholders.get(placeholder);
+  if (reference?.assigned) return;
+  if (!reference) {
+    reference = {
+      valueId: createLineageId("value"),
+      placeholderId: createLineageId("placeholder"),
+      assigned: false
+    };
+    await append(repository, state, { eventType: "value_protected", valueId: reference.valueId, transformation: "local_sanitizer", reasonCode: "policy_match" }, signal);
+    state.placeholders.set(placeholder, reference);
+  }
+  await append(repository, state, { eventType: "placeholder_assigned", valueId: reference.valueId, placeholderId: reference.placeholderId, placeholder, reasonCode: "identity_assigned" }, signal);
+  reference.assigned = true;
 }
 async function recordCacheActivity(repository, state, reference, activity, signal) {
   for (const [eventType, amount, reasonCode] of [["cache_hit", activity.hits, "cache_lookup"], ["cache_miss", activity.misses, "cache_lookup"], ["cache_write", activity.writes, "cache_write"]]) {
@@ -50,7 +57,14 @@ async function recordCacheActivity(repository, state, reference, activity, signa
     await append(repository, state, { eventType, ...reference, cacheRef: createLineageId("cache"), operation: eventType === "cache_write" ? "verification_write" : "verification_lookup", reasonCode, metadata: { itemCount } }, signal);
   }
 }
-function firstReference(state) { return state.placeholders.values().next().value || {}; }
+function firstReference(state) {
+  for (const reference of state.placeholders.values()) {
+    if (reference.assigned) {
+      return { valueId: reference.valueId, placeholderId: reference.placeholderId };
+    }
+  }
+  return {};
+}
 function uniquePlaceholders(value) { return Array.isArray(value) ? [...new Set(value.filter(item => typeof item === "string"))] : []; }
 function count(value) { value = Number(value); return Number.isSafeInteger(value) && value > 0 ? value : 0; }
 async function append(repository, state, fields, signal) { const event = await repository.append({ eventId: createLineageId("event"), sessionId: state.sessionId, parentEventId: state.parentEventId, ...fields }, { signal }); state.parentEventId = event.eventId; return event; }

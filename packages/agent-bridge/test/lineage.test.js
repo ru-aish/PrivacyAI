@@ -705,11 +705,12 @@ test("public exports expose the lineage contract without exposing database row i
   assert.equal(Object.hasOwn(normalizeEvent(sessionEvent()), "rowId"), false);
 });
 
-test("read-only inspection never creates or mutates lineage state", async t => {
+test("read-only inspection observes live WAL commits without creating or mutating lineage state", async t => {
   const { path, repository } = await fixture(t);
+  repository.database.exec("PRAGMA wal_autocheckpoint = 0");
   await seed(repository);
-  repository.close();
   const before = await lineageFilesSnapshot(path);
+  assert.equal(before.some(([name]) => name.endsWith("-wal")), true);
   const inspection = await openLineageInspection({ lineageDbPath: path });
   assert.equal(inspection.chronological().length, 3);
   assert.equal(Object.hasOwn(inspection, "database"), false);
@@ -718,6 +719,7 @@ test("read-only inspection never creates or mutates lineage state", async t => {
   inspection.close();
   const after = await lineageFilesSnapshot(path);
   assert.deepEqual(after, before);
+  repository.close();
   await assert.rejects(
     () => openLineageInspection({ lineageDbPath: join(dirname(path), "missing.sqlite3") }),
     error => error?.code === "PRIVACYAI_LINEAGE_NOT_FOUND"
@@ -792,6 +794,40 @@ test("recorder records cache-hit requests with reused mappings without duplicate
   assert.deepEqual(events.slice(-4).map(event => event.eventType), [
     "cache_hit", "provider_request", "provider_response", "restoration"
   ]);
+});
+
+test("recorder recovers after failed session, value, or placeholder creation appends", async t => {
+  for (const eventType of ["session_created", "value_protected", "placeholder_assigned"]) {
+    const { repository } = await fixture(t);
+    let fail = true;
+    const recorder = createLineageRecorder({
+      append(event, options) {
+        if (fail && event.eventType === eventType) {
+          fail = false;
+          throw new Error("injected " + eventType + " append failure");
+        }
+        return repository.append(event, options);
+      }
+    });
+    const request = {
+      sessionKey: "recovery-" + eventType,
+      provider: "codex",
+      operation: "responses.create",
+      placeholders: ["[EMAIL_1]"],
+      cacheActivity: { misses: 1, writes: 1 }
+    };
+    await assert.rejects(() => recorder.protectedRequest(request), new RegExp(eventType));
+    const handle = await recorder.protectedRequest(request);
+    await recorder.providerResponse(handle, { success: true });
+    await recorder.restoration(handle, { restoredCount: 1 });
+    const events = repository.chronological();
+    assert.equal(events.filter(event => event.eventType === "session_created").length, 1, eventType);
+    assert.equal(events.filter(event => event.eventType === "value_protected").length, 1, eventType);
+    assert.equal(events.filter(event => event.eventType === "placeholder_assigned").length, 1, eventType);
+    assert.deepEqual(events.slice(-4).map(event => event.eventType), [
+      "cache_write", "provider_request", "provider_response", "restoration"
+    ], eventType);
+  }
 });
 
 function runChild(args) {
