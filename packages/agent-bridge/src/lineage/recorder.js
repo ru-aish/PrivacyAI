@@ -21,15 +21,6 @@ export function createLineageRecorder(repository) {
           state.pendingRequests.set(key, lifecycle);
         }
         await recordCacheActivity(repository, state, lifecycle, signal);
-        for (const relation of lifecycle.relations) {
-          if (relation.requestEventId) continue;
-          const event = await append(repository, state, {
-            eventType: "provider_request", ...publicReference(relation.reference), provider, operation, model,
-            requestRef: lifecycle.requestRef, reasonCode: "provider_dispatch",
-            parentEventId: relation.reference.assignmentEventId
-          }, signal);
-          relation.requestEventId = event.eventId;
-        }
         state.pendingRequests.delete(key);
         const handle = Object.freeze({ requestRef: lifecycle.requestRef });
         handles.set(handle, lifecycle);
@@ -40,6 +31,15 @@ export function createLineageRecorder(repository) {
       const lifecycle = handles.get(handle);
       if (!lifecycle) return;
       return serializeLifecycle(lifecycle, async () => {
+        for (const relation of lifecycle.relations) {
+          if (relation.requestEventId) continue;
+          const event = await append(repository, lifecycle.state, {
+            eventType: "provider_request", ...publicReference(relation.reference), provider: lifecycle.provider,
+            operation: lifecycle.operation, model: lifecycle.model, requestRef: lifecycle.requestRef,
+            reasonCode: "provider_dispatch", parentEventId: relation.reference.assignmentEventId
+          }, signal);
+          relation.requestEventId = event.eventId;
+        }
         for (const relation of lifecycle.relations) {
           if (relation.responseEventId || !relation.requestEventId) continue;
           const event = await append(repository, lifecycle.state, {

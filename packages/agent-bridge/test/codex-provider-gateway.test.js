@@ -1452,6 +1452,58 @@ test("Codex provider gateway records real protected request lifecycle without re
   }
 });
 
+test("Codex headerless provider failure records restoration after restoring the local secret", async t => {
+  const root = await createTestTempDir("privacyai-codex-headerless-lineage-");
+  const lineageDbPath = join(root, "lineage.sqlite3");
+  const secret = "codex-headerless-lineage-secret";
+  const placeholder = "[CODEX_HEADERLESS_SECRET]";
+  const repository = await openLineageRepository({ lineageDbPath });
+  const recorder = createLineageRecorder(repository);
+  const upstream = await startServer((_request, response) => {
+    response.writeHead(500);
+    response.end(`provider failed for ${placeholder}`);
+  });
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => ({ sanitizedPrompt: text.replaceAll(secret, placeholder), sessionMap: { [placeholder]: secret } }),
+    baseDir: join(root, "vault"), apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true, lineageRecorder: recorder, verificationStore: new MemoryContextVerificationStore()
+  });
+  t.after(async () => { await gateway.close(); repository.close(); await upstream.close(); });
+  const body = sampleRequest();
+  body.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: secret }] }];
+  const response = await fetch(`${gateway.baseURL}/responses`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  assert.equal(response.status, 500);
+  assert.equal(await response.text(), `provider failed for ${secret}`);
+  const events = repository.chronological();
+  assert.deepEqual(events.filter(event => ["provider_request", "provider_response", "restoration"].includes(event.eventType)).map(event => event.eventType), ["provider_request", "provider_response", "restoration"]);
+  await gateway.close(); repository.close();
+  for (const candidate of [lineageDbPath, `${lineageDbPath}-wal`, `${lineageDbPath}-shm`]) {
+    try { assert.equal((await readFile(candidate)).includes(Buffer.from(secret)), false, candidate); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+});
+
+test("Codex cancellation after protected request and before dispatch records no provider lifecycle", async t => {
+  const root = await createTestTempDir("privacyai-codex-cancelled-lineage-");
+  const repository = await openLineageRepository({ lineageDbPath: join(root, "lineage.sqlite3") });
+  const recorder = createLineageRecorder(repository);
+  let upstreamRequests = 0;
+  const upstream = await startServer((_request, response) => { upstreamRequests += 1; response.end(); });
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer, baseDir: join(root, "vault"), apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true, lineageRecorder: recorder, verificationStore: new MemoryContextVerificationStore(),
+    onSanitizedRequest: () => { throw Object.assign(new Error("cancelled before dispatch"), { name: "AbortError", code: "ABORT_ERR" }); }
+  });
+  t.after(async () => { await gateway.close(); repository.close(); await upstream.close(); });
+  const response = await fetch(`${gateway.baseURL}/responses`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sampleRequest()) });
+  assert.equal(response.status >= 400, true);
+  assert.equal(upstreamRequests, 0);
+  const types = repository.chronological().map(event => event.eventType);
+  assert.equal(types.includes("value_protected"), true);
+  assert.equal(types.includes("provider_request"), false);
+  assert.equal(types.includes("provider_response"), false);
+});
+
 test("Codex gateway prunes legacy function-argument key mappings before schema validation", async t => {
   const observed = [];
   const upstream = await startServer(async (request, response) => {

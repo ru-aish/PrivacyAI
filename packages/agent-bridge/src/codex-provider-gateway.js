@@ -450,10 +450,18 @@ async function proxyTransformed(
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
   const headers = upstreamHeaders(sanitizedHeaders, upstream, body.length);
   context.phase = "upstream_connect";
-  const upstreamResponse = await requestCodexUpstream(upstream, "POST", headers, body, {
-    signal: context.requestSignal,
-    timeoutMs: context.upstreamTimeoutMs
-  });
+  let upstreamSent = false;
+  let upstreamResponse;
+  try {
+    upstreamResponse = await requestCodexUpstream(upstream, "POST", headers, body, {
+      signal: context.requestSignal,
+      timeoutMs: context.upstreamTimeoutMs,
+      onRequestSent: () => { upstreamSent = true; }
+    });
+  } catch (error) {
+    if (upstreamSent) await recordTerminalLineage(context.lineageRecorder, lineageHandle, error);
+    throw error;
+  }
   context.phase = "upstream_response";
 
   assertIdentityResponseEncoding(upstreamResponse);
@@ -485,6 +493,7 @@ async function proxyTransformed(
     response.setHeader("content-type", "text/plain; charset=utf-8");
     response.writeHead(statusCode);
     response.end(restoreText(raw.toString("utf8"), sessionMap));
+    await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal: context.requestSignal });
     return;
   }
 
@@ -524,6 +533,14 @@ async function proxyTransformed(
   response.writeHead(statusCode);
   response.end(restoredBody);
   await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal: context.requestSignal });
+}
+
+async function recordTerminalLineage(recorder, handle, providerError) {
+  try {
+    await recordLineage(recorder, "providerResponse", handle, { success: false });
+  } catch (lineageError) {
+    try { providerError.lineageError = lineageError; } catch {}
+  }
 }
 
 async function proxySseResponse(

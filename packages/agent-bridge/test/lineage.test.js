@@ -763,6 +763,7 @@ test("recorder persists only opaque lifecycle references for protected provider 
     sessionKey: "in-memory-session", provider: "codex", operation: "responses.create", model: "gpt-5",
     placeholders: ["[EMAIL_1]"], cacheActivity: { writes: 1 }
   });
+  assert.equal(repository.chronological().some(event => event.eventType === "provider_request"), false);
   await recorder.providerResponse(handle, { success: true });
   await recorder.restoration(handle, { restoredCount: 1 });
   assert.deepEqual(repository.chronological().map(event => event.eventType), [
@@ -850,7 +851,7 @@ test("recorder keeps concurrent handles causally isolated when they finish in re
   }
 });
 
-test("recorder retries a partially appended multi-value request without duplicates", async t => {
+test("recorder retries a partially appended multi-value provider response without duplicates", async t => {
   const { repository } = await fixture(t);
   let requests = 0;
   let fail = true;
@@ -864,13 +865,31 @@ test("recorder retries a partially appended multi-value request without duplicat
     }
   });
   const request = { sessionKey: "request-retry", provider: "codex", operation: "responses.create", placeholders: ["[EMAIL_1]", "[PHONE_1]"] };
-  await assert.rejects(() => recorder.protectedRequest(request), /second relation/);
   const handle = await recorder.protectedRequest(request);
+  await assert.rejects(() => recorder.providerResponse(handle, { success: true }), /second relation/);
   await recorder.providerResponse(handle, { success: true });
   await recorder.restoration(handle, { restoredCount: 2 });
   const events = repository.chronological();
   for (const type of ["provider_request", "provider_response", "restoration"]) assert.equal(events.filter(event => event.eventType === type).length, 2);
   for (const [type, field] of [["provider_request", "requestRef"], ["provider_response", "responseRef"], ["restoration", "restorationRef"]]) assert.equal(new Set(events.filter(event => event.eventType === type).map(event => event[field])).size, 1);
+});
+
+test("recorder leaves a cancelled prepared request without provider events and records a complete failure when dispatched", async t => {
+  const { repository } = await fixture(t);
+  const recorder = createLineageRecorder(repository);
+  await recorder.protectedRequest({
+    sessionKey: "cancelled-before-send", provider: "codex", operation: "responses.create", placeholders: ["[EMAIL_1]"]
+  });
+  assert.equal(repository.chronological().some(event => event.eventType === "provider_request" || event.eventType === "provider_response"), false);
+  const handle = await recorder.protectedRequest({
+    sessionKey: "failed-after-send", provider: "codex", operation: "responses.create", placeholders: ["[PHONE_1]"]
+  });
+  await recorder.providerResponse(handle, { success: false });
+  const chain = repository.valueTraversal(repository.chronological().find(event => event.eventType === "value_protected").valueId);
+  assert.deepEqual(chain.filter(event => ["provider_request", "provider_response"].includes(event.eventType)).map(event => event.eventType), []);
+  const failure = repository.chronological().find(event => event.eventType === "provider_response");
+  assert.equal(failure.metadata.success, false);
+  assert.equal(repository.causalTraversal(failure.eventId).some(event => event.eventType === "provider_request"), true);
 });
 
 test("recorder recovers after failed session, value, or placeholder creation appends", async t => {

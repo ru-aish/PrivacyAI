@@ -215,15 +215,23 @@ async function handleInterceptedRequest(request, response, context) {
     const transformed = await context.sessionController.transform(body, { signal: lifecycle.signal });
     const payload = Buffer.from(JSON.stringify(transformed.body));
     const headers = buildAgyUpstreamHeaders(request.headers, context.modelHost, payload.length, { modelRoute: true });
-    const upstream = await (context.requestUpstream || makeUpstreamRequest)({
-      hostname: context.modelHost,
-      method: "POST",
-      path: `${url.pathname}${url.search}`,
-      headers,
-      body: payload,
-      signal: lifecycle.signal,
-      agent: context.upstreamAgent
-    });
+    let upstreamSent = false;
+    let upstream;
+    try {
+      upstream = await (context.requestUpstream || makeUpstreamRequest)({
+        hostname: context.modelHost,
+        method: "POST",
+        path: `${url.pathname}${url.search}`,
+        headers,
+        body: payload,
+        signal: lifecycle.signal,
+        agent: context.upstreamAgent,
+        onRequestSent: () => { upstreamSent = true; }
+      });
+    } catch (error) {
+      if (upstreamSent) await recordTerminalLineage(context.lineageRecorder, transformed.lineageHandle, error);
+      throw error;
+    }
     await proxyModelResponse(
       response,
       upstream,
@@ -444,10 +452,19 @@ function makeUpstreamRequest(options) {
     headers: options.headers,
     body: options.body,
     signal: options.signal,
+    onRequestSent: options.onRequestSent,
     abortError,
     servername: options.hostname,
     agent: options.agent
   });
+}
+
+async function recordTerminalLineage(recorder, handle, providerError) {
+  try {
+    await recordLineage(recorder, "providerResponse", handle, { success: false });
+  } catch (lineageError) {
+    try { providerError.lineageError = lineageError; } catch {}
+  }
 }
 
 export function buildAgyUpstreamHeaders(input, host, contentLength, options = {}) {
