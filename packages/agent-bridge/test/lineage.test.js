@@ -796,6 +796,83 @@ test("recorder records cache-hit requests with reused mappings without duplicate
   ]);
 });
 
+test("recorder records one complete provider lifecycle per protected placeholder", async t => {
+  const { path, repository } = await fixture(t);
+  const recorder = createLineageRecorder(repository);
+  const handle = await recorder.protectedRequest({
+    sessionKey: "two-values", provider: "codex", operation: "responses.create", model: "gpt-5",
+    placeholders: ["[EMAIL_1]", "[PHONE_1]"]
+  });
+  await recorder.providerResponse(handle, { success: true });
+  await recorder.restoration(handle, { restoredCount: 2 });
+  const events = repository.chronological();
+  for (const [type, count] of Object.entries({ provider_request: 2, provider_response: 2, restoration: 2 })) {
+    assert.equal(events.filter(event => event.eventType === type).length, count);
+  }
+  for (const [type, field] of [["provider_request", "requestRef"], ["provider_response", "responseRef"], ["restoration", "restorationRef"]]) {
+    assert.equal(new Set(events.filter(event => event.eventType === type).map(event => event[field])).size, 1);
+  }
+  for (const value of events.filter(event => event.eventType === "value_protected")) {
+    assert.deepEqual(repository.valueTraversal(value.valueId).filter(event => ["provider_request", "provider_response", "restoration"].includes(event.eventType)).map(event => event.eventType), ["provider_request", "provider_response", "restoration"]);
+  }
+  repository.close();
+  assert.equal((await readFile(path)).includes(Buffer.from("raw-value-must-never-reach-lineage")), false);
+});
+
+test("recorder serializes concurrent first requests for one session", async t => {
+  const { repository } = await fixture(t);
+  const recorder = createLineageRecorder(repository);
+  await Promise.all([
+    recorder.protectedRequest({ sessionKey: "concurrent-first", provider: "codex", operation: "responses.create", placeholders: ["[EMAIL_1]"] }),
+    recorder.protectedRequest({ sessionKey: "concurrent-first", provider: "codex", operation: "responses.create", placeholders: ["[PHONE_1]"] })
+  ]);
+  const events = repository.chronological();
+  assert.equal(events.filter(event => event.eventType === "session_created").length, 1);
+  assert.equal(events.filter(event => event.eventType === "value_protected").length, 2);
+  assert.equal(events.filter(event => event.eventType === "placeholder_assigned").length, 2);
+});
+
+test("recorder keeps concurrent handles causally isolated when they finish in reverse order", async t => {
+  const { repository } = await fixture(t);
+  const recorder = createLineageRecorder(repository);
+  const [first, second] = await Promise.all([
+    recorder.protectedRequest({ sessionKey: "reverse", provider: "codex", operation: "responses.create", placeholders: ["[EMAIL_1]"] }),
+    recorder.protectedRequest({ sessionKey: "reverse", provider: "codex", operation: "responses.create", placeholders: ["[PHONE_1]"] })
+  ]);
+  await Promise.all([recorder.providerResponse(second, { success: true }), recorder.providerResponse(first, { success: true })]);
+  await Promise.all([recorder.restoration(second, { restoredCount: 1 }), recorder.restoration(first, { restoredCount: 1 })]);
+  const events = repository.chronological();
+  for (const handle of [first, second]) {
+    const restoration = events.find(event => event.eventType === "restoration" && repository.causalTraversal(event.eventId).some(parent => parent.requestRef === handle.requestRef));
+    const causes = repository.causalTraversal(restoration.eventId);
+    assert.deepEqual(causes.filter(event => ["provider_request", "provider_response", "restoration"].includes(event.eventType)).map(event => event.requestRef), [handle.requestRef, handle.requestRef, null]);
+    assert.equal(causes.some(event => event.eventType === "provider_request" && event.requestRef !== handle.requestRef), false);
+  }
+});
+
+test("recorder retries a partially appended multi-value request without duplicates", async t => {
+  const { repository } = await fixture(t);
+  let requests = 0;
+  let fail = true;
+  const recorder = createLineageRecorder({
+    append(event, options) {
+      if (event.eventType === "provider_request" && ++requests === 2 && fail) {
+        fail = false;
+        throw new Error("injected second relation failure");
+      }
+      return repository.append(event, options);
+    }
+  });
+  const request = { sessionKey: "request-retry", provider: "codex", operation: "responses.create", placeholders: ["[EMAIL_1]", "[PHONE_1]"] };
+  await assert.rejects(() => recorder.protectedRequest(request), /second relation/);
+  const handle = await recorder.protectedRequest(request);
+  await recorder.providerResponse(handle, { success: true });
+  await recorder.restoration(handle, { restoredCount: 2 });
+  const events = repository.chronological();
+  for (const type of ["provider_request", "provider_response", "restoration"]) assert.equal(events.filter(event => event.eventType === type).length, 2);
+  for (const [type, field] of [["provider_request", "requestRef"], ["provider_response", "responseRef"], ["restoration", "restorationRef"]]) assert.equal(new Set(events.filter(event => event.eventType === type).map(event => event[field])).size, 1);
+});
+
 test("recorder recovers after failed session, value, or placeholder creation appends", async t => {
   for (const eventType of ["session_created", "value_protected", "placeholder_assigned"]) {
     const { repository } = await fixture(t);

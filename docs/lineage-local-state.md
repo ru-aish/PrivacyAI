@@ -163,6 +163,14 @@ Production request paths accept an optional narrow `lineageRecorder` with
 Antigravity invoke this boundary after protected request creation and around
 provider/restore activity; those adapters never import SQLite. Use
 `createLineageRecorder(repository)` to connect the durable repository.
+For a protected request, the recorder emits one provider request, response, and
+restoration event for each assigned placeholder/value relation; events in each
+phase share an opaque request, response, or restoration reference. The returned
+frozen handle exposes only the opaque request reference. Its private lifecycle
+state retains per-relation causal event IDs so concurrent responses and
+restorations explicitly parent their matching relation rather than relying on
+session event order. Retrying an interrupted protected request in the same
+recorder process resumes completed relations without duplicating them.
 
 `openLineageInspection({ lineageDbPath })` opens only an existing database with
 SQLite's read-only connection mode. It can observe committed WAL frames from a
