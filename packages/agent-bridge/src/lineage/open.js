@@ -11,6 +11,7 @@ import { dirname, resolve } from "node:path";
 import { lineageError } from "./domain.js";
 import { initializeLineageSchema } from "./schema.js";
 import { SqliteLineageRepository } from "./sqlite-repository.js";
+import { retryLineageContention } from "./retry.js";
 
 // DatabaseSync is used only for atomic SQLite operations. Keep each attempt
 // short; contention is retried asynchronously below so it never monopolizes
@@ -43,11 +44,11 @@ export async function openLineageRepository(options = {}) {
     configuredPath || `${homedir()}/.local/share/privacyai/lineage.sqlite3`
   );
   const parent = dirname(path);
-  const busyTimeoutMs = positiveInteger(
+  const busyTimeoutMs = Math.min(100, positiveInteger(
     options.lineageBusyTimeoutMs,
     DEFAULT_BUSY_TIMEOUT_MS,
     "lineageBusyTimeoutMs"
-  );
+  ));
   const retryTimeoutMs = positiveInteger(
     options.lineageRetryTimeoutMs,
     DEFAULT_RETRY_TIMEOUT_MS,
@@ -81,19 +82,23 @@ export async function openLineageRepository(options = {}) {
 
     // Set busy_timeout before any operation that may contend for a lock.
     database.exec(`PRAGMA busy_timeout = ${Math.min(busyTimeoutMs, 100)}`);
-    await retryBusy(() => {
+    let repository;
+    await retryLineageContention(() => {
       database.exec("PRAGMA foreign_keys = ON");
       database.exec("PRAGMA trusted_schema = OFF");
       database.exec("PRAGMA journal_mode = WAL");
       database.exec("PRAGMA synchronous = FULL");
       initializeLineageSchema(database);
-    }, retryTimeoutMs, options.signal);
+      // Preparing the repository statements also consults SQLite schema state
+      // and can contend during a concurrent first open.
+      repository = new SqliteLineageRepository(database, path, { ...options, lineageRetryTimeoutMs: retryTimeoutMs });
+    }, { timeoutMs: retryTimeoutMs, signal: options.signal });
 
     await chmod(path, 0o600);
     await secureSidecar(`${path}-wal`);
     await secureSidecar(`${path}-shm`);
 
-    return new SqliteLineageRepository(database, path, { ...options, lineageRetryTimeoutMs: retryTimeoutMs });
+    return repository;
   } catch (error) {
     try {
       await file?.close();
@@ -249,35 +254,6 @@ function assertOptions(options) {
   }
 }
 
-async function retryBusy(action, timeoutMs, signal) {
-  const deadline = Date.now() + timeoutMs;
-  let delay = 2;
-  while (true) {
-    if (signal?.aborted) throw lineageError("PRIVACYAI_LINEAGE_ABORTED", "PrivacyAI lineage operation was cancelled.");
-    try {
-      return action();
-    } catch (error) {
-      if (!isBusy(error)) throw error;
-      if (Date.now() >= deadline) {
-        throw lineageError("PRIVACYAI_LINEAGE_BUSY", "PrivacyAI lineage storage remained busy.", error);
-      }
-      await new Promise((resolve, reject) => {
-        const timer = setTimeout(resolve, Math.min(delay, Math.max(1, deadline - Date.now())));
-        if (signal) signal.addEventListener("abort", () => {
-          clearTimeout(timer);
-          reject(lineageError("PRIVACYAI_LINEAGE_ABORTED", "PrivacyAI lineage operation was cancelled."));
-        }, { once: true });
-      });
-      delay = Math.min(delay * 2, 50);
-    }
-  }
-}
-
-function isBusy(error) {
-  const message = String(error?.message || "").toLowerCase();
-  return error?.code === "SQLITE_BUSY" || error?.code === "SQLITE_LOCKED" ||
-    message.includes("database is locked") || message.includes("database is busy");
-}
 
 function isCorruptionError(error) {
   const message = String(error?.message || "").toLowerCase();

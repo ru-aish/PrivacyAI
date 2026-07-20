@@ -26,6 +26,8 @@ import {
 import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
 import { runInheritedProcess } from "./process-supervisor.js";
 import { startAgyTransportRuntime } from "./agy-transport-runtime.js";
+import { createLineageRecorder, openLineageRepository } from "./lineage/index.js";
+import { runCleanupSteps } from "./resource-cleanup.js";
 
 const AGY_HOOK_PATH = fileURLToPath(new URL("../bin/privacyai-agy-hook.js", import.meta.url));
 const HOOK_PREFIX = "privacyai-agent-bridge-";
@@ -79,18 +81,24 @@ export async function launchAgy(userArgs = [], options = {}) {
     );
   });
   const startRuntime = options.startAgyTransportRuntime || startAgyTransportRuntime;
-  const runtime = await startRuntime({
-    ...options,
-    sanitizer,
-    baseEnv,
-    maxContextChars:
-      options.maxContextChars ?? derivePrivacyContextMaxChars(loaded.config, options),
-    maxContextTokens:
-      options.maxContextTokens ?? derivePrivacyContextMaxTokens(loaded.config, options),
-    tokenCounter: options.tokenCounter,
-    onProxyError
-  });
+  let lineageRepository;
+  let runtime;
+  let primaryError;
+  const ownsLineageRepository = !options.lineageRecorder && !options.lineageRepository;
   try {
+    lineageRepository = options.lineageRecorder ? undefined : await openLineageRepository({
+      lineageRepository: options.lineageRepository,
+      lineageDbPath: options.lineageDbPath,
+      lineageBusyTimeoutMs: options.lineageBusyTimeoutMs,
+      lineageRetryTimeoutMs: options.lineageRetryTimeoutMs
+    });
+    runtime = await startRuntime({
+      ...options, sanitizer, baseEnv,
+      lineageRecorder: options.lineageRecorder || createLineageRecorder(lineageRepository),
+      maxContextChars: options.maxContextChars ?? derivePrivacyContextMaxChars(loaded.config, options),
+      maxContextTokens: options.maxContextTokens ?? derivePrivacyContextMaxTokens(loaded.config, options),
+      tokenCounter: options.tokenCounter, onProxyError
+    });
     output.write(
       "PrivacyAI AGY transport active: native tools and integrations remain available; " +
       "supported model-bound content is sanitized locally.\n"
@@ -106,8 +114,14 @@ export async function launchAgy(userArgs = [], options = {}) {
         PRIVACYAI_AGY_PRIVACY_MODE: "transport"
       }
     });
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await runtime.close();
+    await runCleanupSteps([
+      { name: "AGY transport runtime", run: () => runtime?.close() },
+      { name: "lineage", run: () => ownsLineageRepository ? lineageRepository?.close() : undefined }
+    ], { primaryError, message: "PrivacyAI could not fully clean up the AGY transport launch." });
   }
 }
 

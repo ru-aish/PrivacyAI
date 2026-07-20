@@ -327,7 +327,7 @@ async function handleRequestCore(request, response, context) {
     const lineageHandle = await recordLineage(context.lineageRecorder, "protectedRequest", {
       sessionKey: identity.sessionKey, provider: "codex", operation: "responses.create",
       model: typeof body.model === "string" ? body.model : undefined,
-      additions: result.sessionMapAdditions, cacheWrites: result.cacheWrites, signal: context.requestSignal
+      placeholders: Object.keys(result.sessionMapAdditions), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: context.requestSignal
     });
     throwIfAborted(context.requestSignal);
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };

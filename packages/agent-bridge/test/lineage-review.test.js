@@ -44,7 +44,7 @@ test("rejects a symlink component before recursive mkdir creates through it", as
   );
 });
 
-test("schema initialization retains a safe SQLite contention cause", () => {
+test("schema initialization contention is handled by the public open retry boundary", () => {
   const busy = Object.assign(new Error("database is locked"), {
     code: "ERR_SQLITE_ERROR"
   });
@@ -60,10 +60,7 @@ test("schema initialization retains a safe SQLite contention cause", () => {
 
   assert.throws(
     () => initializeLineageSchema(database),
-    error =>
-      error?.code === "PRIVACYAI_LINEAGE_SCHEMA_INVALID" &&
-      error?.cause?.code === "SQLITE_LOCKED" &&
-      !error.message.includes("locked")
+    error => error === busy
   );
 });
 

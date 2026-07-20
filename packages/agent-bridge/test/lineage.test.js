@@ -654,7 +654,7 @@ test("recorder persists only opaque lifecycle references for protected provider 
   const secret = "raw-value-must-never-reach-lineage";
   const handle = await recorder.protectedRequest({
     sessionKey: "in-memory-session", provider: "codex", operation: "responses.create", model: "gpt-5",
-    additions: { "[EMAIL_1]": secret }, cacheWrites: [["ignored", { original: secret }]]
+    placeholders: ["[EMAIL_1]"], cacheActivity: { writes: 1 }
   });
   await recorder.providerResponse(handle, { success: true });
   await recorder.restoration(handle, { restoredCount: 1 });

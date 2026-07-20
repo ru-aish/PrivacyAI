@@ -31,7 +31,21 @@ export async function openLineageInspection(options = {}) {
     // sidecars. Inspection is intentionally a snapshot, never a live repair.
     database = new sqlite.DatabaseSync(`${pathToFileURL(path).href}?immutable=1`, { readOnly: true });
     validateLineageSchema(database);
-    return new SqliteLineageRepository(database, path, { lineageRetryTimeoutMs: 1 });
+    const repository = new SqliteLineageRepository(database, path, { readOnly: true, lineageRetryTimeoutMs: 1 });
+    // Do not return the repository: its database and append members are an
+    // accidental write-capable surface even when the connection is read-only.
+    return Object.freeze({
+      lookup: repository.lookup.bind(repository),
+      lookupSession: repository.lookupSession.bind(repository),
+      lookupValue: repository.lookupValue.bind(repository),
+      lookupPlaceholder: repository.lookupPlaceholder.bind(repository),
+      sessionTraversal: repository.sessionTraversal.bind(repository),
+      valueTraversal: repository.valueTraversal.bind(repository),
+      causalTraversal: repository.causalTraversal.bind(repository),
+      chronological: repository.chronological.bind(repository),
+      iterateChronological: repository.iterateChronological.bind(repository),
+      close: repository.close.bind(repository)
+    });
   } catch (error) {
     try { database?.close(); } catch {}
     if (String(error?.code || "").startsWith("PRIVACYAI_LINEAGE_")) throw error;

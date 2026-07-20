@@ -115,7 +115,7 @@ export async function createAgySessionController(options = {}) {
         });
         const lineageHandle = await recordLineage(context.lineageRecorder, "protectedRequest", {
           sessionKey, provider: "antigravity", operation: "generate_content",
-          additions: result.sessionMapAdditions, cacheWrites: result.cacheWrites, signal: requestOptions.signal
+          placeholders: Object.keys(result.sessionMapAdditions), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: requestOptions.signal
         });
         throwIfAborted(requestOptions.signal);
 
