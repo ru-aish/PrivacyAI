@@ -53,15 +53,24 @@ export class SqliteLineageRepository {
     this.statements = prepareStatements(database, this.readOnly);
   }
 
-  async append(input, options = {}) {
+  append(input, options = {}) {
     this.assertOpen();
     const candidate = normalizeEvent(input, { now: this.clock });
     const signal = options.signal || this.signal;
     if (this.readOnly) throw lineageError("PRIVACYAI_LINEAGE_READ_ONLY", "PrivacyAI lineage inspection is read-only.");
-    return retryLineageContention(() => this.#appendOnce(candidate), {
-      timeoutMs: this.busyRetryTimeoutMs,
-      signal
-    });
+    if (signal?.aborted) {
+      throw lineageError("PRIVACYAI_LINEAGE_ABORTED", "PrivacyAI lineage operation was cancelled.");
+    }
+    try {
+      return this.#appendOnce(candidate);
+    } catch (error) {
+      if (!isSqliteContention(error)) throw error;
+      return retryLineageContention(() => this.#appendOnce(candidate), {
+        timeoutMs: this.busyRetryTimeoutMs,
+        signal,
+        initialContention: error
+      });
+    }
   }
 
   #appendOnce(candidate) {

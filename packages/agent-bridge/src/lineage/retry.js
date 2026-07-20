@@ -1,19 +1,30 @@
 import { lineageError } from "./domain.js";
 
-export async function retryLineageContention(action, { timeoutMs, signal, now = Date.now }) {
+export async function retryLineageContention(action, {
+  timeoutMs,
+  signal,
+  now = Date.now,
+  initialContention
+}) {
   const deadline = now() + timeoutMs;
   let delay = 2;
+  let contention = initialContention;
   while (true) {
     throwIfAborted(signal);
+    if (contention) {
+      if (!isSqliteContention(contention)) throw contention;
+      if (now() >= deadline) {
+        throw lineageError("PRIVACYAI_LINEAGE_BUSY", "PrivacyAI lineage storage remained busy.", sanitizedContentionCause(contention));
+      }
+      await delayWithAbort(Math.min(delay, Math.max(1, deadline - now())), signal);
+      delay = Math.min(delay * 2, 50);
+      contention = undefined;
+    }
     try {
       return action();
     } catch (error) {
       if (!isSqliteContention(error)) throw error;
-      if (now() >= deadline) {
-        throw lineageError("PRIVACYAI_LINEAGE_BUSY", "PrivacyAI lineage storage remained busy.", sanitizedContentionCause(error));
-      }
-      await delayWithAbort(Math.min(delay, Math.max(1, deadline - now())), signal);
-      delay = Math.min(delay * 2, 50);
+      contention = error;
     }
   }
 }

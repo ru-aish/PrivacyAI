@@ -122,8 +122,11 @@ responsibility of the existing session-vault architecture, not lineage.
 
 `openLineageRepository(options?)` returns an append/query repository:
 
-- `await append(event, { signal? })` atomically appends one immutable event and any session, value,
-  or placeholder identity created by that event.
+- `append(event, { signal? })` atomically appends one immutable event and any session, value,
+  or placeholder identity created by that event. The uncontended fast path preserves the original
+  synchronous event return and synchronous validation failures. If SQLite is busy, the same call
+  returns a promise that yields between bounded retry attempts; callers that need to tolerate
+  contention should use `await append(...)`.
 - `lookup(eventId)` returns one event or `undefined`.
 - `lookupSession(sessionId)`, `lookupValue(valueId)`, and
   `lookupPlaceholder(placeholderId)` inspect identity origins.

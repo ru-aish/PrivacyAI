@@ -105,10 +105,12 @@ function assignEvent(extra = {}) {
   };
 }
 
-async function seed(repository) {
-  const session = await repository.append(sessionEvent());
-  const value = await repository.append(protectEvent());
-  const placeholder = await repository.append(assignEvent());
+function seed(repository) {
+  const session = repository.append(sessionEvent());
+  assert.equal(typeof session?.then, "undefined");
+  assert.equal(session.eventId, eventId("a"));
+  const value = repository.append(protectEvent());
+  const placeholder = repository.append(assignEvent());
   return { session, value, placeholder };
 }
 
@@ -305,11 +307,11 @@ test("enforces unique origins, parent references, and atomic append validation",
   ];
 
   for (const [candidate, code] of failures) {
-    await assert.rejects(() => repository.append(candidate), error => error?.code === code);
+    assert.throws(() => repository.append(candidate), error => error?.code === code);
     assert.equal(repository.lookup(candidate.eventId), undefined);
   }
 
-  await assert.rejects(
+  assert.throws(
     () => repository.append(assignEvent()),
     error => error?.code === "PRIVACYAI_LINEAGE_DUPLICATE_EVENT"
   );
@@ -324,7 +326,7 @@ test("enforces unique origins, parent references, and atomic append validation",
     policyRef: ids.policy,
     reasonCode: "policy_match"
   });
-  await assert.rejects(() => repository.append({
+  assert.throws(() => repository.append({
     eventId: eventId("e"),
     sessionId: ids.session,
     eventType: "restoration",
@@ -342,11 +344,11 @@ test("rejects arbitrary text fields and serializes safe diagnostics deterministi
   const { path, repository } = await fixture(t);
   const secret = "raw-secret-fixture-DO-NOT-PERSIST";
 
-  await assert.rejects(
+  assert.throws(
     () => repository.append({ ...sessionEvent(), rawPrompt: secret }),
     error => error?.code === "PRIVACYAI_LINEAGE_INVALID_EVENT"
   );
-  await assert.rejects(
+  assert.throws(
     () => repository.append({ ...sessionEvent(), sessionId: `session:${secret}` }),
     error => error?.code === "PRIVACYAI_LINEAGE_INVALID_EVENT"
   );
@@ -400,7 +402,7 @@ test("SQLite tables and repository APIs prevent historical mutation or deletion"
     () => repository.lookup(eventId("b")),
     error => error?.code === "PRIVACYAI_LINEAGE_CLOSED"
   );
-  await assert.rejects(
+  assert.throws(
     () => repository.append(sessionEvent()),
     error => error?.code === "PRIVACYAI_LINEAGE_CLOSED"
   );
@@ -526,6 +528,7 @@ test("public SQLite append retries asynchronously, exhausts safely, and honours 
       eventId: eventId("d"), sessionId: ids.session, eventType: "cache_miss", occurredAt: 31,
       parentEventId: parent.eventId, cacheRef: opaque("cache", "d"), operation: "read", reasonCode: "cache_lookup"
     });
+    assert.equal(typeof append?.then, "function", "contention must transition append to asynchronous retry");
     const release = setTimeout(() => lock.exec("COMMIT"), 40);
     await append;
     clearTimeout(release);
