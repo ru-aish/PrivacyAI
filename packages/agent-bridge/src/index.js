@@ -60,6 +60,11 @@ export {
 } from "./config-store.js";
 export { resolveExecutable, verifyNativeExecutable } from "./executable.js";
 export { acquireNativeLaunchLock } from "./launch-lock.js";
+export {
+  getProviderAdapter,
+  listProviderAdapters,
+  requireProviderAdapter
+} from "./provider-registry.js";
 export { buildCodexIsolationArgs, prepareAgentRuntimeIsolation } from "./runtime-isolation.js";
 export {
   auditClaudeStartupContext,
