@@ -21,7 +21,13 @@ export async function readProcessStartIdentity(pid) {
     // 1 (pid) and 2 (comm), it is index 19 in the remaining sequence.
     return fieldsAfterCommand[19] || null;
   } catch (error) {
-    if (error?.code === "ENOENT" || error?.code === "EACCES") return null;
+    if (
+      error?.code === "ENOENT" ||
+      error?.code === "EACCES" ||
+      error?.code === "ESRCH"
+    ) {
+      return null;
+    }
     throw error;
   }
 }
@@ -31,5 +37,6 @@ export async function isSameLiveProcess(record) {
   if (!isProcessAlive(pid)) return false;
   if (!record?.processStart) return true;
   const currentStart = await readProcessStartIdentity(pid);
-  return currentStart === null || currentStart === record.processStart;
+  if (currentStart !== null) return currentStart === record.processStart;
+  return isProcessAlive(pid);
 }

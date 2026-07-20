@@ -105,8 +105,23 @@ does not encrypt them. A mode-`0600` stable locator contains only the keyed vaul
 filename, never the session id or restoration values, so a rotated runtime can
 load the prior vault and migrate it to the new keyed path on the next save.
 Rotation intentionally invalidates keyed cache and lineage identity while
-preserving restoration data. Retaining old ids across a rotation requires
-retaining the old key outside PrivacyAI; automatic key backup is not provided.
+preserving restoration data. Cross-process rotations are serialized by private,
+descriptor-relative participant records with bounded and abort-aware waiting,
+process-start identity on Linux, and dead-owner cleanup. Cancellation before
+publication removes only the caller's participant; once publication begins, the
+operation completes rather than reporting an ambiguous cancelled result. A
+successful rotation returns only while its new epoch is still installed, and the
+reported `previousKeyId` values
+therefore form one total predecessor chain. Retaining old ids across a rotation
+requires retaining the old key outside PrivacyAI; automatic key backup is not
+provided.
+
+Persistent installation-key storage is supported on Linux and macOS. On Windows,
+load, creation, and rotation fail before directory creation or key generation:
+Node does not currently expose the handle-relative anti-reparse write and rename
+operations required to prevent a concurrent junction replacement from
+redirecting key bytes. Embedded callers may supply an in-memory `identityKey` or
+`identityRoot`, but PrivacyAI does not claim persistent Windows identity storage.
 
 ## Privacy and threat considerations
 

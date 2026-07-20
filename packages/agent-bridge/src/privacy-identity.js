@@ -18,6 +18,10 @@ const INSTALLATION_KEY_VERSION = 1;
 const INSTALLATION_KEY_BYTES = 32;
 const IDENTITY_READ_RETRY_LIMIT = 8;
 const IDENTITY_TEMP_MAX_UNKNOWN_OWNER_AGE_MS = 24 * 60 * 60 * 1000;
+const IDENTITY_ROTATION_LOCK_WAIT_MS = 60_000;
+const IDENTITY_ROTATION_LOCK_RETRY_MIN_MS = 10;
+const IDENTITY_ROTATION_LOCK_RETRY_MAX_MS = 50;
+const IDENTITY_ROTATION_LOCK_INCOMPLETE_GRACE_MS = 2_000;
 
 export function defaultPrivacyIdentityKeyPath(options = {}) {
   return privacyIdentityKeyLocation(options).path;
@@ -39,55 +43,89 @@ export async function openInstallationPrivacyIdentity(options = {}) {
   }
 
   const location = privacyIdentityKeyLocation(options);
-  return withIdentityStorage(location, { create: true }, async storage => {
+  const storage = await openIdentityStorage(location, { create: true });
+  let lock;
+  let tempPath;
+  let deferredRelease = false;
+  try {
     try {
       const identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
       await cleanupIdentityTempFiles(storage);
+      await assertIdentityStorageStable(storage);
+      return identityRoot;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+
+    lock = await acquireIdentityRotationLock(storage, options);
+    throwIfIdentityMutationAborted(options.signal);
+    try {
+      const identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
+      await cleanupIdentityTempFiles(storage);
+      await assertIdentityStorageStable(storage);
+      await lock.assertOwned();
+      deferredRelease = true;
+      deferIdentityMutationRelease(storage, lock);
       return identityRoot;
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
 
     const record = installationKeyRecord(generatePrivacyIdentityKey());
-    const tempPath = await identityTempPath(storage);
+    tempPath = await identityTempPath(storage);
+    await writePrivateIdentityRecord(tempPath, record);
+    await assertIdentityStorageStable(storage);
+    await lock.assertOwned();
+    throwIfIdentityMutationAborted(options.signal);
     try {
-      await writePrivateIdentityRecord(tempPath, record);
-      await assertIdentityStorageStable(storage);
-      try {
-        await link(tempPath, storage.keyPath);
-      } catch (error) {
-        // A concurrent winner may publish the final record and remove all stale
-        // temporary names before this process reaches link(). In both cases the
-        // final record is the only source of truth.
-        if (error?.code !== "EEXIST" && error?.code !== "ENOENT") throw error;
-      }
-
-      let identityRoot;
-      try {
-        identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
-      } catch (error) {
-        if (error?.code === "ENOENT") throw identityStoreError(error);
-        throw error;
-      }
-      await cleanupIdentityTempFiles(storage);
-      return identityRoot;
+      await link(tempPath, storage.keyPath);
     } catch (error) {
-      if (
-        error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT" ||
-        error?.code === "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE"
-      ) {
-        throw error;
-      }
-      throw identityStoreError(error);
-    } finally {
-      await rm(tempPath, { force: true }).catch(() => {});
+      // A concurrent older runtime may have published a complete record without
+      // participating in the mutation protocol. The final record remains the
+      // only source of truth.
+      if (error?.code !== "EEXIST" && error?.code !== "ENOENT") throw error;
     }
-  });
+    await lock.assertOwned();
+
+    let identityRoot;
+    try {
+      identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
+    } catch (error) {
+      if (error?.code === "ENOENT") throw identityStoreError(error);
+      throw error;
+    }
+    await cleanupIdentityTempFiles(storage);
+    await assertIdentityStorageStable(storage);
+    await lock.assertOwned();
+    deferredRelease = true;
+    deferIdentityMutationRelease(storage, lock);
+    return identityRoot;
+  } catch (error) {
+    if (
+      error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT" ||
+      error?.code === "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE"
+    ) {
+      throw error;
+    }
+    throw identityStoreError(error);
+  } finally {
+    if (tempPath) await rm(tempPath, { force: true }).catch(() => {});
+    if (!deferredRelease) {
+      await lock?.release().catch(() => {});
+      await storage.directoryHandle.close().catch(() => {});
+    }
+  }
 }
 
 export async function rotateInstallationPrivacyIdentityKey(options = {}) {
   const location = privacyIdentityKeyLocation(options);
-  return withIdentityStorage(location, { create: true }, async storage => {
+  const storage = await openIdentityStorage(location, { create: true });
+  let lock;
+  let tempPath;
+  let deferredRelease = false;
+  try {
+    lock = await acquireIdentityRotationLock(storage, options);
+    throwIfIdentityMutationAborted(options.signal);
     let previousKeyId = null;
     try {
       const previousRecord = await readIdentityRecord(storage.keyPath);
@@ -99,26 +137,46 @@ export async function rotateInstallationPrivacyIdentityKey(options = {}) {
 
     const key = generatePrivacyIdentityKey();
     const record = installationKeyRecord(key);
-    const tempPath = await identityTempPath(storage);
-    try {
-      await writePrivateIdentityRecord(tempPath, record);
-      await assertIdentityStorageStable(storage);
-      await rename(tempPath, storage.keyPath);
-      await cleanupIdentityTempFiles(storage);
-      const identityRoot = createPrivacyIdentityService({ key });
-      return {
-        path: location.path,
-        previousKeyId,
-        keyId: identityRoot.keyId,
-        identityRoot
-      };
-    } catch (error) {
-      if (error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT") throw error;
-      throw identityStoreError(error);
-    } finally {
-      await rm(tempPath, { force: true }).catch(() => {});
+    tempPath = await identityTempPath(storage);
+    await writePrivateIdentityRecord(tempPath, record);
+    await assertIdentityStorageStable(storage);
+    await lock.assertOwned();
+    throwIfIdentityMutationAborted(options.signal);
+    await rename(tempPath, storage.keyPath);
+    tempPath = null;
+    await lock.assertOwned();
+
+    const installedRecord = await readIdentityRecord(storage.keyPath);
+    const identityRoot = identityFromRecord(installedRecord);
+    if (installedRecord.keyId !== record.keyId) throw changedIdentityStoreError();
+    await cleanupIdentityTempFiles(storage);
+    await assertIdentityStorageStable(storage);
+    await lock.assertOwned();
+
+    const result = {
+      path: location.path,
+      previousKeyId,
+      keyId: identityRoot.keyId,
+      identityRoot
+    };
+    deferredRelease = true;
+    deferIdentityMutationRelease(storage, lock);
+    return result;
+  } catch (error) {
+    if (
+      error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT" ||
+      error?.code === "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE"
+    ) {
+      throw error;
     }
-  });
+    throw identityStoreError(error);
+  } finally {
+    if (tempPath) await rm(tempPath, { force: true }).catch(() => {});
+    if (!deferredRelease) {
+      await lock?.release().catch(() => {});
+      await storage.directoryHandle.close().catch(() => {});
+    }
+  }
 }
 
 export function sessionPrivacyIdentity(identityRoot, sessionKey) {
@@ -262,6 +320,7 @@ async function withIdentityStorage(location, options, operation) {
 }
 
 async function openIdentityStorage(location, options) {
+  if (process.platform === "win32") throw windowsIdentityStorageUnavailableError();
   const directoryPath = dirname(location.path);
   await ensureDirectoryComponents(directoryPath, options);
   const pathMetadata = await lstat(directoryPath);
@@ -269,8 +328,7 @@ async function openIdentityStorage(location, options) {
 
   let directoryHandle;
   try {
-    const flags = constants.O_RDONLY |
-      (process.platform === "win32" ? 0 : ((constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0)));
+    const flags = constants.O_RDONLY | (constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0);
     directoryHandle = await open(directoryPath, flags);
     let openedMetadata = await directoryHandle.stat();
     validateIdentityDirectory(openedMetadata, { final: true });
@@ -280,13 +338,12 @@ async function openIdentityStorage(location, options) {
     const currentMetadata = await lstat(directoryPath);
     if (!sameFile(currentMetadata, openedMetadata)) throw corruptIdentityStoreError();
 
-    if (location.privateDirectory && process.platform !== "win32") {
+    if (location.privateDirectory) {
       await directoryHandle.chmod(0o700);
       openedMetadata = await directoryHandle.stat();
       if ((openedMetadata.mode & 0o777) !== 0o700) throw corruptIdentityStoreError();
     } else if (
       !location.privateDirectory &&
-      process.platform !== "win32" &&
       (openedMetadata.mode & 0o022) !== 0
     ) {
       throw corruptIdentityStoreError();
@@ -294,8 +351,7 @@ async function openIdentityStorage(location, options) {
 
     const operationDirectoryPath = await identityDirectoryDescriptorPath(
       directoryHandle,
-      openedMetadata,
-      directoryPath
+      openedMetadata
     );
     return {
       directoryHandle,
@@ -315,8 +371,7 @@ async function openIdentityStorage(location, options) {
   }
 }
 
-async function identityDirectoryDescriptorPath(directoryHandle, directoryMetadata, directoryPath) {
-  if (process.platform === "win32") return directoryPath;
+async function identityDirectoryDescriptorPath(directoryHandle, directoryMetadata) {
   const candidates = process.platform === "linux"
     ? [`/proc/self/fd/${directoryHandle.fd}`, `/dev/fd/${directoryHandle.fd}`]
     : [`/dev/fd/${directoryHandle.fd}`, `/proc/self/fd/${directoryHandle.fd}`];
@@ -374,7 +429,6 @@ function validateIdentityDirectory(metadata, options = {}) {
 
 function validateIdentityDirectoryOwner(metadata) {
   if (
-    process.platform !== "win32" &&
     typeof process.getuid === "function" &&
     metadata.uid !== process.getuid()
   ) {
@@ -417,14 +471,353 @@ async function writePrivateIdentityRecord(path, record) {
   let handle;
   try {
     const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
-      (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW || 0));
+      (constants.O_NOFOLLOW || 0);
     handle = await open(path, flags, 0o600);
     await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8" });
-    if (process.platform !== "win32") await handle.chmod(0o600);
+    await handle.chmod(0o600);
     await handle.sync();
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+async function acquireIdentityRotationLock(storage, options = {}) {
+  const signal = identityMutationSignal(options.signal);
+  throwIfIdentityMutationAborted(signal);
+  const timeoutMs = identityRotationLockTimeout(options.identityRotationLockTimeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  const processStart = await readProcessStartIdentity(process.pid);
+  const token = randomUUID();
+  const name = `${storage.keyName}.rotation.${process.pid}.${processStart || "unknown"}.${token}.lock`;
+  const path = join(storage.operationDirectoryPath, name);
+  let serialized = serializeIdentityRotationParticipant({
+    pid: process.pid,
+    processStart,
+    token,
+    choosing: true,
+    ticket: null
+  });
+
+  try {
+    await writePrivateIdentityLock(path, serialized);
+    const participants = await readIdentityRotationParticipants(storage);
+    const maximumTicket = participants.reduce(
+      (maximum, participant) => participant.record?.choosing
+        ? maximum
+        : Math.max(maximum, participant.record?.ticket || 0),
+      0
+    );
+    if (!Number.isSafeInteger(maximumTicket + 1)) {
+      throw identityStoreError(new Error("Identity rotation ticket space is exhausted."));
+    }
+    const ticket = maximumTicket + 1;
+    serialized = serializeIdentityRotationParticipant({
+      pid: process.pid,
+      processStart,
+      token,
+      choosing: false,
+      ticket
+    });
+    await replacePrivateIdentityLock(storage, path, serialized);
+    await waitForIdentityRotationTurn(
+      storage,
+      { name, path, serialized, ticket, token },
+      deadline,
+      signal
+    );
+
+    let released = false;
+    return {
+      async assertOwned() {
+        if (released || await readIdentityLockBytes(path) !== serialized) {
+          throw identityStoreError(new Error("Identity rotation lock ownership changed."));
+        }
+      },
+      async release() {
+        if (released) return;
+        released = true;
+        await rm(path, { force: true });
+      }
+    };
+  } catch (error) {
+    await rm(path, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function serializeIdentityRotationParticipant(participant) {
+  return `${JSON.stringify({
+    version: 1,
+    pid: participant.pid,
+    processStart: participant.processStart,
+    createdAt: Date.now(),
+    token: participant.token,
+    choosing: participant.choosing,
+    ticket: participant.ticket
+  })}\n`;
+}
+
+async function waitForIdentityRotationTurn(storage, owner, deadline, signal) {
+  let predecessor;
+  while (true) {
+    await assertIdentityRotationParticipantOwned(owner);
+    const participants = await readIdentityRotationParticipants(storage);
+    const choosing = participants.some(
+      participant => participant.name !== owner.name &&
+        (participant.record == null || participant.record.choosing)
+    );
+    if (!choosing) {
+      predecessor = participants
+        .filter(participant =>
+          participant.name !== owner.name &&
+          identityRotationPriorityCompare(participant.record, owner) < 0
+        )
+        .sort((left, right) => identityRotationPriorityCompare(left.record, right.record))
+        .at(-1);
+      break;
+    }
+    await waitForIdentityRotationRetry(deadline, signal);
+  }
+
+  if (predecessor == null) return;
+  while (true) {
+    await assertIdentityRotationParticipantOwned(owner);
+    const participant = await readIdentityRotationParticipant(
+      predecessor.path,
+      predecessor.name,
+      predecessor.owner
+    );
+    if (participant == null) return;
+    if (!await isSameLiveProcess(predecessor.owner)) {
+      await rm(predecessor.path, { force: true });
+      return;
+    }
+    const record = validateIdentityRotationParticipantRecord(
+      participant.record,
+      predecessor.owner
+    );
+    if (record == null) {
+      const ageMs = Math.max(0, Date.now() - participant.metadata.mtimeMs);
+      if (ageMs >= IDENTITY_ROTATION_LOCK_INCOMPLETE_GRACE_MS) {
+        throw corruptIdentityStoreError();
+      }
+    }
+    await waitForIdentityRotationRetry(deadline, signal);
+  }
+}
+
+async function assertIdentityRotationParticipantOwned(owner) {
+  if (await readIdentityLockBytes(owner.path) !== owner.serialized) {
+    throw identityStoreError(new Error("Identity rotation lock ownership changed."));
+  }
+}
+
+function identityRotationPriorityCompare(left, right) {
+  if (left.ticket !== right.ticket) return left.ticket - right.ticket;
+  return left.token.localeCompare(right.token);
+}
+
+async function waitForIdentityRotationRetry(deadline, signal) {
+  throwIfIdentityMutationAborted(signal);
+  if (Date.now() >= deadline) {
+    throw identityStoreError(new Error("Timed out waiting for the identity rotation lock."));
+  }
+  await identityRotationLockDelay(signal);
+}
+
+async function readIdentityRotationParticipants(storage) {
+  const prefix = `${storage.keyName}.rotation.`;
+  const entries = await readdir(storage.operationDirectoryPath, { withFileTypes: true });
+  const participants = [];
+  for (const entry of entries) {
+    if (!entry.name.startsWith(prefix) || !entry.name.endsWith(".lock")) continue;
+    if (!entry.isFile() || entry.isSymbolicLink()) throw corruptIdentityStoreError();
+    const owner = identityRotationParticipantOwner(entry.name, prefix);
+    if (owner == null) throw corruptIdentityStoreError();
+    const path = join(storage.operationDirectoryPath, entry.name);
+    const participant = await readIdentityRotationParticipant(path, entry.name, owner);
+    if (participant == null) continue;
+
+    if (!await isSameLiveProcess(owner)) {
+      await rm(path, { force: true });
+      continue;
+    }
+    const record = validateIdentityRotationParticipantRecord(participant.record, owner);
+    if (record == null) {
+      const ageMs = Math.max(0, Date.now() - participant.metadata.mtimeMs);
+      if (ageMs >= IDENTITY_ROTATION_LOCK_INCOMPLETE_GRACE_MS) {
+        throw corruptIdentityStoreError();
+      }
+    }
+    participants.push({ ...participant, record });
+  }
+  return participants;
+}
+
+async function readIdentityRotationParticipant(path, name, owner) {
+  let metadata;
+  let serialized;
+  try {
+    metadata = await lstat(path);
+    validateIdentityLockFile(metadata);
+    serialized = await readIdentityLockBytes(path);
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "PRIVACYAI_IDENTITY_KEY_CHANGED") return null;
+    if (error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT") throw error;
+    throw corruptIdentityStoreError(error);
+  }
+
+  let record = null;
+  try {
+    record = JSON.parse(serialized);
+  } catch {
+    // An owner can be terminated between exclusive creation and its first
+    // write. Live incomplete records receive a short grace period.
+  }
+  return { metadata, name, owner, path, record, serialized };
+}
+
+function identityRotationParticipantOwner(name, prefix) {
+  const parts = name.slice(prefix.length, -".lock".length).split(".");
+  if (parts.length !== 3 || !/^\d+$/.test(parts[0])) return null;
+  const pid = Number(parts[0]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  const processStart = parts[1] === "unknown"
+    ? null
+    : /^\d+$/.test(parts[1]) ? parts[1] : undefined;
+  if (processStart === undefined) return null;
+  const token = parts[2];
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(token)) {
+    return null;
+  }
+  return { pid, processStart, token };
+}
+
+function validateIdentityRotationParticipantRecord(record, owner) {
+  const processStart = record?.processStart == null ? null : String(record.processStart);
+  const validTicket = record?.choosing === true
+    ? record.ticket == null
+    : record?.choosing === false && Number.isSafeInteger(record.ticket) && record.ticket > 0;
+  if (
+    record?.version !== 1 ||
+    record.pid !== owner.pid ||
+    processStart !== owner.processStart ||
+    record.token !== owner.token ||
+    !Number.isFinite(record.createdAt) ||
+    !validTicket
+  ) {
+    return null;
+  }
+  return { ...record, processStart };
+}
+
+async function writePrivateIdentityLock(path, serialized) {
+  let handle;
+  try {
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
+      (constants.O_NOFOLLOW || 0);
+    handle = await open(path, flags, 0o600);
+    await handle.writeFile(serialized, { encoding: "utf8" });
+    await handle.chmod(0o600);
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function replacePrivateIdentityLock(storage, path, serialized) {
+  const tempPath = await identityTempPath(storage);
+  try {
+    await writePrivateIdentityLock(tempPath, serialized);
+    await rename(tempPath, path);
+  } finally {
+    await rm(tempPath, { force: true }).catch(() => {});
+  }
+}
+
+async function readIdentityLockBytes(path) {
+  let handle;
+  try {
+    const pathMetadata = await lstat(path);
+    validateIdentityLockFile(pathMetadata);
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
+    const openedMetadata = await handle.stat();
+    validateIdentityLockFile(openedMetadata);
+    if (!sameFile(pathMetadata, openedMetadata)) throw changedIdentityStoreError();
+    return await handle.readFile({ encoding: "utf8" });
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+function validateIdentityLockFile(metadata) {
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.size > 4 * 1024 ||
+    (metadata.mode & 0o077) !== 0
+  ) {
+    throw corruptIdentityStoreError();
+  }
+}
+
+function identityRotationLockTimeout(value) {
+  if (value == null) return IDENTITY_ROTATION_LOCK_WAIT_MS;
+  const timeout = Number(value);
+  if (!Number.isFinite(timeout) || timeout < 1 || timeout > IDENTITY_ROTATION_LOCK_WAIT_MS) {
+    throw new TypeError(
+      `PrivacyAI identity rotation lock timeout must be between 1 and ${IDENTITY_ROTATION_LOCK_WAIT_MS} milliseconds.`
+    );
+  }
+  return Math.floor(timeout);
+}
+
+function identityRotationLockDelay(signal) {
+  const spread = IDENTITY_ROTATION_LOCK_RETRY_MAX_MS - IDENTITY_ROTATION_LOCK_RETRY_MIN_MS;
+  const delay = IDENTITY_ROTATION_LOCK_RETRY_MIN_MS + Math.floor(Math.random() * (spread + 1));
+  return new Promise((resolveDelay, rejectDelay) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolveDelay();
+    }, delay);
+    const onAbort = () => {
+      clearTimeout(timer);
+      rejectDelay(identityMutationAbortError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
+}
+
+function identityMutationSignal(signal) {
+  if (signal == null) return null;
+  if (
+    typeof signal !== "object" ||
+    typeof signal.aborted !== "boolean" ||
+    typeof signal.addEventListener !== "function" ||
+    typeof signal.removeEventListener !== "function"
+  ) {
+    throw new TypeError("PrivacyAI identity mutation signal must be an AbortSignal.");
+  }
+  return signal;
+}
+
+function throwIfIdentityMutationAborted(signal) {
+  if (signal?.aborted) throw identityMutationAbortError();
+}
+
+function identityMutationAbortError() {
+  const error = new Error("PrivacyAI identity mutation was cancelled.");
+  error.name = "AbortError";
+  error.code = "ABORT_ERR";
+  return error;
+}
+
+function deferIdentityMutationRelease(storage, lock) {
+  setImmediate(() => {
+    lock.release()
+      .catch(() => {})
+      .finally(() => storage.directoryHandle.close().catch(() => {}));
+  });
 }
 
 async function cleanupIdentityTempFiles(storage) {
@@ -478,7 +871,7 @@ async function readIdentityRecordOnce(path) {
   try {
     const pathMetadata = await lstat(path);
     validateIdentityKeyFile(pathMetadata);
-    const flags = constants.O_RDONLY | (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW || 0));
+    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW || 0);
     handle = await open(path, flags);
     const openedMetadata = await handle.stat();
     validateIdentityKeyFile(openedMetadata);
@@ -518,7 +911,7 @@ function validateIdentityKeyFile(metadata) {
     !metadata.isFile() ||
     metadata.isSymbolicLink() ||
     metadata.size > 16 * 1024 ||
-    (process.platform !== "win32" && (metadata.mode & 0o077) !== 0)
+    (metadata.mode & 0o077) !== 0
   ) {
     throw corruptIdentityStoreError();
   }
@@ -603,4 +996,10 @@ function identityStoreError(cause) {
   const error = new Error("PrivacyAI could not persist installation identity key material.", { cause });
   error.code = "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE";
   return error;
+}
+
+function windowsIdentityStorageUnavailableError() {
+  return identityStoreError(new Error(
+    "Persistent identity storage on Windows requires handle-relative anti-reparse filesystem operations."
+  ));
 }

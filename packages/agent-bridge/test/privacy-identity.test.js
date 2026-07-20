@@ -12,7 +12,7 @@ import {
   symlink,
   writeFile
 } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 
 import {
@@ -24,10 +24,11 @@ import {
 } from "../src/privacy-identity.js";
 import { SessionVault } from "../src/session-vault.js";
 import { allowancePath } from "../src/prompt-flow.js";
+import { readProcessStartIdentity } from "../src/process-identity.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
 const identityModuleUrl = new URL("../src/privacy-identity.js", import.meta.url).href;
-const IDENTITY_CHILD_TIMEOUT_MS = 10_000;
+const IDENTITY_CHILD_TIMEOUT_MS = 75_000;
 
 test("installation identity persists with private permissions", async t => {
   const root = await createTestTempDir("privacyai-identity-key-");
@@ -143,24 +144,240 @@ test("key rotation creates a new identity epoch while preserving vault restorati
   await access(afterVault.pathForSession(sessionId));
 });
 
-test("concurrent rotations publish complete epochs without cross-process temp deletion", async t => {
+test("64 concurrent rotations return only the epoch still installed at settlement", {
+  timeout: 90_000
+}, async t => {
   const root = await createTestTempDir("privacyai-identity-concurrent-rotation-");
   t.after(() => rm(root, { recursive: true, force: true }));
-  await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  const initial = await openInstallationPrivacyIdentity({ identityBaseDir: root });
 
   const results = await Promise.all(
-    Array.from({ length: 48 }, () => rotateIdentityInChild(root))
+    Array.from({ length: 64 }, () => rotateIdentityInChild(root))
   );
 
-  assert.equal(results.every(result => result.code === 0 && result.stderr === ""), true);
+  assert.equal(
+    results.every(result => result.code === 0 && result.stderr === ""),
+    true,
+    JSON.stringify(results.filter(result => result.code !== 0 || result.stderr !== ""))
+  );
   const rotations = results.map(result => JSON.parse(result.stdout));
   assert.equal(rotations.every(result => result.keyId === result.identityKeyId), true);
+  assert.equal(rotations.every(result => result.keyId === result.installedKeyId), true);
+  assert.equal(new Set(rotations.map(result => result.keyId)).size, 64);
+  const byPreviousKeyId = new Map();
+  for (const rotation of rotations) {
+    assert.equal(typeof rotation.previousKeyId, "string");
+    assert.equal(byPreviousKeyId.has(rotation.previousKeyId), false);
+    byPreviousKeyId.set(rotation.previousKeyId, rotation.keyId);
+  }
+  let chainKeyId = initial.keyId;
+  const chain = [];
+  for (let index = 0; index < 64; index += 1) {
+    const nextKeyId = byPreviousKeyId.get(chainKeyId);
+    assert.match(nextKeyId, /^kid1:[a-f0-9]{32}$/);
+    chain.push(nextKeyId);
+    chainKeyId = nextKeyId;
+  }
+  assert.equal(new Set(chain).size, 64);
   const current = await openInstallationPrivacyIdentity({ identityBaseDir: root });
-  assert.equal(rotations.some(result => result.keyId === current.keyId), true);
+  assert.equal(chainKeyId, current.keyId);
   assert.deepEqual(
     (await readdir(root)).filter(name => name.startsWith("key-v1.json.") && name.endsWith(".tmp")),
     []
   );
+  await assertEventuallyNoRotationLocks(root);
+});
+
+test("fresh installs and rotations share one mutation order", {
+  timeout: 30_000
+}, async t => {
+  const root = await createTestTempDir("privacyai-identity-install-rotation-order-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const operations = Array.from({ length: 12 }, () => [
+    { kind: "open", promise: openIdentityInChild(root) },
+    { kind: "rotate", promise: rotateIdentityInChild(root) }
+  ]).flat();
+
+  const completed = await Promise.all(
+    operations.map(async operation => ({
+      kind: operation.kind,
+      result: await operation.promise
+    }))
+  );
+  assert.equal(
+    completed.every(({ result }) => result.code === 0 && result.stderr === ""),
+    true,
+    JSON.stringify(completed.filter(({ result }) => result.code !== 0 || result.stderr !== ""))
+  );
+
+  const openKeyIds = new Set(
+    completed.filter(item => item.kind === "open").map(item => item.result.stdout)
+  );
+  const rotations = completed
+    .filter(item => item.kind === "rotate")
+    .map(item => JSON.parse(item.result.stdout));
+  const rotationKeyIds = new Set(rotations.map(rotation => rotation.keyId));
+  assert.equal(rotationKeyIds.size, 12);
+
+  const byPreviousKeyId = new Map();
+  for (const rotation of rotations) {
+    assert.equal(byPreviousKeyId.has(rotation.previousKeyId), false);
+    byPreviousKeyId.set(rotation.previousKeyId, rotation.keyId);
+  }
+  const roots = rotations
+    .map(rotation => rotation.previousKeyId)
+    .filter(previousKeyId => previousKeyId == null || !rotationKeyIds.has(previousKeyId));
+  assert.equal(roots.length, 1);
+  if (roots[0] != null) assert.equal(openKeyIds.has(roots[0]), true);
+
+  let chainKeyId = roots[0];
+  for (let index = 0; index < rotations.length; index += 1) {
+    const nextKeyId = byPreviousKeyId.get(chainKeyId);
+    assert.match(nextKeyId, /^kid1:[a-f0-9]{32}$/);
+    chainKeyId = nextKeyId;
+  }
+  const current = await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  assert.equal(chainKeyId, current.keyId);
+  await assertEventuallyNoRotationLocks(root);
+});
+
+test("rotation recovers a lock owned by a dead process", async t => {
+  const root = await createTestTempDir("privacyai-identity-dead-rotation-lock-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  const token = "00000000-0000-4000-8000-000000000001";
+  const lockPath = rotationParticipantPath(root, 999999, "1", token);
+  await writeFile(lockPath, `${JSON.stringify({
+    version: 1,
+    pid: 999999,
+    processStart: "1",
+    createdAt: Date.now(),
+    token,
+    choosing: false,
+    ticket: 1
+  })}\n`, { mode: 0o600 });
+
+  const rotated = await rotateInstallationPrivacyIdentityKey({ identityBaseDir: root });
+
+  assert.match(rotated.keyId, /^kid1:[a-f0-9]{32}$/);
+  await assertEventuallyMissing(lockPath);
+});
+
+test("rotation recovers a recycled-PID lock on Linux", {
+  skip: process.platform !== "linux"
+}, async t => {
+  const root = await createTestTempDir("privacyai-identity-recycled-rotation-lock-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  const token = "00000000-0000-4000-8000-000000000002";
+  const lockPath = rotationParticipantPath(root, process.pid, "0", token);
+  await writeFile(lockPath, `${JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    processStart: "0",
+    createdAt: Date.now(),
+    token,
+    choosing: false,
+    ticket: 1
+  })}\n`, { mode: 0o600 });
+
+  const rotated = await rotateInstallationPrivacyIdentityKey({ identityBaseDir: root });
+
+  assert.match(rotated.keyId, /^kid1:[a-f0-9]{32}$/);
+  await assertEventuallyMissing(lockPath);
+});
+
+test("rotation lock contention has a bounded deadlock timeout", async t => {
+  const root = await createTestTempDir("privacyai-identity-live-rotation-lock-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  const processStart = await readProcessStartIdentity(process.pid);
+  const token = "00000000-0000-4000-8000-000000000003";
+  const lockPath = rotationParticipantPath(root, process.pid, processStart, token);
+  await writeFile(lockPath, `${JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    processStart,
+    createdAt: Date.now(),
+    token,
+    choosing: false,
+    ticket: 1
+  })}\n`, { mode: 0o600 });
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    rotateInstallationPrivacyIdentityKey({
+      identityBaseDir: root,
+      identityRotationLockTimeoutMs: 100
+    }),
+    error => error?.code === "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE"
+  );
+  assert.equal(Date.now() - startedAt < 2_000, true);
+  await access(lockPath);
+  await rm(lockPath);
+
+  const rotated = await rotateInstallationPrivacyIdentityKey({ identityBaseDir: root });
+  assert.match(rotated.keyId, /^kid1:[a-f0-9]{32}$/);
+});
+
+test("cancelling a contended rotation cleans only its participant", async t => {
+  const root = await createTestTempDir("privacyai-identity-cancelled-rotation-lock-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const initial = await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  const processStart = await readProcessStartIdentity(process.pid);
+  const token = "00000000-0000-4000-8000-000000000004";
+  const lockPath = rotationParticipantPath(root, process.pid, processStart, token);
+  await writeFile(lockPath, `${JSON.stringify({
+    version: 1,
+    pid: process.pid,
+    processStart,
+    createdAt: Date.now(),
+    token,
+    choosing: false,
+    ticket: 1
+  })}\n`, { mode: 0o600 });
+
+  const controller = new AbortController();
+  const pending = rotateInstallationPrivacyIdentityKey({
+    identityBaseDir: root,
+    signal: controller.signal
+  });
+  await waitForRotationLockCount(root, 2);
+  controller.abort();
+
+  await assert.rejects(
+    pending,
+    error =>
+      error?.code === "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE" &&
+      error?.cause?.code === "ABORT_ERR" &&
+      !error.message.includes(token)
+  );
+  await waitForRotationLockCount(root, 1);
+  assert.deepEqual(await rotationLockNames(root), [basename(lockPath)]);
+  const current = await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  assert.equal(current.keyId, initial.keyId);
+
+  await rm(lockPath);
+  const rotated = await rotateInstallationPrivacyIdentityKey({ identityBaseDir: root });
+  assert.match(rotated.keyId, /^kid1:[a-f0-9]{32}$/);
+});
+
+test("persistent identity storage fails closed on Windows before filesystem writes", async t => {
+  const root = await createTestTempDir("privacyai-identity-win32-fail-closed-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const result = await windowsIdentityStorageInChild(root);
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.deepEqual(JSON.parse(result.stdout), {
+    codes: [
+      "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE",
+      "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE",
+      "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE"
+    ],
+    entries: []
+  });
 });
 
 test("provider identifiers fail closed without infrastructure identity", () => {
@@ -264,6 +481,7 @@ test("corrupt key material fails closed without exposing bytes", async t => {
     rotateInstallationPrivacyIdentityKey({ identityBaseDir: root }),
     rejectsPrivately
   );
+  await assertEventuallyNoRotationLocks(root);
 });
 
 test("session vault persists identity sidecars while legacy maps remain restorable", async t => {
@@ -310,19 +528,56 @@ test("provider identifiers and prompt allowances use separated keyed domains", a
 
 function rotateIdentityInChild(identityBaseDir) {
   const script = `
-    const { rotateInstallationPrivacyIdentityKey } = await import(${JSON.stringify(identityModuleUrl)});
+    const { readFileSync } = await import("node:fs");
+    const {
+      defaultPrivacyIdentityKeyPath,
+      rotateInstallationPrivacyIdentityKey
+    } = await import(${JSON.stringify(identityModuleUrl)});
     try {
-      const result = await rotateInstallationPrivacyIdentityKey({
-        identityBaseDir: process.env.PRIVACYAI_TEST_IDENTITY_DIR
-      });
+      const options = { identityBaseDir: process.env.PRIVACYAI_TEST_IDENTITY_DIR };
+      const result = await rotateInstallationPrivacyIdentityKey(options);
+      const installed = JSON.parse(readFileSync(defaultPrivacyIdentityKeyPath(options), "utf8"));
       process.stdout.write(JSON.stringify({
+        previousKeyId: result.previousKeyId,
         keyId: result.keyId,
-        identityKeyId: result.identityRoot.keyId
+        identityKeyId: result.identityRoot.keyId,
+        installedKeyId: installed.keyId
       }));
     } catch (error) {
       process.stderr.write(String(error?.code || "UNKNOWN") + " " + String(error?.message || error));
       process.exitCode = 1;
     }
+  `;
+  return runIdentityChild(identityBaseDir, script);
+}
+
+function windowsIdentityStorageInChild(identityBaseDir) {
+  const script = `
+    const { readdirSync } = await import("node:fs");
+    Object.defineProperty(process, "platform", { value: "win32" });
+    const {
+      loadInstallationPrivacyIdentity,
+      openInstallationPrivacyIdentity,
+      rotateInstallationPrivacyIdentityKey
+    } = await import(${JSON.stringify(identityModuleUrl)} + "?win32-fail-closed");
+    const options = { identityBaseDir: process.env.PRIVACYAI_TEST_IDENTITY_DIR + "/identity" };
+    const codes = [];
+    for (const operation of [
+      loadInstallationPrivacyIdentity,
+      openInstallationPrivacyIdentity,
+      rotateInstallationPrivacyIdentityKey
+    ]) {
+      try {
+        await operation(options);
+        codes.push("SUCCESS");
+      } catch (error) {
+        codes.push(String(error?.code || "UNKNOWN"));
+      }
+    }
+    process.stdout.write(JSON.stringify({
+      codes,
+      entries: readdirSync(process.env.PRIVACYAI_TEST_IDENTITY_DIR)
+    }));
   `;
   return runIdentityChild(identityBaseDir, script);
 }
@@ -341,6 +596,51 @@ function openIdentityInChild(identityBaseDir) {
     }
   `;
   return runIdentityChild(identityBaseDir, script);
+}
+
+function rotationParticipantPath(root, pid, processStart, token) {
+  return join(
+    root,
+    `key-v1.json.rotation.${pid}.${processStart || "unknown"}.${token}.lock`
+  );
+}
+
+async function rotationLockNames(root) {
+  return (await readdir(root))
+    .filter(name => name.startsWith("key-v1.json.rotation.") && name.endsWith(".lock"))
+    .sort();
+}
+
+async function waitForRotationLockCount(root, expected, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const locks = await rotationLockNames(root);
+    if (locks.length === expected) return locks;
+    if (Date.now() >= deadline) {
+      assert.fail(`Expected ${expected} identity rotation locks, found: ${locks.join(", ")}`);
+    }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 10));
+  }
+}
+
+async function assertEventuallyNoRotationLocks(root, timeoutMs = 2_000) {
+  await waitForRotationLockCount(root, 0, timeoutMs);
+}
+
+async function assertEventuallyMissing(path, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    try {
+      await access(path);
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+    if (Date.now() >= deadline) {
+      assert.fail(`Expected ${path} to be removed before timeout.`);
+    }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 10));
+  }
 }
 
 function runIdentityChild(identityBaseDir, script) {

@@ -44,3 +44,24 @@ jobs:
         run: pnpm -r test
       - run: node --check packages/agent-bridge/src/privacy-identity.js
       - run: git diff --check
+
+  windows-storage-fails-closed:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify persistent identity storage fails before writes
+        run: >-
+          node --test
+          --test-name-pattern="persistent identity storage fails closed on Windows before filesystem writes"
+          packages/agent-bridge/test/privacy-identity.test.js

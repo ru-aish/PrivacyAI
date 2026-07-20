@@ -169,6 +169,13 @@ Session maps remain stored under `~/.local/share/privacyai/agent-sessions/` in
 hashed `0600` files. Updates use ownership-token locks, PID-start identity on
 Linux, bounded contention retries, and atomic rename.
 
+Persistent installation-identity storage is supported on Linux and macOS through
+descriptor-relative filesystem access. On Windows, persistent identity load,
+creation, and rotation fail before directory creation or key generation because
+Node does not expose the handle-relative anti-reparse rename/write operations
+required by this boundary. Embedded callers may still provide an in-memory
+`identityKey` or `identityRoot`; the native agent product remains fail-closed.
+
 The gateway also keeps a content-addressed verification ledger at
 `~/.local/share/privacyai/context-gateway.sqlite3` by default. The database is
 local-only, created with `0600` permissions, and contains thread metadata, the
