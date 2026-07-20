@@ -1,0 +1,59 @@
+name: Contextual benchmark v2
+
+on:
+  push:
+    branches:
+      - experiment/contextual-benchmark-v2
+    paths:
+      - "tools/contextual_model/benchmark_v2/**"
+      - "tools/contextual_model/tests/test_benchmark_v2.py"
+      - ".github/workflows/contextual-benchmark-v2.yml"
+  pull_request:
+    paths:
+      - "tools/contextual_model/benchmark_v2/**"
+      - "tools/contextual_model/tests/test_benchmark_v2.py"
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile
+        run: python -m compileall -q tools/contextual_model/benchmark_v2
+      - name: Test
+        id: tests
+        env:
+          PYTHONPATH: .
+        shell: bash
+        run: |
+          set +e
+          python -m unittest tools.contextual_model.tests.test_benchmark_v2 -v > benchmark-v2-test.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contextual-benchmark-v2-test-log
+          path: benchmark-v2-test.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Fail on unit test failure
+        if: steps.tests.outputs.status != '0'
+        run: exit 1
+      - name: Exercise 10k fixture and oracle scoring
+        if: steps.tests.outputs.status == '0'
+        env:
+          PYTHONPATH: .
+        run: |
+          umask 077
+          python -m tools.contextual_model.benchmark_v2.cli generate --count 10000 --fixture /tmp/contextual-v2/fixture.jsonl --manifest /tmp/contextual-v2/manifest.json
+          python -m tools.contextual_model.benchmark_v2.cli score --fixture /tmp/contextual-v2/fixture.jsonl --adapter oracle --report /tmp/contextual-v2/oracle.json
