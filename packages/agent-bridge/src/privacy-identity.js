@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, rename, rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, parse, resolve, sep } from "node:path";
 
@@ -9,9 +9,15 @@ import {
   generatePrivacyIdentityKey,
   privacyIdentityKeyId
 } from "@privacy-ai/sdk/identity";
+import {
+  isSameLiveProcess,
+  readProcessStartIdentity
+} from "./process-identity.js";
 
 const INSTALLATION_KEY_VERSION = 1;
 const INSTALLATION_KEY_BYTES = 32;
+const IDENTITY_READ_RETRY_LIMIT = 8;
+const IDENTITY_TEMP_MAX_UNKNOWN_OWNER_AGE_MS = 24 * 60 * 60 * 1000;
 
 export function defaultPrivacyIdentityKeyPath(options = {}) {
   return privacyIdentityKeyLocation(options).path;
@@ -43,7 +49,7 @@ export async function openInstallationPrivacyIdentity(options = {}) {
     }
 
     const record = installationKeyRecord(generatePrivacyIdentityKey());
-    const tempPath = identityTempPath(storage);
+    const tempPath = await identityTempPath(storage);
     try {
       await writePrivateIdentityRecord(tempPath, record);
       await assertIdentityStorageStable(storage);
@@ -91,18 +97,19 @@ export async function rotateInstallationPrivacyIdentityKey(options = {}) {
       if (error?.code !== "ENOENT") throw error;
     }
 
-    const record = installationKeyRecord(generatePrivacyIdentityKey());
-    const tempPath = identityTempPath(storage);
+    const key = generatePrivacyIdentityKey();
+    const record = installationKeyRecord(key);
+    const tempPath = await identityTempPath(storage);
     try {
       await writePrivateIdentityRecord(tempPath, record);
       await assertIdentityStorageStable(storage);
       await rename(tempPath, storage.keyPath);
-      const identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
       await cleanupIdentityTempFiles(storage);
+      const identityRoot = createPrivacyIdentityService({ key });
       return {
         path: location.path,
         previousKeyId,
-        keyId: record.keyId,
+        keyId: identityRoot.keyId,
         identityRoot
       };
     } catch (error) {
@@ -269,6 +276,10 @@ async function openIdentityStorage(location, options) {
     validateIdentityDirectory(openedMetadata, { final: true });
     if (!sameFile(pathMetadata, openedMetadata)) throw corruptIdentityStoreError();
 
+    await validateDirectoryComponents(directoryPath);
+    const currentMetadata = await lstat(directoryPath);
+    if (!sameFile(currentMetadata, openedMetadata)) throw corruptIdentityStoreError();
+
     if (location.privateDirectory && process.platform !== "win32") {
       await directoryHandle.chmod(0o700);
       openedMetadata = await directoryHandle.stat();
@@ -281,21 +292,11 @@ async function openIdentityStorage(location, options) {
       throw corruptIdentityStoreError();
     }
 
-    await validateDirectoryComponents(directoryPath);
-    const currentMetadata = await lstat(directoryPath);
-    if (!sameFile(currentMetadata, openedMetadata)) throw corruptIdentityStoreError();
-
-    let operationDirectoryPath = directoryPath;
-    if (process.platform === "linux") {
-      const descriptorPath = `/proc/self/fd/${directoryHandle.fd}`;
-      try {
-        await lstat(descriptorPath);
-        operationDirectoryPath = descriptorPath;
-      } catch {
-        // Minimal containers may not mount procfs. Component and inode checks
-        // remain active for the path-based fallback.
-      }
-    }
+    const operationDirectoryPath = await identityDirectoryDescriptorPath(
+      directoryHandle,
+      openedMetadata,
+      directoryPath
+    );
     return {
       directoryHandle,
       directoryPath,
@@ -312,6 +313,21 @@ async function openIdentityStorage(location, options) {
     }
     throw error;
   }
+}
+
+async function identityDirectoryDescriptorPath(directoryHandle, directoryMetadata, directoryPath) {
+  if (process.platform === "win32") return directoryPath;
+  const candidates = process.platform === "linux"
+    ? [`/proc/self/fd/${directoryHandle.fd}`, `/dev/fd/${directoryHandle.fd}`]
+    : [`/dev/fd/${directoryHandle.fd}`, `/proc/self/fd/${directoryHandle.fd}`];
+  for (const candidate of candidates) {
+    try {
+      if (sameFile(await stat(candidate), directoryMetadata)) return candidate;
+    } catch {
+      // Try the next platform descriptor namespace.
+    }
+  }
+  throw identityStoreError(new Error("Identity storage requires descriptor-relative filesystem access."));
 }
 
 async function ensureDirectoryComponents(path, options) {
@@ -389,10 +405,11 @@ async function assertIdentityStorageStable(storage) {
   }
 }
 
-function identityTempPath(storage) {
+async function identityTempPath(storage) {
+  const processStart = await readProcessStartIdentity(process.pid);
   return join(
     storage.operationDirectoryPath,
-    `${storage.keyName}.${process.pid}.${randomUUID()}.tmp`
+    `${storage.keyName}.${process.pid}.${processStart || "unknown"}.${randomUUID()}.tmp`
   );
 }
 
@@ -426,11 +443,36 @@ async function cleanupIdentityTempFiles(storage) {
     ) {
       return;
     }
-    await rm(join(storage.operationDirectoryPath, entry.name), { force: true }).catch(() => {});
+    const path = join(storage.operationDirectoryPath, entry.name);
+    const owner = identityTempOwner(entry.name, prefix);
+    if (owner == null) return;
+    if (await isSameLiveProcess(owner)) {
+      if (owner.processStart != null) return;
+      try {
+        const metadata = await lstat(path);
+        if (Date.now() - metadata.mtimeMs < IDENTITY_TEMP_MAX_UNKNOWN_OWNER_AGE_MS) return;
+      } catch {
+        return;
+      }
+    }
+    await rm(path, { force: true }).catch(() => {});
   }));
 }
 
 async function readIdentityRecord(path) {
+  let changedError;
+  for (let attempt = 0; attempt < IDENTITY_READ_RETRY_LIMIT; attempt += 1) {
+    try {
+      return await readIdentityRecordOnce(path);
+    } catch (error) {
+      if (error?.code !== "PRIVACYAI_IDENTITY_KEY_CHANGED") throw error;
+      changedError = error;
+    }
+  }
+  throw identityStoreError(changedError);
+}
+
+async function readIdentityRecordOnce(path) {
   let handle;
   let value;
   try {
@@ -441,12 +483,17 @@ async function readIdentityRecord(path) {
     const openedMetadata = await handle.stat();
     validateIdentityKeyFile(openedMetadata);
     if (!sameFile(pathMetadata, openedMetadata)) {
-      throw corruptIdentityStoreError();
+      throw changedIdentityStoreError();
     }
     value = JSON.parse(await handle.readFile({ encoding: "utf8" }));
   } catch (error) {
     if (error?.code === "ENOENT") throw error;
-    if (error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT") throw error;
+    if (
+      error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT" ||
+      error?.code === "PRIVACYAI_IDENTITY_KEY_CHANGED"
+    ) {
+      throw error;
+    }
     throw corruptIdentityStoreError(error);
   } finally {
     await handle?.close().catch(() => {});
@@ -455,6 +502,15 @@ async function readIdentityRecord(path) {
     throw corruptIdentityStoreError();
   }
   return value;
+}
+
+function identityTempOwner(name, prefix) {
+  const parts = name.slice(prefix.length, -".tmp".length).split(".");
+  if (!/^\d+$/.test(parts[0] || "")) return null;
+  const pid = Number(parts[0]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  const processStart = /^\d+$/.test(parts[1] || "") ? parts[1] : null;
+  return { pid, processStart };
 }
 
 function validateIdentityKeyFile(metadata) {
@@ -521,6 +577,12 @@ function corruptIdentityStoreError(cause) {
     ? new Error("PrivacyAI identity key material is malformed.")
     : new Error("PrivacyAI identity key material is malformed.", { cause });
   error.code = "PRIVACYAI_IDENTITY_KEY_CORRUPT";
+  return error;
+}
+
+function changedIdentityStoreError() {
+  const error = new Error("PrivacyAI identity key material changed during inspection.");
+  error.code = "PRIVACYAI_IDENTITY_KEY_CHANGED";
   return error;
 }
 

@@ -16,7 +16,6 @@ jobs:
     timeout-minutes: 30
     env:
       PRIVACYAI_CONTEXT_DB: ${{ runner.temp }}/privacyai/context-v4.db
-      PRIVACYAI_IDENTITY_KEY_FILE: ${{ runner.temp }}/privacyai/identity/key-v1.json
     steps:
       - uses: actions/checkout@v4
         with:

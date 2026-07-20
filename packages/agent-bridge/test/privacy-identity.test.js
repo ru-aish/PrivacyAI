@@ -55,7 +55,7 @@ test("concurrent first install publishes one complete key to every process", asy
   assert.deepEqual(results.map(result => result.code), Array(24).fill(0));
   assert.equal(results.every(result => result.stderr === ""), true);
   assert.equal(new Set(results.map(result => result.stdout)).size, 1);
-  assert.match(results[0].stdout, /^kid1:[a-f0-9]{64}$/);
+  assert.match(results[0].stdout, /^kid1:[a-f0-9]{32}$/);
 });
 
 test("interrupted first-install temporary files are removed after recovery", async t => {
@@ -63,10 +63,17 @@ test("interrupted first-install temporary files are removed after recovery", asy
   t.after(() => rm(root, { recursive: true, force: true }));
   const staleTempPath = join(root, "key-v1.json.999999.interrupted.tmp");
   await writeFile(staleTempPath, '{"version":1', { mode: 0o600 });
+  if (process.platform === "linux") {
+    await writeFile(
+      join(root, `key-v1.json.${process.pid}.0.recycled.tmp`),
+      '{"version":1',
+      { mode: 0o600 }
+    );
+  }
 
   const identityRoot = await openInstallationPrivacyIdentity({ identityBaseDir: root });
 
-  assert.match(identityRoot.keyId, /^kid1:[a-f0-9]{64}$/);
+  assert.match(identityRoot.keyId, /^kid1:[a-f0-9]{32}$/);
   await assert.rejects(access(staleTempPath), error => error?.code === "ENOENT");
   assert.deepEqual(
     (await readdir(root)).filter(name => name.startsWith("key-v1.json.") && name.endsWith(".tmp")),
@@ -84,7 +91,7 @@ test("safe explicit key paths do not chmod their containing directory", {
 
   const identityRoot = await openInstallationPrivacyIdentity({ identityKeyPath });
 
-  assert.match(identityRoot.keyId, /^kid1:[a-f0-9]{64}$/);
+  assert.match(identityRoot.keyId, /^kid1:[a-f0-9]{32}$/);
   assert.equal((await stat(root)).mode & 0o777, 0o755);
   assert.equal((await stat(identityKeyPath)).mode & 0o777, 0o600);
 });
@@ -133,6 +140,26 @@ test("key rotation creates a new identity epoch while preserving vault restorati
   await afterVault.save(sessionId, loaded.sessionMap);
   await assert.rejects(access(oldPath), error => error?.code === "ENOENT");
   await access(afterVault.pathForSession(sessionId));
+});
+
+test("concurrent rotations publish complete epochs without cross-process temp deletion", async t => {
+  const root = await createTestTempDir("privacyai-identity-concurrent-rotation-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await openInstallationPrivacyIdentity({ identityBaseDir: root });
+
+  const results = await Promise.all(
+    Array.from({ length: 48 }, () => rotateIdentityInChild(root))
+  );
+
+  assert.equal(results.every(result => result.code === 0 && result.stderr === ""), true);
+  const rotations = results.map(result => JSON.parse(result.stdout));
+  assert.equal(rotations.every(result => result.keyId === result.identityKeyId), true);
+  const current = await openInstallationPrivacyIdentity({ identityBaseDir: root });
+  assert.equal(rotations.some(result => result.keyId === current.keyId), true);
+  assert.deepEqual(
+    (await readdir(root)).filter(name => name.startsWith("key-v1.json.") && name.endsWith(".tmp")),
+    []
+  );
 });
 
 test("provider identifiers fail closed without infrastructure identity", () => {
@@ -280,6 +307,25 @@ test("provider identifiers and prompt allowances use separated keyed domains", a
   assert.equal(path.includes("session-a"), false);
 });
 
+function rotateIdentityInChild(identityBaseDir) {
+  const script = `
+    const { rotateInstallationPrivacyIdentityKey } = await import(${JSON.stringify(identityModuleUrl)});
+    try {
+      const result = await rotateInstallationPrivacyIdentityKey({
+        identityBaseDir: process.env.PRIVACYAI_TEST_IDENTITY_DIR
+      });
+      process.stdout.write(JSON.stringify({
+        keyId: result.keyId,
+        identityKeyId: result.identityRoot.keyId
+      }));
+    } catch (error) {
+      process.stderr.write(String(error?.code || "UNKNOWN") + " " + String(error?.message || error));
+      process.exitCode = 1;
+    }
+  `;
+  return runIdentityChild(identityBaseDir, script);
+}
+
 function openIdentityInChild(identityBaseDir) {
   const script = `
     const { openInstallationPrivacyIdentity } = await import(${JSON.stringify(identityModuleUrl)});
@@ -293,6 +339,10 @@ function openIdentityInChild(identityBaseDir) {
       process.exitCode = 1;
     }
   `;
+  return runIdentityChild(identityBaseDir, script);
+}
+
+function runIdentityChild(identityBaseDir, script) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
       env: {
