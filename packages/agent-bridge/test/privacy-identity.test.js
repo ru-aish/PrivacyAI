@@ -27,6 +27,7 @@ import { allowancePath } from "../src/prompt-flow.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
 const identityModuleUrl = new URL("../src/privacy-identity.js", import.meta.url).href;
+const IDENTITY_CHILD_TIMEOUT_MS = 10_000;
 
 test("installation identity persists with private permissions", async t => {
   const root = await createTestTempDir("privacyai-identity-key-");
@@ -353,11 +354,24 @@ function runIdentityChild(identityBaseDir, script) {
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, IDENTITY_CHILD_TIMEOUT_MS);
+    timer.unref?.();
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", chunk => { stdout += chunk; });
     child.stderr.on("data", chunk => { stderr += chunk; });
-    child.once("error", reject);
-    child.once("close", code => resolve({ code, stdout, stderr }));
+    child.once("error", error => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", code => {
+      clearTimeout(timer);
+      if (timedOut) stderr += "PRIVACYAI_TEST_CHILD_TIMEOUT";
+      resolve({ code, stdout, stderr });
+    });
   });
 }
