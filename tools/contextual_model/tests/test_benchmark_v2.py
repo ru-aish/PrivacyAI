@@ -45,15 +45,27 @@ class BenchmarkV2Tests(unittest.TestCase):
             self.assertNotIn(cases[0].text, rendered)
 
     def test_leakage_detects_groups_templates_and_normalized_duplicates(self) -> None:
-        cases = generate_cases(6)
-        with self.assertRaises(BenchmarkError):
-            leakage_check(cases[:2], cases[2:4])  # same pair template family IDs recur across partitions
-        one = cases[0]
+        one = generate_cases(1)[0]
+        distinct_text = "A separate safe fixture that is intentionally assigned to a conflicting partition."
+        same_group = Case(
+            case_id="same-group", group_id=one.group_id, template_id="different-template",
+            family="partition_probe", text=distinct_text, spans=(), route="PASS", safe=True,
+        )
+        with self.assertRaisesRegex(BenchmarkError, "group leakage"):
+            leakage_check([one], [same_group])
+
+        same_template = Case(
+            case_id="same-template", group_id="different-group", template_id=one.template_id,
+            family="partition_probe", text=distinct_text + " template", spans=(), route="PASS", safe=True,
+        )
+        with self.assertRaisesRegex(BenchmarkError, "template leakage"):
+            leakage_check([one], [same_template])
+
         duplicate = Case(
             case_id="duplicate", group_id="new-group", template_id="new-template",
             family=one.family, text="  " + one.text.upper() + "  ", spans=(), route="PASS", safe=True,
         )
-        with self.assertRaises(BenchmarkError):
+        with self.assertRaisesRegex(BenchmarkError, "duplicate"):
             leakage_check([one, duplicate])
 
     def test_oracle_metrics_pass_and_bad_predictor_fails(self) -> None:
