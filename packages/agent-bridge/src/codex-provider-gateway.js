@@ -459,7 +459,7 @@ async function proxyTransformed(
       onRequestSent: () => { upstreamSent = true; }
     });
   } catch (error) {
-    if (upstreamSent) await recordTerminalLineage(context.lineageRecorder, lineageHandle, error);
+    if (upstreamSent) await recordTerminalLineage(context.lineageRecorder, lineageHandle);
     throw error;
   }
   context.phase = "upstream_response";
@@ -469,7 +469,7 @@ async function proxyTransformed(
   const contentType = String(upstreamResponse.headers["content-type"] || "").toLowerCase();
   const statusCode = upstreamResponse.statusCode || 502;
   await recordLineage(context.lineageRecorder, "providerResponse", lineageHandle, {
-    success: statusCode >= 200 && statusCode < 300, signal: context.requestSignal
+    success: statusCode >= 200 && statusCode < 300
   });
   const headerlessExpectedSse =
     expectsSse && contentType.trim() === "" && statusCode >= 200 && statusCode < 300;
@@ -479,7 +479,7 @@ async function proxyTransformed(
       forceContentType: headerlessExpectedSse,
       sessionKey
     });
-    await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal: context.requestSignal });
+    await recordLineage(context.lineageRecorder, "restoration", lineageHandle);
     return;
   }
 
@@ -493,7 +493,7 @@ async function proxyTransformed(
     response.setHeader("content-type", "text/plain; charset=utf-8");
     response.writeHead(statusCode);
     response.end(restoreText(raw.toString("utf8"), sessionMap));
-    await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal: context.requestSignal });
+    await recordLineage(context.lineageRecorder, "restoration", lineageHandle);
     return;
   }
 
@@ -532,14 +532,14 @@ async function proxyTransformed(
   forwardResponseHeaders(response, upstreamResponse.headers, true);
   response.writeHead(statusCode);
   response.end(restoredBody);
-  await recordLineage(context.lineageRecorder, "restoration", lineageHandle, { signal: context.requestSignal });
+  await recordLineage(context.lineageRecorder, "restoration", lineageHandle);
 }
 
-async function recordTerminalLineage(recorder, handle, providerError) {
+async function recordTerminalLineage(recorder, handle) {
   try {
     await recordLineage(recorder, "providerResponse", handle, { success: false });
-  } catch (lineageError) {
-    try { providerError.lineageError = lineageError; } catch {}
+  } catch {
+    // Preserve the provider transport failure as the primary error.
   }
 }
 
