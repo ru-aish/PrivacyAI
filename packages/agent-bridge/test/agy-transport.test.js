@@ -9,6 +9,7 @@ import { PassThrough, Readable } from "node:stream";
 import tls from "node:tls";
 import test from "node:test";
 
+import { createPrivacyIdentityService } from "@privacy-ai/sdk/identity";
 import {
   normalizeAgySessionMap,
   sanitizeAgyRequestBody
@@ -32,6 +33,14 @@ const SESSION_MAP = {
   "[API_KEY_1]": PRIVATE_KEY,
   "[TOOL_1]": "send_private_email"
 };
+const TEST_PRIVACY_IDENTITY = createPrivacyIdentityService({
+  key: Buffer.alloc(32, 0x41),
+  scope: { kind: "session", id: "agy-transport-tests" }
+});
+
+function withTestIdentity(options = {}) {
+  return { identity: TEST_PRIVACY_IDENTITY, ...options };
+}
 
 async function deterministicSanitizer(text) {
   let sanitizedPrompt = text;
@@ -46,7 +55,7 @@ async function deterministicSanitizer(text) {
 
 test("AGY request transformation sanitizes per-item artifacts and preserves the envelope", async () => {
   const body = sampleRequest();
-  const result = await sanitizeAgyRequestBody(body, { sanitizer: deterministicSanitizer });
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer }));
 
   assert.equal(result.sessionKey, "agy:session-123");
   assert.equal(result.body.project, body.project);
@@ -100,13 +109,13 @@ test("AGY tool schemas sanitize only prose annotations and preserve future struc
 
   const sanitizerInputs = [];
   const traces = [];
-  const result = await sanitizeAgyRequestBody(body, {
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({
     sanitizer: async text => {
       sanitizerInputs.push(text);
       return deterministicSanitizer(text);
     },
     onSchemaTrace: trace => traces.push(trace)
-  });
+  }));
 
   const schema = result.body.request.tools[0].functionDeclarations[0].parameters;
   assert.equal(schema.description, "Parameters for [EMAIL_1]");
@@ -147,7 +156,7 @@ test("AGY tool schemas sanitize only prose annotations and preserve future struc
     properties: { [PRIVATE_EMAIL]: { type: "string" } }
   };
   await assert.rejects(
-    sanitizeAgyRequestBody(protectedIdentifier, { sanitizer: deterministicSanitizer }),
+    sanitizeAgyRequestBody(protectedIdentifier, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_AGY_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE" &&
       !error.message.includes(PRIVATE_EMAIL)
   );
@@ -172,7 +181,7 @@ test("AGY session-map migration replaces stale bracket tool placeholders", () =>
   const migrated = normalizeAgySessionMap(body, {
     "[TOOL_9]": "send_private_email",
     "[EMAIL_1]": PRIVATE_EMAIL
-  });
+  }, TEST_PRIVACY_IDENTITY);
   const toolAlias = Object.entries(migrated)
     .find(([, original]) => original === "send_private_email")?.[0];
 
@@ -222,7 +231,7 @@ test("AGY request transformation leaves protocol identities outside the sanitize
     return deterministicSanitizer(text);
   };
 
-  const result = await sanitizeAgyRequestBody(body, { sanitizer });
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer }));
   const inspected = observed.join("\n");
 
   assert.doesNotMatch(inspected, /session-123|request-123|call-1|opaque-signature/);
@@ -241,9 +250,10 @@ test("AGY request transformation aliases native MCP names before provider valida
   body.request.contents[1].parts[0].functionResponse.name = nativeName;
   body.request.toolConfig.functionCallingConfig.allowedFunctionNames = [nativeName, "public_tool"];
 
-  const result = await sanitizeAgyRequestBody(body, {
-    sanitizer: deterministicSanitizer
-  });
+  const result = await sanitizeAgyRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
   const declarationName = result.body.request.tools[0].functionDeclarations[0].name;
   const responseName = result.body.request.contents[1].parts[0].functionResponse.name;
 
@@ -262,7 +272,7 @@ test("AGY request transformation rejects malformed native function names", async
   body.request.tools[0].functionDeclarations[0].name = "stealth browser/browser_status";
 
   await assert.rejects(
-    sanitizeAgyRequestBody(body, { sanitizer: deterministicSanitizer }),
+    sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_AGY_INVALID_FUNCTION_NAME"
   );
 });
@@ -274,7 +284,7 @@ test("AGY request transformation rejects non-boolean thought metadata", async t 
       body.request.contents[1].parts[0].thought = invalidThought;
 
       await assert.rejects(
-        sanitizeAgyRequestBody(body, { sanitizer: deterministicSanitizer }),
+        sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
         error => error?.code === "PRIVACYAI_AGY_INVALID_PART"
       );
     });
@@ -289,17 +299,17 @@ test("AGY request cache reuses unchanged history and tools after session-map gro
     return deterministicSanitizer(text);
   };
 
-  const first = await sanitizeAgyRequestBody(sampleRequest(), { sanitizer, cache });
+  const first = await sanitizeAgyRequestBody(sampleRequest(), withTestIdentity({ sanitizer, cache }));
   for (const [key, record] of first.cacheWrites) cache.set(key, record);
   const firstCalls = calls;
   assert.equal(firstCalls, 1, "uncached artifacts should share one bounded classifier batch");
   assert.equal(first.metrics.modelCallCount, 1);
 
-  const second = await sanitizeAgyRequestBody(sampleRequest(), {
+  const second = await sanitizeAgyRequestBody(sampleRequest(), withTestIdentity({
     sanitizer,
     cache,
     sessionMap: first.sessionMapAdditions
-  });
+  }));
 
   assert.equal(calls, firstCalls);
   assert.equal(second.cacheWrites.length, 0);
@@ -389,10 +399,12 @@ test("AGY controller preserves legacy injected verification stores without updat
 
   const result = await controller.transform(sampleRequest());
   assert.equal(JSON.stringify(result.body).includes(PRIVATE_EMAIL), false);
-  assert.equal(
-    verificationStore.loadThread("agy:session-123").sessionMap["[EMAIL_1]"],
-    PRIVATE_EMAIL
-  );
+  const thread = verificationStore.loadThread("agy:session-123");
+  assert.equal(thread.sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.match(thread.identityKeyId, /^kid1:[a-f0-9]{32}$/);
+  assert.equal(thread.identityScope.kind, "session");
+  assert.match(thread.identityMap["[EMAIL_1]"].id, /^phi1:[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(thread.identityMap).includes(PRIVATE_EMAIL), false);
 });
 
 test("AGY session controllers atomically merge concurrent mappings", async t => {
@@ -609,7 +621,7 @@ test("AGY images in prompts and tool results share mappings with text", async ()
 
   const imageCalls = [];
   const artifacts = [];
-  const result = await sanitizeAgyRequestBody(body, {
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({
     sanitizer: deterministicSanitizer,
     imageSanitizer: {
       async sanitize(inlineData, context) {
@@ -632,7 +644,7 @@ test("AGY images in prompts and tool results share mappings with text", async ()
     onArtifactComplete(details) {
       artifacts.push(details);
     }
-  });
+  }));
 
   assert.equal(imageCalls.length, 2);
   assert.deepEqual(imageCalls[0].sessionMap, {});
@@ -660,7 +672,7 @@ test("AGY permits a text placeholder and provider-safe tool alias for one privat
     inlineData: { mimeType: "image/png", data: "AAAA" }
   });
 
-  const result = await sanitizeAgyRequestBody(body, {
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({
     sanitizer: deterministicSanitizer,
     imageSanitizer: {
       async sanitize() {
@@ -671,7 +683,7 @@ test("AGY permits a text placeholder and provider-safe tool alias for one privat
         };
       }
     }
-  });
+  }));
 
   const providerAlias = result.body.request.tools[0].functionDeclarations[0].name;
   assert.match(providerAlias, /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/);
@@ -687,7 +699,7 @@ test("AGY image validation and limits fail closed before provider forwarding", a
     inlineData: { mimeType: "image/png", data: "AAAA" }
   });
   await assert.rejects(
-    sanitizeAgyRequestBody(required, { sanitizer: deterministicSanitizer }),
+    sanitizeAgyRequestBody(required, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_AGY_IMAGE_SANITIZER_REQUIRED"
   );
 
@@ -766,7 +778,7 @@ test("AGY image and text sanitizer failures preserve fail-closed error boundarie
   const future = sampleRequest();
   future.request.futureContext = { value: PRIVATE_EMAIL };
   await assert.rejects(
-    sanitizeAgyRequestBody(future, { sanitizer: deterministicSanitizer }),
+    sanitizeAgyRequestBody(future, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_AGY_UNSUPPORTED_FIELD"
   );
 

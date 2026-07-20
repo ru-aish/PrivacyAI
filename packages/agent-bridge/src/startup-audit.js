@@ -59,8 +59,8 @@ const CLAUDE_CONTEXT_DIRECTORIES = Object.freeze([
  */
 export async function auditCodexStaticStartupContext(options = {}) {
   if (!options.cwd) throw new TypeError("Codex static startup audit requires cwd.");
-  const staticSanitizer = options.staticSanitizer || (async text => {
-    const result = await localSanitize(text);
+  const staticSanitizer = options.staticSanitizer || (async (text, sanitizeOptions = {}) => {
+    const result = await localSanitize(text, sanitizeOptions);
     return {
       sanitizedPrompt: result.sanitizedText,
       sessionMap: result.sessionMap
@@ -76,7 +76,8 @@ export async function auditCodexStaticStartupContext(options = {}) {
   const staticResult = await sanitizeStartupFiles(manifest, {
     verificationStore: options.verificationStore,
     policyFingerprint: String(options.policyFingerprint || "startup-context-v1"),
-    sanitizer: staticSanitizer
+    sanitizer: staticSanitizer,
+    identityRoot: options.identityRoot
   });
   const sessionMapAdditions = staticResult.sessionMapAdditions;
   if (options.blockHighRisk !== false) {
@@ -143,6 +144,8 @@ export async function auditCodexStartupContext(options = {}) {
     maxContextChars: options.maxContextChars,
     verificationStore: options.verificationStore,
     policyFingerprint: options.policyFingerprint,
+    identityRoot: options.identityRoot,
+    identity: options.identity,
     cacheCanonicalReplacements: {
       [canaryPlaceholder]: "[PRIVACYAI_STARTUP_CANARY]"
     }
@@ -159,7 +162,8 @@ export async function auditCodexStartupContext(options = {}) {
       // The canary proves the renderer kept private originals local, but it is
       // deliberately excluded from persistent request-cache records. Only
       // genuine discoveries from the rendered startup context are retained.
-      sessionMap: inspection.sessionMapAdditions
+      sessionMap: inspection.sessionMapAdditions,
+      identityRoot: options.identityRoot
     });
   }
 
@@ -178,6 +182,7 @@ export async function auditCodexStartupContext(options = {}) {
       artifactType: "rendered_startup",
       policyFingerprint: String(options.policyFingerprint || "startup-context-v1"),
       sessionMapAdditions: inspection.sessionMapAdditions,
+      identityKeyId: options.identityRoot?.keyId || "",
       itemCount: output.itemCount,
       serializedBytes: output.serializedBytes
     });
@@ -207,7 +212,8 @@ export async function auditClaudeStartupContext(options = {}) {
   const inspection = await sanitizeStartupFiles(manifest, {
     sanitizer: options.sanitizer,
     verificationStore: options.verificationStore,
-    policyFingerprint: String(options.policyFingerprint || "startup-context-v1")
+    policyFingerprint: String(options.policyFingerprint || "startup-context-v1"),
+    identityRoot: options.identityRoot
   });
   throwIfHighRiskStartupValues(inspection.sessionMapAdditions, "Claude");
 
@@ -405,11 +411,17 @@ async function inspectSerializedStartupContext(value, options) {
   const serialized = JSON.stringify(value);
   const canonical = canonicalizeCacheText(serialized, options.cacheCanonicalReplacements);
   const contentHash = createHash("sha256").update(canonical).digest("hex");
-  const cacheKey = createHash("sha256")
-    .update(policyFingerprint)
-    .update("\0startup_context\0")
-    .update(contentHash)
-    .digest("hex");
+  const cacheKey = options.identityRoot?.digest
+    ? options.identityRoot.digest("cache:rendered-startup-context", {
+        version: 1,
+        policyFingerprint,
+        contentHash
+      })
+    : createHash("sha256")
+        .update(policyFingerprint)
+        .update("\0startup_context\0")
+        .update(contentHash)
+        .digest("hex");
   const cached = options.verificationStore?.getVerification(cacheKey, policyFingerprint);
   if (cached) {
     return {
@@ -421,6 +433,7 @@ async function inspectSerializedStartupContext(value, options) {
 
   const result = await sanitizeModelVisibleValue(value, {
     sanitizer: options.sanitizer,
+    identity: options.identity,
     sessionMap: options.sessionMap,
     maxContextChars: options.maxContextChars || DEFAULT_STATIC_LIMIT
   });
@@ -429,7 +442,8 @@ async function inspectSerializedStartupContext(value, options) {
     contentHash,
     artifactType: "startup_context",
     policyFingerprint,
-    sessionMapAdditions: result.sessionMapAdditions
+    sessionMapAdditions: result.sessionMapAdditions,
+    identityKeyId: options.identityRoot?.keyId || ""
   });
   return result;
 }
@@ -469,7 +483,8 @@ function primeCodexRenderedVerification(payload, options) {
     client_metadata: { thread_id: "privacyai-startup-preflight" }
   };
   const seed = buildCodexRequestVerificationSeed(body, options.sessionMap, {
-    policyFingerprint
+    policyFingerprint,
+    identityRoot: options.identityRoot
   });
 
   options.verificationStore.saveThread(sessionKey, {

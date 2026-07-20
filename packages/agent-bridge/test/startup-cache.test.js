@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 
+import { createPrivacyIdentityService } from "@privacy-ai/sdk/identity";
+
 import { MemoryContextVerificationStore } from "../src/context-verification-store.js";
 import { auditCodexStartupContext } from "../src/startup-audit.js";
 import { readStableStartupText, renderedStartupFingerprint, resolveStartupFileManifest, sanitizeStartupFiles, startupFileVerificationKey } from "../src/startup-cache.js";
@@ -124,6 +126,46 @@ test("first-time startup sanitization persists opaque private spans", async t =>
     [6, 26, "email"]
   ]);
   assert.equal(JSON.stringify(plan).includes("private@example.test"), false);
+});
+
+test("warm startup plans reproduce canonical identity aliases", async t => {
+  const root = await createTestTempDir("privacyai-startup-identity-plan-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = join(root, "AGENTS.md");
+  const original = "private@example.test";
+  await writeFile(file, "owner=" + original + "\n");
+  const store = new MemoryContextVerificationStore();
+  const identityRoot = createPrivacyIdentityService({ key: Buffer.alloc(32, 0x53) });
+  const manifest = await resolveStartupFileManifest([file], {
+    cwd: root,
+    verificationStore: store
+  });
+  let calls = 0;
+  const sanitizer = async (_text, options) => {
+    calls += 1;
+    const alias = options.identity.canonicalPlaceholder(original, {
+      category: "EMAIL",
+      domain: options.artifactType
+    }).alias;
+    return { sessionMap: { [alias]: original } };
+  };
+
+  const cold = await sanitizeStartupFiles(manifest, {
+    verificationStore: store,
+    policyFingerprint: policy,
+    identityRoot,
+    sanitizer
+  });
+  const warm = await sanitizeStartupFiles(manifest, {
+    verificationStore: store,
+    policyFingerprint: policy,
+    identityRoot,
+    sanitizer
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(warm.sessionMapAdditions, cold.sessionMapAdditions);
+  assert.match(Object.keys(warm.sessionMapAdditions)[0], /^\[PAI1_EMAIL_[A-F0-9]{24}\]$/);
 });
 
 test("metadata change with same bytes hashes then reuses per-file result; manifests detect mutations", async t => {

@@ -24,6 +24,10 @@ import {
   derivePrivacyContextMaxTokens
 } from "./privacy-sanitizer.js";
 import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
+import {
+  openInstallationPrivacyIdentity,
+  requestPrivacyIdentity
+} from "./privacy-identity.js";
 import { runInheritedProcess } from "./process-supervisor.js";
 import { startAgyTransportRuntime } from "./agy-transport-runtime.js";
 
@@ -62,12 +66,14 @@ export async function launchAgy(userArgs = [], options = {}) {
   }
 
   const sanitizer = options.sanitizer || createPrivacySanitizer(loaded.config, options);
+  const identityRoot = await openInstallationPrivacyIdentity(options);
   if (privacyMode.mode === "strict") {
     return launchAgyStrict(privacyMode.args, {
       ...options,
       binary,
       loaded,
-      sanitizer
+      sanitizer,
+      identityRoot
     });
   }
 
@@ -82,6 +88,7 @@ export async function launchAgy(userArgs = [], options = {}) {
   const runtime = await startRuntime({
     ...options,
     sanitizer,
+    identityRoot,
     baseEnv,
     maxContextChars:
       options.maxContextChars ?? derivePrivacyContextMaxChars(loaded.config, options),
@@ -135,7 +142,12 @@ export function parseAgyPrivacyMode(args) {
 
 async function launchAgyStrict(userArgs, options) {
   const parsed = parseAgyArguments(userArgs);
-  const result = await options.sanitizer(parsed.prompt);
+  const sessionToken = options.sessionToken || randomUUID();
+  const identity = requestPrivacyIdentity(options.identityRoot, sessionToken);
+  const result = await options.sanitizer(parsed.prompt, {
+    identity,
+    artifactType: "agy_prompt"
+  });
   if (!result || typeof result.sanitizedPrompt !== "string") {
     throw new TypeError("PrivacyAI sanitizer did not return sanitizedPrompt for AGY.");
   }
@@ -144,7 +156,6 @@ async function launchAgyStrict(userArgs, options) {
   let cleanupHook = null;
   try {
     await chmod(runtimeDir, 0o700);
-    const sessionToken = options.sessionToken || randomUUID();
     const mapPath = join(runtimeDir, "session-map.json");
     await writeFile(
       mapPath,

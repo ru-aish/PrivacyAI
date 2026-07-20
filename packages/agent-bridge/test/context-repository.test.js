@@ -242,7 +242,7 @@ test("atomic updates remain correct after thread pruning", async t => {
   }
 });
 
-test("schema v3 has every table, legacy index, and critical CHECK constraint", async t => {
+test("schema v4 has identity columns, every table, legacy index, and critical CHECK constraint", async t => {
   const { store } = await opened(t);
   const tables = store.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(row => row.name);
   assert.deepEqual(tables, [
@@ -258,7 +258,79 @@ test("schema v3 has every table, legacy index, and critical CHECK constraint", a
   assert.match(sql, /status IN \('pending', 'committed', 'rolled_back'\)/);
   assert.match(sql, /inserted_length >= 0/);
   assert.match(sql, /FOREIGN KEY\(mutation_id, edit_index\)/);
-  assert.equal(store.database.prepare("SELECT value FROM privacyai_meta WHERE key='schema_version'").get().value, "3");
+  assert.equal(store.database.prepare("SELECT value FROM privacyai_meta WHERE key='schema_version'").get().value, "4");
+});
+
+test("schema v3 upgrades identity columns without losing existing maps", async t => {
+  const root = await createTestTempDir("privacyai-context-v3-upgrade-");
+  const path = join(root, "context.sqlite3");
+  const database = new DatabaseSync(path);
+  database.exec(`
+    CREATE TABLE privacyai_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+    CREATE TABLE threads (
+      session_key TEXT PRIMARY KEY,
+      parent_keys_json TEXT NOT NULL,
+      session_map_json TEXT NOT NULL,
+      policy_fingerprint TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE verified_items (
+      cache_key TEXT PRIMARY KEY,
+      content_hash TEXT NOT NULL,
+      artifact_type TEXT NOT NULL,
+      policy_fingerprint TEXT NOT NULL,
+      additions_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER NOT NULL,
+      hit_count INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  database.prepare("INSERT INTO privacyai_meta(key,value) VALUES (?, ?)").run("schema_version", "3");
+  database.prepare(`
+    INSERT INTO threads(session_key,parent_keys_json,session_map_json,policy_fingerprint,updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    "legacy-thread",
+    JSON.stringify(["legacy-parent"]),
+    JSON.stringify({ "[EMAIL_1]": "legacy@example.test" }),
+    "legacy-policy",
+    123
+  );
+  const now = Date.now();
+  database.prepare(`
+    INSERT INTO verified_items(
+      cache_key,content_hash,artifact_type,policy_fingerprint,
+      additions_json,created_at,last_used_at,hit_count
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    "legacy-cache",
+    "legacy-content",
+    "instructions",
+    "legacy-policy",
+    JSON.stringify({ "[EMAIL_1]": "legacy@example.test" }),
+    now,
+    now,
+    0
+  );
+  database.close();
+
+  const store = await openContextVerificationStore({ verificationDbPath: path });
+  t.after(() => store.close());
+  assert.deepEqual(store.loadThread("legacy-thread"), {
+    sessionKey: "legacy-thread",
+    parentSessionKeys: ["legacy-parent"],
+    sessionMap: { "[EMAIL_1]": "legacy@example.test" },
+    policyFingerprint: "legacy-policy",
+    updatedAt: 123
+  });
+  assert.deepEqual(
+    store.getVerification("legacy-cache", "legacy-policy").sessionMapAdditions,
+    { "[EMAIL_1]": "legacy@example.test" }
+  );
+  assert.equal(
+    store.database.prepare("SELECT value FROM privacyai_meta WHERE key='schema_version'").get().value,
+    "4"
+  );
 });
 
 test("independent handles union thread state and collision rolls back all fields", async t => {
