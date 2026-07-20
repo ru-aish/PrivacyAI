@@ -1,3 +1,5 @@
+import { isPrivacyError } from "@privacy-ai/sdk";
+
 import { loadBridgeCli, loadBridgeModule } from "./bridge.js";
 
 export const PRIVACYAI_CLI_VERSION = "0.0.2";
@@ -11,6 +13,7 @@ export const CLI_EXIT_CODES = Object.freeze({
 
 const CANONICAL_AGENTS = new Set(["claude", "codex", "agy"]);
 const COMPATIBILITY_AGENTS = new Set([...CANONICAL_AGENTS, "antigravity"]);
+const GENERIC_FAILURE_MESSAGE = "PrivacyAI encountered an internal failure.";
 
 export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}) {
   const stdout = options.stdout || process.stdout;
@@ -143,10 +146,14 @@ async function runDoctor(args, options) {
 
   let model = { ok: false, reason: "PrivacyAI is not configured." };
   if (loaded.configured) {
-    model = await bridge.checkPrivacyModel(loaded.config, {
-      probeCompletion: true,
-      ...options.healthOptions
-    });
+    try {
+      model = await bridge.checkPrivacyModel(loaded.config, {
+        probeCompletion: true,
+        ...options.healthOptions
+      });
+    } catch (error) {
+      model = { ok: false, reason: safeMessage(error) };
+    }
   }
 
   const brokenAgent = agents.some(agent => !agent.ok);
@@ -482,11 +489,11 @@ function isHelpRequest(args) {
 }
 
 function usageError(message) {
-  return Object.assign(new Error(message), { code: "PRIVACYAI_CLI_USAGE" });
+  return new CliPublicError("PRIVACYAI_CLI_USAGE", message);
 }
 
 function notFoundError(message) {
-  return Object.assign(new Error(message), { code: "PRIVACYAI_INSPECTION_NOT_FOUND" });
+  return new CliPublicError("PRIVACYAI_INSPECTION_NOT_FOUND", message);
 }
 
 function exitCodeForError(error) {
@@ -500,9 +507,11 @@ function exitCodeForError(error) {
 }
 
 function safeMessage(error) {
-  return error instanceof Error && error.message
-    ? error.message
-    : "PrivacyAI failed safely.";
+  if (error instanceof CliPublicError) return error.message;
+  if (isPrivacyError(error) && typeof error.publicMessage === "string" && error.publicMessage) {
+    return error.publicMessage;
+  }
+  return GENERIC_FAILURE_MESSAGE;
 }
 
 function normalizeExitCode(value) {
@@ -510,4 +519,11 @@ function normalizeExitCode(value) {
   return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 255
     ? parsed
     : CLI_EXIT_CODES.failure;
+}
+
+class CliPublicError extends Error {
+  constructor(code, message) {
+    super(message);
+    this.code = code;
+  }
 }

@@ -7,6 +7,8 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { createPrivacyError } from "@privacy-ai/sdk";
+
 import {
   CLI_EXIT_CODES,
   runPrivacyAiCli
@@ -85,13 +87,34 @@ test("agent delegation propagates child exits and contains asynchronous failures
     stderr: stderr.stream,
     bridgeCli: {
       runPrivacyAiCli: async () => {
-        throw new Error("Agent launch failed safely.");
+        throw new Error("top-level-secret@example.test");
       }
     }
   });
   assert.equal(code, CLI_EXIT_CODES.failure);
   assert.equal(stdout.text(), "");
-  assert.equal(stderr.text(), "Agent launch failed safely.\n");
+  assert.equal(stderr.text(), "PrivacyAI encountered an internal failure.\n");
+  assert.doesNotMatch(stderr.text(), /top-level-secret@example\.test/);
+});
+
+test("top-level execution preserves PrivacyError public messages", async () => {
+  const stderr = capture();
+  const code = await runPrivacyAiCli(["agent", "codex"], {
+    stderr: stderr.stream,
+    bridgeCli: {
+      runPrivacyAiCli: async () => {
+        throw createPrivacyError({
+          code: "PRIVACYAI_TEST_FAILURE",
+          category: "internal",
+          message: "private top-level-secret@example.test",
+          publicMessage: "PrivacyAI test public failure."
+        });
+      }
+    }
+  });
+  assert.equal(code, CLI_EXIT_CODES.failure);
+  assert.equal(stderr.text(), "PrivacyAI test public failure.\n");
+  assert.doesNotMatch(stderr.text(), /top-level-secret@example\.test/);
 });
 
 test("invalid commands use stderr and the stable usage exit code", async () => {
@@ -182,6 +205,50 @@ test("doctor distinguishes broken installed agents from absent optional agents",
   assert.equal(result.agents.find(agent => agent.name === "claude").installed, false);
 });
 
+test("doctor maps model-health failures to a generic public JSON message", async () => {
+  const stdout = capture();
+  const secret = "model-health-secret@example.test";
+  const code = await runPrivacyAiCli(["doctor", "--json"], {
+    stdout: stdout.stream,
+    bridgeModule: {
+      loadPrivacyConfig: async () => ({
+        configured: true,
+        path: "/tmp/privacyai-config.json",
+        config: { provider: "ollama", model: "local-model" }
+      }),
+      checkPrivacyModel: async () => { throw new Error(secret); },
+      resolveExecutable: async () => null,
+      verifyNativeExecutable: async () => ({ version: null })
+    }
+  });
+  assert.equal(code, CLI_EXIT_CODES.failure);
+  const result = JSON.parse(stdout.text());
+  assert.equal(result.localModel.reason, "PrivacyAI encountered an internal failure.");
+  assert.doesNotMatch(stdout.text(), /model-health-secret@example\.test/);
+});
+
+test("doctor text output does not expose secret-bearing executable failures", async () => {
+  const stdout = capture();
+  const secret = "/home/private/workspace/token.json api-key-secret";
+  const code = await runPrivacyAiCli(["doctor"], {
+    stdout: stdout.stream,
+    bridgeModule: {
+      loadPrivacyConfig: async () => ({
+        configured: true,
+        path: "/tmp/privacyai-config.json",
+        config: { provider: "ollama", model: "local-model" }
+      }),
+      checkPrivacyModel: async () => ({ ok: true }),
+      resolveExecutable: async name => name === "codex" ? "/usr/bin/codex" : null,
+      verifyNativeExecutable: async () => { throw new Error(secret); }
+    }
+  });
+
+  assert.equal(code, CLI_EXIT_CODES.failure);
+  assert.match(stdout.text(), /Agent codex: PrivacyAI encountered an internal failure\./);
+  assert.doesNotMatch(stdout.text(), /api-key-secret|\/home\/private\/workspace/);
+});
+
 test("doctor isolates executable discovery failures per agent", async () => {
   const stdout = capture();
   const stderr = capture();
@@ -193,7 +260,7 @@ test("doctor isolates executable discovery failures per agent", async () => {
     }),
     checkPrivacyModel: async () => ({ ok: true }),
     resolveExecutable: async name => {
-      if (name === "claude") throw new Error("Executable discovery failed safely.");
+      if (name === "claude") throw new Error("executable-probe-secret@example.test");
       return null;
     },
     verifyNativeExecutable: async () => ({ version: null })
@@ -210,7 +277,8 @@ test("doctor isolates executable discovery failures per agent", async () => {
   const claude = result.agents.find(agent => agent.name === "claude");
   assert.equal(claude.installed, false);
   assert.equal(claude.ok, false);
-  assert.equal(claude.reason, "Executable discovery failed safely.");
+  assert.equal(claude.reason, "PrivacyAI encountered an internal failure.");
+  assert.doesNotMatch(stdout.text(), /executable-probe-secret@example\.test/);
 });
 
 test("cache and lineage inspection keep metadata on stdout and close the service", async () => {

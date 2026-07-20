@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   access,
@@ -29,11 +30,18 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
     sourceManifest.dependencies["@privacy-ai/agent-bridge"],
     `workspace:${sdkManifest.version}`
   );
-  assert.equal(sourceManifest.dependencies["@privacy-ai/sdk"], undefined);
+  assert.equal(
+    sourceManifest.dependencies["@privacy-ai/sdk"],
+    `workspace:${sdkManifest.version}`
+  );
 
-  const packed = await runProcess("npm", ["pack", "--pack-destination", root], {
-    cwd: PACKAGE_ROOT
-  });
+  const packed = await runProcess("npm", [
+    "run",
+    "pack:production",
+    "--",
+    "--pack-destination",
+    root
+  ], { cwd: PACKAGE_ROOT });
   assert.equal(packed.code, 0, packed.stderr || packed.stdout);
 
   const tarball = (await readdir(root)).find(name => name.endsWith(".tgz"));
@@ -53,7 +61,11 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
   assert.equal(packedManifest.name, "@privacy-ai/cli");
   assert.equal(packedManifest.dependencies["@privacy-ai/sdk"], sdkManifest.version);
   assert.equal(packedManifest.dependencies["@privacy-ai/agent-bridge"], undefined);
+  assert.equal(packedManifest.scripts?.prepack, undefined);
+  assert.equal(packedManifest.scripts?.["pack:production"], undefined);
+  assert.equal(packedManifest.scripts?.postpack, "node scripts/package-runtime.js clean");
   assert.doesNotMatch(packedManifestText, /workspace:/);
+  await access(join(packageRoot, "scripts", "package-runtime.js"));
   await access(join(packageRoot, "vendor", "agent-bridge", "src", "cli.js"));
   await access(join(packageRoot, "vendor", "agent-bridge", "bin", "privacyai-agent-hook.js"));
   await assert.rejects(
@@ -124,6 +136,168 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
     error => error?.code === "ENOENT"
   );
 });
+
+test("direct npm pack is rejected before mutating package state", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-cli-direct-pack-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manifestPath = join(PACKAGE_ROOT, "package.json");
+  const sourceManifest = await readFile(manifestPath, "utf8");
+
+  const packed = await runProcess("npm", ["pack", "--pack-destination", root], {
+    cwd: PACKAGE_ROOT
+  });
+
+  assert.notEqual(packed.code, 0);
+  assert.match(packed.stderr + packed.stdout, /pack:production/);
+  assert.equal(await readFile(manifestPath, "utf8"), sourceManifest);
+  await assert.rejects(access(join(PACKAGE_ROOT, "vendor")), error => error?.code === "ENOENT");
+  await assert.rejects(
+    access(join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup")),
+    error => error?.code === "ENOENT"
+  );
+});
+
+test("interrupted npm publish restores staged package state", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-cli-publish-interrupt-"));
+  const manifestPath = join(PACKAGE_ROOT, "package.json");
+  const backupPath = join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup");
+  const watchPath = join(PACKAGE_ROOT, ".privacyai-package-watch");
+  const vendorRoot = join(PACKAGE_ROOT, "vendor");
+  const sourceManifest = await readFile(manifestPath, "utf8");
+  const interruptedManifest = JSON.parse(sourceManifest);
+  interruptedManifest.scripts.prepare = 'node -e "setTimeout(() => {}, 30000)"';
+  const interruptedManifestText = JSON.stringify(interruptedManifest, null, 2) + "\n";
+  t.after(async () => {
+    await writeFile(manifestPath, sourceManifest, { mode: 0o644 });
+    await rm(backupPath, { force: true });
+    await rm(watchPath, { force: true });
+    await rm(vendorRoot, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(manifestPath, interruptedManifestText, { mode: 0o644 });
+
+  const published = spawn("npm", ["publish", "--dry-run", "--access", "public"], {
+    cwd: PACKAGE_ROOT,
+    env: { ...process.env, npm_config_cache: join(root, "npm-cache") },
+    detached: true,
+    stdio: "ignore"
+  });
+  await waitForSpawn(published);
+  await waitForStagedPackage(backupPath, watchPath, vendorRoot);
+
+  const publishExit = waitForExit(published);
+  process.kill(-published.pid, "SIGTERM");
+  await publishExit;
+  await waitForPackageCleanup(
+    manifestPath,
+    interruptedManifestText,
+    vendorRoot,
+    backupPath,
+    watchPath
+  );
+});
+
+test("normal npm publish dry-run is supported and restores package state", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-cli-publish-dry-run-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const manifestPath = join(PACKAGE_ROOT, "package.json");
+  const sourceManifest = await readFile(manifestPath, "utf8");
+
+  const published = await runProcess("npm", ["publish", "--dry-run", "--access", "public"], {
+    cwd: PACKAGE_ROOT,
+    env: { ...process.env, npm_config_cache: join(root, "npm-cache") }
+  });
+
+  assert.equal(published.code, 0, published.stderr || published.stdout);
+  assert.match(published.stderr + published.stdout, /dry-run|dry run/i);
+  assert.equal(await readFile(manifestPath, "utf8"), sourceManifest);
+  await assert.rejects(access(join(PACKAGE_ROOT, "vendor")), error => error?.code === "ENOENT");
+  await assert.rejects(
+    access(join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup")),
+    error => error?.code === "ENOENT"
+  );
+});
+
+test("production pack wrapper restores the source tree when npm cannot create a tarball", async t => {
+  const manifestPath = join(PACKAGE_ROOT, "package.json");
+  const sourceManifest = await readFile(manifestPath, "utf8");
+  const sourceHash = sha256(sourceManifest);
+  t.after(async () => {
+    await rm(join(PACKAGE_ROOT, "vendor"), { recursive: true, force: true });
+    await rm(join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup"), { force: true });
+  });
+
+  const packed = await runProcess("npm", [
+    "run",
+    "pack:production",
+    "--",
+    "--pack-destination",
+    "/proc/privacyai-pack-failure"
+  ], { cwd: PACKAGE_ROOT });
+  assert.notEqual(packed.code, 0, "the inaccessible pack destination must fail");
+  assert.equal(sha256(await readFile(manifestPath, "utf8")), sourceHash);
+  await assert.rejects(access(join(PACKAGE_ROOT, "vendor")), error => error?.code === "ENOENT");
+  await assert.rejects(
+    access(join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup")),
+    error => error?.code === "ENOENT"
+  );
+});
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function waitForSpawn(child) {
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("spawn", resolve);
+  });
+}
+
+function waitForExit(child) {
+  return new Promise(resolve => child.once("exit", resolve));
+}
+
+async function waitForStagedPackage(backupPath, watchPath, vendorRoot) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (
+      await pathExists(backupPath) &&
+      await pathExists(watchPath) &&
+      await pathExists(vendorRoot)
+    ) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.fail("npm publish did not reach the staged package state");
+}
+
+async function waitForPackageCleanup(
+  manifestPath,
+  sourceManifest,
+  vendorRoot,
+  backupPath,
+  watchPath
+) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (
+      await readFile(manifestPath, "utf8") === sourceManifest &&
+      !await pathExists(vendorRoot) &&
+      !await pathExists(backupPath) &&
+      !await pathExists(watchPath)
+    ) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.fail("cleanup watcher did not restore package state");
+}
+
+async function pathExists(path) {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
 
 function runProcess(command, args, options = {}) {
   return new Promise((resolve, reject) => {

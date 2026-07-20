@@ -112,10 +112,13 @@ alias, and `--privacy-strict --print "..."` remains the prompt-only fallback.
 ## Package boundary
 
 The internal `@privacy-ai/agent-bridge` workspace package is marked private.
-During npm `prepack`, its runtime source and hook binaries are copied into the
-CLI tarball and the published manifest is rewritten to depend only on the
-public SDK. `postpack` restores the workspace manifest and removes staging
-files. Publish the matching SDK release before the CLI release.
+Use ordinary `npm publish` for a registry release, or run
+`npm run pack:production -- [npm pack options]` to build a local release
+tarball. Both paths copy the runtime source and hook binaries into the package,
+rewrite the packed manifest to depend only on the public SDK, and restore the
+workspace manifest and staging files after npm exits. The production pack
+wrapper also performs synchronous `finally` cleanup when tarball creation
+fails. Publish the matching SDK release before the CLI release.
 
 Current platform support is Linux and macOS. Windows remains blocked until an
 equivalent tested boundary is available.

@@ -1,9 +1,13 @@
+import { isPrivacyError } from "@privacy-ai/sdk";
+
 import { launchAgy } from "./agy.js";
 import { BoundedQueue } from "./bounded-queue.js";
 import { loadPrivacyConfig } from "./config-store.js";
 import { launchNativeTui } from "./launcher.js";
 import { checkPrivacyModel } from "./model-health.js";
 import { runOnboarding } from "./onboard.js";
+
+const GENERIC_FAILURE_MESSAGE = "PrivacyAI encountered an internal failure.";
 
 export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}) {
   const stdout = options.stdout || process.stdout;
@@ -132,11 +136,15 @@ function safeDiagnosticField(value, fallback) {
 }
 
 function safeMessage(error) {
-  return error instanceof Error ? error.message : "PrivacyAI failed safely.";
+  if (error instanceof CliUsageError) return error.message;
+  if (isPrivacyError(error) && typeof error.publicMessage === "string" && error.publicMessage) {
+    return error.publicMessage;
+  }
+  return GENERIC_FAILURE_MESSAGE;
 }
 
 function cliUsageError(message) {
-  return Object.assign(new Error(message), { code: "PRIVACYAI_CLI_USAGE" });
+  return new CliUsageError(message);
 }
 
 function bridgeExitCode(error) {
@@ -151,4 +159,11 @@ function positiveQueueCapacity(value, fallback) {
     throw new TypeError("Deferred gateway diagnostic capacity must be between 1 and 10000.");
   }
   return normalized;
+}
+
+class CliUsageError extends Error {
+  constructor(message) {
+    super(message);
+    this.code = "PRIVACYAI_CLI_USAGE";
+  }
 }

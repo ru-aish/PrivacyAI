@@ -2,6 +2,8 @@ import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
+import { createPrivacyError } from "@privacy-ai/sdk";
+
 import { CONTEXT_SCHEMA_VERSION } from "./context-repository/constants.js";
 
 const DEFAULT_DATABASE_PATH = `${homedir()}/.local/share/privacyai/context-gateway.sqlite3`;
@@ -325,5 +327,11 @@ function parseStoredJson(value, isExpectedShape) {
 }
 
 function inspectionError(code, message) {
-  return Object.assign(new Error(message), { code });
+  return createPrivacyError({
+    code,
+    category: "storage",
+    phase: "storage_read",
+    message,
+    publicMessage: message
+  });
 }

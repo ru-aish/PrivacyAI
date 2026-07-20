@@ -7,6 +7,7 @@ import {
   DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
   DEFAULT_OLLAMA_KEEP_ALIVE,
   OLLAMA_MEMORY_FALLBACK_CONTEXT_TOKENS,
+  createPrivacyError,
   normalizeClassifierConcurrency,
   normalizeLocalModelContextTokens,
   normalizeOllamaKeepAlive
@@ -31,7 +32,14 @@ export async function loadPrivacyConfig(options = {}) {
     return { configured: true, path, config: normalizeConfig(parsed) };
   } catch (error) {
     if (error?.code === "ENOENT") return { configured: false, path, config: null };
-    throw new Error("PrivacyAI configuration is invalid or unreadable.", { cause: error });
+    throw createPrivacyError({
+      code: "PRIVACYAI_CONFIG_INVALID",
+      category: "storage",
+      phase: "storage_read",
+      message: "PrivacyAI configuration is invalid or unreadable.",
+      publicMessage: "PrivacyAI configuration is invalid or unreadable.",
+      cause: error
+    });
   }
 }
 
