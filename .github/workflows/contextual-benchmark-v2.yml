@@ -28,10 +28,29 @@ jobs:
       - name: Compile
         run: python -m compileall -q tools/contextual_model/benchmark_v2
       - name: Test
+        id: tests
         env:
           PYTHONPATH: .
-        run: python -m unittest tools.contextual_model.tests.test_benchmark_v2 -v
+        shell: bash
+        run: |
+          set +e
+          python -m unittest tools.contextual_model.tests.test_benchmark_v2 -v > benchmark-v2-test.log 2>&1
+          status=$?
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit 0
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: contextual-benchmark-v2-test-log
+          path: benchmark-v2-test.log
+          if-no-files-found: error
+          retention-days: 7
+      - name: Fail on unit test failure
+        if: steps.tests.outputs.status != '0'
+        run: exit 1
       - name: Exercise 10k fixture and oracle scoring
+        if: steps.tests.outputs.status == '0'
         env:
           PYTHONPATH: .
         run: |
