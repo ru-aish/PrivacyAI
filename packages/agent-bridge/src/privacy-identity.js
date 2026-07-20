@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, open, readdir, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, parse, resolve, sep } from "node:path";
 
 import {
   createPrivacyIdentityService,
@@ -14,22 +14,16 @@ const INSTALLATION_KEY_VERSION = 1;
 const INSTALLATION_KEY_BYTES = 32;
 
 export function defaultPrivacyIdentityKeyPath(options = {}) {
-  if (options.identityKeyPath) return resolve(options.identityKeyPath);
-  if (process.env.PRIVACYAI_IDENTITY_KEY_FILE) {
-    return resolve(process.env.PRIVACYAI_IDENTITY_KEY_FILE);
-  }
-  if (options.identityBaseDir) {
-    return join(resolve(options.identityBaseDir), "key-v1.json");
-  }
-  if (options.baseDir) {
-    return join(resolve(options.baseDir), ".privacyai-identity-key-v1.json");
-  }
-  return join(homedir(), ".local", "share", "privacyai", "identity", "key-v1.json");
+  return privacyIdentityKeyLocation(options).path;
 }
 
 export async function loadInstallationPrivacyIdentity(options = {}) {
-  const path = defaultPrivacyIdentityKeyPath(options);
-  return identityFromRecord(await readIdentityRecord(path));
+  const location = privacyIdentityKeyLocation(options);
+  return withIdentityStorage(location, { create: false }, async storage => {
+    const identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
+    await cleanupIdentityTempFiles(storage);
+    return identityRoot;
+  });
 }
 
 export async function openInstallationPrivacyIdentity(options = {}) {
@@ -38,59 +32,86 @@ export async function openInstallationPrivacyIdentity(options = {}) {
     return createPrivacyIdentityService({ key: options.identityKey });
   }
 
-  const path = defaultPrivacyIdentityKeyPath(options);
-  await ensurePrivateDirectory(dirname(path));
-  try {
-    return identityFromRecord(await readIdentityRecord(path));
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
+  const location = privacyIdentityKeyLocation(options);
+  return withIdentityStorage(location, { create: true }, async storage => {
+    try {
+      const identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
+      await cleanupIdentityTempFiles(storage);
+      return identityRoot;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
 
-  const key = generatePrivacyIdentityKey();
-  const record = installationKeyRecord(key);
-  try {
-    await writeFile(path, `${JSON.stringify(record, null, 2)}\n`, {
-      flag: "wx",
-      mode: 0o600
-    });
-    await chmod(path, 0o600);
-    return createPrivacyIdentityService({ key });
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw identityStoreError(error);
-    return identityFromRecord(await readIdentityRecord(path));
-  }
+    const record = installationKeyRecord(generatePrivacyIdentityKey());
+    const tempPath = identityTempPath(storage);
+    try {
+      await writePrivateIdentityRecord(tempPath, record);
+      await assertIdentityStorageStable(storage);
+      try {
+        await link(tempPath, storage.keyPath);
+      } catch (error) {
+        // A concurrent winner may publish the final record and remove all stale
+        // temporary names before this process reaches link(). In both cases the
+        // final record is the only source of truth.
+        if (error?.code !== "EEXIST" && error?.code !== "ENOENT") throw error;
+      }
+
+      let identityRoot;
+      try {
+        identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
+      } catch (error) {
+        if (error?.code === "ENOENT") throw identityStoreError(error);
+        throw error;
+      }
+      await cleanupIdentityTempFiles(storage);
+      return identityRoot;
+    } catch (error) {
+      if (
+        error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT" ||
+        error?.code === "PRIVACYAI_IDENTITY_KEY_UNAVAILABLE"
+      ) {
+        throw error;
+      }
+      throw identityStoreError(error);
+    } finally {
+      await rm(tempPath, { force: true }).catch(() => {});
+    }
+  });
 }
 
 export async function rotateInstallationPrivacyIdentityKey(options = {}) {
-  const path = defaultPrivacyIdentityKeyPath(options);
-  await ensurePrivateDirectory(dirname(path));
-  let previousKeyId = null;
-  try {
-    previousKeyId = (await readIdentityRecord(path)).keyId;
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-  }
+  const location = privacyIdentityKeyLocation(options);
+  return withIdentityStorage(location, { create: true }, async storage => {
+    let previousKeyId = null;
+    try {
+      const previousRecord = await readIdentityRecord(storage.keyPath);
+      identityFromRecord(previousRecord);
+      previousKeyId = previousRecord.keyId;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
 
-  const key = generatePrivacyIdentityKey();
-  const record = installationKeyRecord(key);
-  const tempPath = path + "." + process.pid + "." + randomUUID() + ".tmp";
-  try {
-    await writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, {
-      mode: 0o600
-    });
-    await chmod(tempPath, 0o600);
-    await rename(tempPath, path);
-    await chmod(path, 0o600);
-  } catch (error) {
-    await rm(tempPath, { force: true }).catch(() => {});
-    throw identityStoreError(error);
-  }
-  return {
-    path,
-    previousKeyId,
-    keyId: record.keyId,
-    identityRoot: createPrivacyIdentityService({ key })
-  };
+    const record = installationKeyRecord(generatePrivacyIdentityKey());
+    const tempPath = identityTempPath(storage);
+    try {
+      await writePrivateIdentityRecord(tempPath, record);
+      await assertIdentityStorageStable(storage);
+      await rename(tempPath, storage.keyPath);
+      const identityRoot = identityFromRecord(await readIdentityRecord(storage.keyPath));
+      await cleanupIdentityTempFiles(storage);
+      return {
+        path: location.path,
+        previousKeyId,
+        keyId: record.keyId,
+        identityRoot
+      };
+    } catch (error) {
+      if (error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT") throw error;
+      throw identityStoreError(error);
+    } finally {
+      await rm(tempPath, { force: true }).catch(() => {});
+    }
+  });
 }
 
 export function sessionPrivacyIdentity(identityRoot, sessionKey) {
@@ -197,6 +218,218 @@ function installationKeyRecord(key) {
   };
 }
 
+function privacyIdentityKeyLocation(options = {}) {
+  if (options.identityKeyPath) {
+    return { path: resolve(options.identityKeyPath), privateDirectory: false };
+  }
+  if (process.env.PRIVACYAI_IDENTITY_KEY_FILE) {
+    return { path: resolve(process.env.PRIVACYAI_IDENTITY_KEY_FILE), privateDirectory: false };
+  }
+  if (options.identityBaseDir) {
+    return {
+      path: join(resolve(options.identityBaseDir), "key-v1.json"),
+      privateDirectory: true
+    };
+  }
+  if (options.baseDir) {
+    return {
+      path: join(resolve(options.baseDir), ".privacyai-identity-key-v1.json"),
+      privateDirectory: false
+    };
+  }
+  return {
+    path: join(homedir(), ".local", "share", "privacyai", "identity", "key-v1.json"),
+    privateDirectory: true
+  };
+}
+
+async function withIdentityStorage(location, options, operation) {
+  const storage = await openIdentityStorage(location, options);
+  try {
+    const result = await operation(storage);
+    await assertIdentityStorageStable(storage);
+    return result;
+  } finally {
+    await storage.directoryHandle.close().catch(() => {});
+  }
+}
+
+async function openIdentityStorage(location, options) {
+  const directoryPath = dirname(location.path);
+  await ensureDirectoryComponents(directoryPath, options);
+  const pathMetadata = await lstat(directoryPath);
+  validateIdentityDirectory(pathMetadata, { final: true });
+
+  let directoryHandle;
+  try {
+    const flags = constants.O_RDONLY |
+      (process.platform === "win32" ? 0 : ((constants.O_DIRECTORY || 0) | (constants.O_NOFOLLOW || 0)));
+    directoryHandle = await open(directoryPath, flags);
+    let openedMetadata = await directoryHandle.stat();
+    validateIdentityDirectory(openedMetadata, { final: true });
+    if (!sameFile(pathMetadata, openedMetadata)) throw corruptIdentityStoreError();
+
+    if (location.privateDirectory && process.platform !== "win32") {
+      await directoryHandle.chmod(0o700);
+      openedMetadata = await directoryHandle.stat();
+      if ((openedMetadata.mode & 0o777) !== 0o700) throw corruptIdentityStoreError();
+    } else if (
+      !location.privateDirectory &&
+      process.platform !== "win32" &&
+      (openedMetadata.mode & 0o022) !== 0
+    ) {
+      throw corruptIdentityStoreError();
+    }
+
+    await validateDirectoryComponents(directoryPath);
+    const currentMetadata = await lstat(directoryPath);
+    if (!sameFile(currentMetadata, openedMetadata)) throw corruptIdentityStoreError();
+
+    let operationDirectoryPath = directoryPath;
+    if (process.platform === "linux") {
+      const descriptorPath = `/proc/self/fd/${directoryHandle.fd}`;
+      try {
+        await lstat(descriptorPath);
+        operationDirectoryPath = descriptorPath;
+      } catch {
+        // Minimal containers may not mount procfs. Component and inode checks
+        // remain active for the path-based fallback.
+      }
+    }
+    return {
+      directoryHandle,
+      directoryPath,
+      directoryMetadata: openedMetadata,
+      operationDirectoryPath,
+      keyName: basename(location.path),
+      keyPath: join(operationDirectoryPath, basename(location.path))
+    };
+  } catch (error) {
+    await directoryHandle?.close().catch(() => {});
+    if (error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT") throw error;
+    if (error?.code === "ELOOP" || error?.code === "ENOTDIR") {
+      throw corruptIdentityStoreError(error);
+    }
+    throw error;
+  }
+}
+
+async function ensureDirectoryComponents(path, options) {
+  for (const component of directoryComponents(path)) {
+    try {
+      validateIdentityDirectory(await lstat(component));
+    } catch (error) {
+      if (error?.code !== "ENOENT" || !options.create) throw directoryStoreError(error);
+      try {
+        await mkdir(component, { mode: 0o700 });
+      } catch (mkdirError) {
+        if (mkdirError?.code !== "EEXIST") throw directoryStoreError(mkdirError);
+      }
+      validateIdentityDirectory(await lstat(component));
+    }
+  }
+  await validateDirectoryComponents(path);
+}
+
+async function validateDirectoryComponents(path) {
+  for (const component of directoryComponents(path)) {
+    validateIdentityDirectory(await lstat(component));
+  }
+}
+
+function directoryComponents(path) {
+  const absolute = resolve(path);
+  const root = parse(absolute).root;
+  const components = [root];
+  let current = root;
+  for (const part of absolute.slice(root.length).split(sep).filter(Boolean)) {
+    current = join(current, part);
+    components.push(current);
+  }
+  return components;
+}
+
+function validateIdentityDirectory(metadata, options = {}) {
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw corruptIdentityStoreError();
+  }
+  if (options.final) validateIdentityDirectoryOwner(metadata);
+}
+
+function validateIdentityDirectoryOwner(metadata) {
+  if (
+    process.platform !== "win32" &&
+    typeof process.getuid === "function" &&
+    metadata.uid !== process.getuid()
+  ) {
+    throw corruptIdentityStoreError();
+  }
+}
+
+function sameFile(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function assertIdentityStorageStable(storage) {
+  try {
+    await validateDirectoryComponents(storage.directoryPath);
+    const pathMetadata = await lstat(storage.directoryPath);
+    const openedMetadata = await storage.directoryHandle.stat();
+    validateIdentityDirectory(pathMetadata, { final: true });
+    validateIdentityDirectory(openedMetadata, { final: true });
+    if (
+      !sameFile(pathMetadata, storage.directoryMetadata) ||
+      !sameFile(openedMetadata, storage.directoryMetadata)
+    ) {
+      throw corruptIdentityStoreError();
+    }
+  } catch (error) {
+    if (error?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT") throw error;
+    throw corruptIdentityStoreError(error);
+  }
+}
+
+function identityTempPath(storage) {
+  return join(
+    storage.operationDirectoryPath,
+    `${storage.keyName}.${process.pid}.${randomUUID()}.tmp`
+  );
+}
+
+async function writePrivateIdentityRecord(path, record) {
+  let handle;
+  try {
+    const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL |
+      (process.platform === "win32" ? 0 : (constants.O_NOFOLLOW || 0));
+    handle = await open(path, flags, 0o600);
+    await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`, { encoding: "utf8" });
+    if (process.platform !== "win32") await handle.chmod(0o600);
+    await handle.sync();
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+async function cleanupIdentityTempFiles(storage) {
+  let entries;
+  try {
+    entries = await readdir(storage.operationDirectoryPath, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  const prefix = storage.keyName + ".";
+  await Promise.all(entries.map(async entry => {
+    if (
+      !entry.name.startsWith(prefix) ||
+      !entry.name.endsWith(".tmp") ||
+      (!entry.isFile() && !entry.isSymbolicLink())
+    ) {
+      return;
+    }
+    await rm(join(storage.operationDirectoryPath, entry.name), { force: true }).catch(() => {});
+  }));
+}
+
 async function readIdentityRecord(path) {
   let handle;
   let value;
@@ -207,10 +440,7 @@ async function readIdentityRecord(path) {
     handle = await open(path, flags);
     const openedMetadata = await handle.stat();
     validateIdentityKeyFile(openedMetadata);
-    if (
-      pathMetadata.dev !== openedMetadata.dev ||
-      pathMetadata.ino !== openedMetadata.ino
-    ) {
+    if (!sameFile(pathMetadata, openedMetadata)) {
       throw corruptIdentityStoreError();
     }
     value = JSON.parse(await handle.readFile({ encoding: "utf8" }));
@@ -261,11 +491,6 @@ function identityFromRecord(record) {
   return identityRoot;
 }
 
-async function ensurePrivateDirectory(path) {
-  await mkdir(path, { recursive: true, mode: 0o700 });
-  await chmod(path, 0o700);
-}
-
 function requiredScopeInput(value, label) {
   const normalized = String(value || "");
   if (!normalized || normalized.length > 4096 || /[\0\r\n]/.test(normalized)) {
@@ -297,6 +522,19 @@ function corruptIdentityStoreError(cause) {
     : new Error("PrivacyAI identity key material is malformed.", { cause });
   error.code = "PRIVACYAI_IDENTITY_KEY_CORRUPT";
   return error;
+}
+
+function directoryStoreError(cause) {
+  if (
+    cause?.code === "PRIVACYAI_IDENTITY_KEY_CORRUPT" ||
+    cause?.code === "ENOENT"
+  ) {
+    return cause;
+  }
+  if (cause?.code === "ELOOP" || cause?.code === "ENOTDIR") {
+    return corruptIdentityStoreError(cause);
+  }
+  return cause;
 }
 
 function identityStoreError(cause) {
