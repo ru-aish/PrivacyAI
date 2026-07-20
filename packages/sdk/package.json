@@ -7,10 +7,11 @@
   "exports": {
     ".": "./src/index.js",
     "./browser": "./src/browser.js",
+    "./identity": "./src/node-identity.js",
     "./image": "./src/image/index.js"
   },
   "scripts": {
-    "test": "node --test test/errors.test.js test/env.test.js test/sanitizer.test.js test/prompts.test.js test/ai-sanitizer.test.js test/detectors.test.js test/policy.test.js test/hard-prompts.test.js test/context-compactor.test.js test/benchmark-logs.test.js test/intent-preservation.test.js test/session-map.test.js test/text-edits.test.js test/image.test.js",
+    "test": "node --test test/errors.test.js test/env.test.js test/sanitizer.test.js test/prompts.test.js test/ai-sanitizer.test.js test/detectors.test.js test/policy.test.js test/hard-prompts.test.js test/context-compactor.test.js test/benchmark-logs.test.js test/intent-preservation.test.js test/session-map.test.js test/text-edits.test.js test/identity.test.js test/image.test.js",
     "test:image": "node --test test/image.test.js",
     "test:e2e:ollama": "node test/ollama.e2e.test.js"
   },

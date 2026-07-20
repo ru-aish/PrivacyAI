@@ -3,21 +3,28 @@ import { classifyDetections, shouldRedact } from "./policy/redaction-policy.js";
 import { allocateUniqueDummy, generateDummy } from "./dummy-data.js";
 
 export class RedactionPlan {
-  constructor(originalText) {
+  constructor(originalText, options = {}) {
     this.originalText = originalText;
     this.replacements = [];
     this.sessionMap = {};
+    this.identity = options.identity;
+    this.identityDomain = options.identityDomain || "text";
     this.protectedSpans = extractProtectedSpans(originalText);
   }
 
   addReplacement(start, end, original, replacement, type, reason) {
+    const identity = this.identity?.placeholder?.(replacement, original, {
+      category: type,
+      domain: this.identityDomain
+    });
     this.replacements.push({
       start,
       end,
       original,
       replacement,
       type,
-      reason
+      reason,
+      ...(identity ? { identity } : {})
     });
     this.sessionMap[replacement] = original;
   }
@@ -63,19 +70,60 @@ export class RedactionPlan {
   }
 
   toResult(privacySource = "redaction-plan") {
+    const categoryByAlias = new Map();
+    const canonicalByAlias = new Map();
+    for (const replacement of this.replacements) {
+      if (!categoryByAlias.has(replacement.replacement)) {
+        categoryByAlias.set(replacement.replacement, replacement.type);
+      }
+      if (this.identity?.canonicalPlaceholder && !canonicalByAlias.has(replacement.replacement)) {
+        canonicalByAlias.set(
+          replacement.replacement,
+          this.identity.canonicalPlaceholder(replacement.original, {
+            category: categoryByAlias.get(replacement.replacement),
+            domain: this.identityDomain
+          })
+        );
+      }
+    }
+    const rawSanitizedText = this.apply();
+    const canonical = this.identity?.canonicalizeAliases?.(
+      rawSanitizedText,
+      this.sessionMap,
+      {
+        domain: this.identityDomain,
+        categoryForAlias: alias => categoryByAlias.get(alias)
+      }
+    );
+    const sessionMap = canonical?.sessionMap || { ...this.sessionMap };
+    const identityMap = canonical?.identityMap || this.identity?.describeSessionMap?.(sessionMap, {
+      domain: this.identityDomain
+    });
     return {
       originalText: this.originalText,
-      sanitizedText: this.apply(),
-      sessionMap: { ...this.sessionMap },
-      detections: this.replacements.map(r => ({
-        type: r.type,
-        value: r.original,
-        start: r.start,
-        end: r.end,
-        confidence: 1.0,
-        source: r.reason || privacySource,
-        replacement: r.replacement
-      })),
+      sanitizedText: canonical?.sanitizedText ?? rawSanitizedText,
+      sessionMap,
+      ...(identityMap ? {
+        identity: {
+          version: this.identity.version,
+          keyId: this.identity.keyId,
+          scope: this.identity.scope
+        },
+        identityMap
+      } : {}),
+      detections: this.replacements.map(replacement => {
+        const canonicalIdentity = canonicalByAlias.get(replacement.replacement) || replacement.identity;
+        return {
+          type: replacement.type,
+          value: replacement.original,
+          start: replacement.start,
+          end: replacement.end,
+          confidence: 1.0,
+          source: replacement.reason || privacySource,
+          replacement: canonicalIdentity?.alias || replacement.replacement,
+          ...(canonicalIdentity ? { identity: canonicalIdentity } : {})
+        };
+      }),
       privacySource
     };
   }
@@ -115,8 +163,8 @@ export class RedactionPlan {
   }
 }
 
-export function createRedactionPlan(text, detections) {
-  const plan = new RedactionPlan(text);
+export function createRedactionPlan(text, detections, options = {}) {
+  const plan = new RedactionPlan(text, options);
   plan.addProtectedSpanSubspans();
   plan.addDetections(detections);
   return plan;
