@@ -327,13 +327,18 @@ test("rotation retries participant snapshots across choosing record replacement"
     error => ({ status: "rejected", error })
   );
   observed.then(() => { settled = true; });
-  await waitForRotationParticipantTicket(root, 1, lockPath);
-  await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
-  const treatedReplacementAsAbsence = settled;
 
-  stopReplacing = true;
-  await replacements;
-  await rm(lockPath, { force: true });
+  let treatedReplacementAsAbsence;
+  try {
+    await waitForRotationParticipantTicket(root, 1, lockPath);
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
+    treatedReplacementAsAbsence = settled;
+  } finally {
+    stopReplacing = true;
+    await replacements;
+    await rm(lockPath, { force: true });
+  }
+
   const outcome = await observed;
 
   assert.equal(treatedReplacementAsAbsence, false);
