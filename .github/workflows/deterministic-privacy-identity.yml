@@ -14,8 +14,13 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      PRIVACYAI_CONTEXT_DB: ${{ runner.temp }}/privacyai/context-v4.db
+      PRIVACYAI_IDENTITY_KEY_FILE: ${{ runner.temp }}/privacyai/identity/key-v1.json
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
           version: 10
@@ -24,8 +29,17 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Focused identity and migration regressions
+        run: >-
+          node --test
+          packages/sdk/test/identity.test.js
+          packages/agent-bridge/test/privacy-identity.test.js
+          packages/agent-bridge/test/context-repository.test.js
+          packages/agent-bridge/test/context-verification-store.test.js
+          packages/agent-bridge/test/startup-cache.test.js
       - run: pnpm --filter @privacy-ai/sdk test
       - run: pnpm --filter @privacy-ai/agent-bridge test
-      - run: pnpm --filter @privacy-ai/web-demo test
-      - run: pnpm --filter @privacy-ai/agent-tui test
+      - name: Full isolated workspace tests
+        run: pnpm -r test
+      - run: node --check packages/agent-bridge/src/privacy-identity.js
       - run: git diff --check
