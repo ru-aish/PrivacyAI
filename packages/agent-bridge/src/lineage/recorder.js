@@ -138,3 +138,12 @@ async function append(repository, state, fields, signal) {
   return event;
 }
 export async function recordLineage(recorder, method, ...args) { if (!recorder || typeof recorder[method] !== "function") return undefined; return recorder[method](...args); }
+
+/** Records a provider failure without replacing the transport error in flight. */
+export async function recordFailedProviderResponse(recorder, handle) {
+  try {
+    await recordLineage(recorder, "providerResponse", handle, { success: false });
+  } catch {
+    // Preserve the provider transport failure as the primary error.
+  }
+}

@@ -50,7 +50,7 @@ import {
 import { trackServerSockets } from "./runtime/http-server.js";
 import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
 import { SessionVault } from "./session-vault.js";
-import { recordLineage } from "./lineage/recorder.js";
+import { recordFailedProviderResponse, recordLineage } from "./lineage/recorder.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
@@ -459,7 +459,7 @@ async function proxyTransformed(
       onRequestSent: () => { upstreamSent = true; }
     });
   } catch (error) {
-    if (upstreamSent) await recordTerminalLineage(context.lineageRecorder, lineageHandle);
+    if (upstreamSent) await recordFailedProviderResponse(context.lineageRecorder, lineageHandle);
     throw error;
   }
   context.phase = "upstream_response";
@@ -533,14 +533,6 @@ async function proxyTransformed(
   response.writeHead(statusCode);
   response.end(restoredBody);
   await recordLineage(context.lineageRecorder, "restoration", lineageHandle);
-}
-
-async function recordTerminalLineage(recorder, handle) {
-  try {
-    await recordLineage(recorder, "providerResponse", handle, { success: false });
-  } catch {
-    // Preserve the provider transport failure as the primary error.
-  }
 }
 
 async function proxySseResponse(

@@ -23,7 +23,7 @@ import {
   trackServerSockets
 } from "./runtime/http-server.js";
 import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
-import { recordLineage } from "./lineage/recorder.js";
+import { recordFailedProviderResponse, recordLineage } from "./lineage/recorder.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MODEL_HOST = "daily-cloudcode-pa.googleapis.com";
@@ -229,7 +229,7 @@ async function handleInterceptedRequest(request, response, context) {
         onRequestSent: () => { upstreamSent = true; }
       });
     } catch (error) {
-      if (upstreamSent) await recordTerminalLineage(context.lineageRecorder, transformed.lineageHandle);
+      if (upstreamSent) await recordFailedProviderResponse(context.lineageRecorder, transformed.lineageHandle);
       throw error;
     }
     await proxyModelResponse(
@@ -457,14 +457,6 @@ function makeUpstreamRequest(options) {
     servername: options.hostname,
     agent: options.agent
   });
-}
-
-async function recordTerminalLineage(recorder, handle) {
-  try {
-    await recordLineage(recorder, "providerResponse", handle, { success: false });
-  } catch {
-    // Preserve the provider transport failure as the primary error.
-  }
 }
 
 export function buildAgyUpstreamHeaders(input, host, contentLength, options = {}) {
