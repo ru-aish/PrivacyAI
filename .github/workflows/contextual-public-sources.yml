@@ -1,0 +1,33 @@
+name: Contextual public sources
+
+on:
+  push:
+    branches:
+      - experiment/contextual-public-sources
+    paths:
+      - "tools/contextual_model/public_sources/**"
+      - "tools/contextual_model/tests/test_public_sources_*.py"
+      - ".github/workflows/contextual-public-sources.yml"
+  pull_request:
+    paths:
+      - "tools/contextual_model/public_sources/**"
+      - "tools/contextual_model/tests/test_public_sources_*.py"
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile
+        run: python -m compileall -q tools/contextual_model/public_sources
+      - name: Test
+        env:
+          PYTHONPATH: .
+        run: python -m unittest tools.contextual_model.tests.test_public_sources_contracts -v
