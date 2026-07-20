@@ -309,6 +309,74 @@ test("AGY transport launch preserves native arguments and cleans up the runtime"
   assert.match(warning, /transport active/);
 });
 
+test("AGY transport preserves injected lineage ownership and primary launch failures", async () => {
+  const root = await createTestTempDir("privacyai-agy-lineage-injected-");
+  let repositoryClosed = 0;
+  let runtimeClosed = 0;
+  const primary = new Error("child failed first");
+  const lineageRepository = {
+    async append(event) { return event; },
+    close() { repositoryClosed += 1; }
+  };
+  const common = {
+    cwd: root,
+    homeDir: root,
+    binary: "/test/agy",
+    stderr: new PassThrough(),
+    loadPrivacyConfig: async () => ({
+      configured: true,
+      path: join(root, "privacy-config.json"),
+      config: { provider: "ollama", model: "test", baseURL: "http://127.0.0.1:11434" }
+    }),
+    checkPrivacyModel: async () => ({ ok: true }),
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+  };
+
+  let caught;
+  try {
+    await launchAgy(["--print", "hello"], {
+      ...common,
+      lineageRepository,
+      startAgyTransportRuntime: async options => {
+        assert.equal(typeof options.lineageRecorder?.protectedRequest, "function");
+        return {
+          env: {},
+          async close() {
+            runtimeClosed += 1;
+            throw new Error("runtime close failed");
+          }
+        };
+      },
+      runChild: async () => { throw primary; }
+    });
+  } catch (error) {
+    caught = error;
+  }
+
+  assert.equal(caught, primary);
+  assert.equal(runtimeClosed, 1);
+  assert.equal(repositoryClosed, 0);
+  assert.equal(caught.cleanupErrors?.[0]?.name, "AGY transport runtime");
+  assert.equal(caught.cleanupErrors?.[0]?.error?.message, "runtime close failed");
+
+  let opened = 0;
+  const recorder = Object.freeze({ protectedRequest() {} });
+  await launchAgy(["--print", "hello"], {
+    ...common,
+    lineageRecorder: recorder,
+    openLineageRepository: async () => {
+      opened += 1;
+      throw new Error("must not open lineage");
+    },
+    startAgyTransportRuntime: async options => {
+      assert.equal(options.lineageRecorder, recorder);
+      return { env: {}, async close() {} };
+    },
+    runChild: async () => 0
+  });
+  assert.equal(opened, 0);
+});
+
 test("AGY strict launch sanitizes the prompt before spawning and keeps the guard installed", async () => {
   const root = await createTestTempDir("privacyai-agy-launch-");
   const hooksPath = join(root, "hooks.json");
@@ -316,6 +384,7 @@ test("AGY strict launch sanitizes the prompt before spawning and keeps the guard
   let warning = "";
   stderr.on("data", chunk => { warning += chunk; });
   let observed;
+  let lineageOpened = 0;
 
   const code = await launchAgy(["--privacy-strict", "--model", "auto", "--print", "Email real@example.test"], {
     cwd: root,
@@ -330,6 +399,10 @@ test("AGY strict launch sanitizes the prompt before spawning and keeps the guard
       config: { provider: "ollama", model: "test", baseURL: "http://127.0.0.1:11434" }
     }),
     checkPrivacyModel: async () => ({ ok: true }),
+    openLineageRepository: async () => {
+      lineageOpened += 1;
+      throw new Error("strict mode must not open lineage");
+    },
     sanitizer: async () => ({
       sanitizedPrompt: "Email [EMAIL_1]",
       sessionMap: { "[EMAIL_1]": "real@example.test" }
@@ -344,6 +417,7 @@ test("AGY strict launch sanitizes the prompt before spawning and keeps the guard
   });
 
   assert.equal(code, 23);
+  assert.equal(lineageOpened, 0);
   assert.equal(observed.binary, "/test/agy");
   assert.deepEqual(observed.args, ["--model", "auto", "--print", "Email [EMAIL_1]"]);
   assert.equal(observed.options.cwd, root);

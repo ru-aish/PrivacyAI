@@ -117,6 +117,62 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   await assert.rejects(access(spawned.options.env.PRIVACYAI_WRAPPER_DIR), /ENOENT/);
 });
 
+test("Codex gateway preserves injected lineage ownership and recorder injection", async () => {
+  const root = await createTestTempDir("privacyai-launch-lineage-injected-");
+  const configPath = await writeTestConfig(root);
+  let repositoryClosed = 0;
+  let gatewayOptions;
+  const lineageRepository = {
+    async append(event) { return event; },
+    close() { repositoryClosed += 1; }
+  };
+
+  const common = {
+    configPath,
+    binary: "/fake/stock-codex",
+    cwd: root,
+    launchLockDir: join(root, "locks"),
+    healthOptions: { skip: true },
+    verifyNativeExecutable: async () => ({ version: "test" }),
+    sanitizer: passThroughSanitizer,
+    auditCodexStaticStartupContext: async () => ({ fileCount: 0, serializedBytes: 0 }),
+    auditCodexStartupContext: async () => ({ itemCount: 1, primedItemCount: 1 }),
+    spawnInherited: async () => 0,
+    showLaunchProgress: false
+  };
+
+  const result = await launchNativeTui("codex", ["exec", "hello"], {
+    ...common,
+    lineageRepository,
+    verificationStore: new MemoryContextVerificationStore(),
+    startCodexProviderGateway: async options => {
+      gatewayOptions = options;
+      return { baseURL: "http://127.0.0.1:17777/test-nonce", async close() {} };
+    }
+  });
+
+  assert.equal(result, 0);
+  assert.equal(repositoryClosed, 0);
+  assert.equal(typeof gatewayOptions.lineageRecorder?.protectedRequest, "function");
+
+  let opened = 0;
+  const recorder = Object.freeze({ protectedRequest() {} });
+  await launchNativeTui("codex", ["exec", "hello"], {
+    ...common,
+    lineageRecorder: recorder,
+    openLineageRepository: async () => {
+      opened += 1;
+      throw new Error("must not open lineage");
+    },
+    verificationStore: new MemoryContextVerificationStore(),
+    startCodexProviderGateway: async options => {
+      assert.equal(options.lineageRecorder, recorder);
+      return { baseURL: "http://127.0.0.1:17777/test-nonce", async close() {} };
+    }
+  });
+  assert.equal(opened, 0);
+});
+
 test("Codex launcher survives classifier false positives on its synthetic startup shield", async t => {
   const root = await createTestTempDir("privacyai-launch-boundary-false-positive-");
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -503,6 +559,7 @@ test("explicit strict mode preflights before trust discovery and never starts a 
   const configPath = await writeTestConfig(root);
   const events = [];
   let gatewayStarted = false;
+  let lineageOpened = 0;
   let verificationStoreClosed = 0;
   let spawned;
 
@@ -517,6 +574,10 @@ test("explicit strict mode preflights before trust discovery and never starts a 
     sanitizer: passThroughSanitizer,
     verificationStore: {
       close() { verificationStoreClosed += 1; }
+    },
+    openLineageRepository: async () => {
+      lineageOpened += 1;
+      throw new Error("strict mode must not open lineage");
     },
     startCodexProviderGateway: async () => {
       gatewayStarted = true;
@@ -549,6 +610,7 @@ test("explicit strict mode preflights before trust discovery and never starts a 
   assert.equal(result, 0);
   assert.deepEqual(events, ["static", "trust", "render", "spawn"]);
   assert.equal(gatewayStarted, false);
+  assert.equal(lineageOpened, 0);
   assert.equal(verificationStoreClosed, 0);
   assert.equal(spawned.command, "/fake/python3");
   assert.equal(spawned.args.includes("--privacy-strict"), false);
