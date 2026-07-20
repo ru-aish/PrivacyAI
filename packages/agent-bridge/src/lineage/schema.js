@@ -214,7 +214,7 @@ function isBusy(error) {
     message.includes("database is locked") || message.includes("database is busy");
 }
 
-function validateSchemaVersion(db) {
+export function validateSchemaVersion(db) {
   const meta = db.prepare(
     "SELECT value FROM privacyai_lineage_meta WHERE key = 'schema_version'"
   ).get();

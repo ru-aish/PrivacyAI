@@ -33,8 +33,18 @@ export function isSqliteContention(error) {
 
 export function sanitizedContentionCause(_error) {
   const cause = new Error("SQLite reported local lineage contention.");
-  cause.code = "PRIVACYAI_LINEAGE_SQLITE_CONTENTION";
+  cause.code = sqliteContentionCode(_error);
   return cause;
+}
+
+function sqliteContentionCode(error) {
+  const seen = new Set();
+  for (let current = error; current && typeof current === "object" && !seen.has(current); current = current.cause) {
+    seen.add(current);
+    if (current.code === "SQLITE_LOCKED" || /table.*locked/i.test(String(current.message || ""))) return "SQLITE_LOCKED";
+    if (current.code === "SQLITE_BUSY" || /(?:database.*busy|database.*locked)/i.test(String(current.message || ""))) return "SQLITE_BUSY";
+  }
+  return "SQLITE_BUSY";
 }
 
 function throwIfAborted(signal) {
@@ -51,8 +61,10 @@ function delayWithAbort(ms, signal) {
       signal?.removeEventListener("abort", aborted);
       callback(value);
     };
-    const timer = setTimeout(finish(resolve), ms);
+    let timer;
     const aborted = () => finish(reject)(lineageError("PRIVACYAI_LINEAGE_ABORTED", "PrivacyAI lineage operation was cancelled."));
+    if (signal?.aborted) return aborted();
     if (signal) signal.addEventListener("abort", aborted, { once: true });
+    timer = setTimeout(finish(resolve), ms);
   });
 }

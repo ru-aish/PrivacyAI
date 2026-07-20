@@ -44,11 +44,12 @@ export async function openLineageRepository(options = {}) {
     configuredPath || `${homedir()}/.local/share/privacyai/lineage.sqlite3`
   );
   const parent = dirname(path);
-  const busyTimeoutMs = Math.min(100, positiveInteger(
+  const busyTimeoutMs = positiveInteger(
     options.lineageBusyTimeoutMs,
     DEFAULT_BUSY_TIMEOUT_MS,
-    "lineageBusyTimeoutMs"
-  ));
+    "lineageBusyTimeoutMs",
+    100
+  );
   const retryTimeoutMs = positiveInteger(
     options.lineageRetryTimeoutMs,
     DEFAULT_RETRY_TIMEOUT_MS,
@@ -219,13 +220,13 @@ async function secureSidecar(path) {
   }
 }
 
-function positiveInteger(value, fallback, name) {
+function positiveInteger(value, fallback, name, maximum = 60_000) {
   if (value == null) return fallback;
   const number = Number(value);
-  if (!Number.isSafeInteger(number) || number <= 0 || number > 60_000) {
+  if (!Number.isSafeInteger(number) || number <= 0 || number > maximum) {
     throw lineageError(
       "PRIVACYAI_LINEAGE_INVALID_OPTIONS",
-      `${name} must be a positive integer no greater than 60000.`
+      `${name} must be a positive integer no greater than ${maximum}.`
     );
   }
   return number;

@@ -513,6 +513,72 @@ test("multiple processes append concurrently without losing events", async t => 
   repository.close();
 });
 
+test("public SQLite append retries asynchronously, exhausts safely, and honours cancellation", async t => {
+  const { path, repository } = await fixture(t, { lineageBusyTimeoutMs: 10, lineageRetryTimeoutMs: 180 });
+  const parent = await repository.append(sessionEvent());
+  const before = lineageCounts(repository);
+  const { DatabaseSync } = await import("node:sqlite");
+  const lock = new DatabaseSync(path); lock.exec("BEGIN EXCLUSIVE");
+  let beats = 0;
+  const heartbeat = setInterval(() => { beats += 1; }, 2);
+  try {
+    const append = repository.append({
+      eventId: eventId("d"), sessionId: ids.session, eventType: "cache_miss", occurredAt: 31,
+      parentEventId: parent.eventId, cacheRef: opaque("cache", "d"), operation: "read", reasonCode: "cache_lookup"
+    });
+    const release = setTimeout(() => lock.exec("COMMIT"), 40);
+    await append;
+    clearTimeout(release);
+    assert.ok(beats > 0, "retry must leave the event loop responsive");
+  } finally { clearInterval(heartbeat); try { lock.exec("ROLLBACK"); } catch {} lock.close(); }
+
+  const exhausted = new DatabaseSync(path); exhausted.exec("BEGIN EXCLUSIVE");
+  try {
+    await assert.rejects(() => repository.append({
+      eventId: eventId("e"), sessionId: ids.session, eventType: "cache_miss", occurredAt: 32,
+      parentEventId: parent.eventId, cacheRef: opaque("cache", "e"), operation: "read", reasonCode: "cache_lookup"
+    }), error => error?.code === "PRIVACYAI_LINEAGE_BUSY" &&
+      ["SQLITE_BUSY", "SQLITE_LOCKED"].includes(error.cause?.code) &&
+      !/locked|busy/i.test(String(error.cause?.message || "")));
+    assert.deepEqual(lineageCounts(repository), { ...before, events: before.events + 1 });
+    const aborter = new AbortController();
+    const pending = repository.append({
+      eventId: eventId("f"), sessionId: ids.session, eventType: "cache_miss", occurredAt: 33,
+      parentEventId: parent.eventId, cacheRef: opaque("cache", "f"), operation: "read", reasonCode: "cache_lookup"
+    }, { signal: aborter.signal });
+    setTimeout(() => aborter.abort(), 20);
+    await assert.rejects(() => pending, error => error?.code === "PRIVACYAI_LINEAGE_ABORTED");
+    assert.deepEqual(lineageCounts(repository), { ...before, events: before.events + 1 });
+  } finally { exhausted.exec("ROLLBACK"); exhausted.close(); }
+});
+
+test("public SQLite schema initialization retries, exhausts, and cancels without partial schema", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-lineage-schema-lock-"));
+  await chmod(root, 0o700); t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "lineage.sqlite3");
+  const { DatabaseSync } = await import("node:sqlite");
+  const lock = new DatabaseSync(path); lock.exec("BEGIN EXCLUSIVE");
+  let beats = 0; const heartbeat = setInterval(() => { beats += 1; }, 2);
+  try {
+    const opening = openLineageRepository({ lineageDbPath: path, lineageBusyTimeoutMs: 10, lineageRetryTimeoutMs: 250 });
+    setTimeout(() => lock.exec("COMMIT"), 40);
+    const repository = await opening; repository.close();
+    assert.ok(beats > 0);
+  } finally { clearInterval(heartbeat); try { lock.exec("ROLLBACK"); } catch {} lock.close(); }
+  await rm(path, { force: true });
+  const blocked = new DatabaseSync(path); blocked.exec("BEGIN EXCLUSIVE");
+  try {
+    await assert.rejects(() => openLineageRepository({ lineageDbPath: path, lineageBusyTimeoutMs: 10, lineageRetryTimeoutMs: 25 }), error => error?.code === "PRIVACYAI_LINEAGE_BUSY");
+    const aborter = new AbortController();
+    const opening = openLineageRepository({ lineageDbPath: path, lineageBusyTimeoutMs: 10, lineageRetryTimeoutMs: 500, signal: aborter.signal });
+    setTimeout(() => aborter.abort(), 15);
+    await assert.rejects(() => opening, error => error?.code === "PRIVACYAI_LINEAGE_ABORTED");
+  } finally { blocked.exec("ROLLBACK"); blocked.close(); }
+  const verify = new DatabaseSync(path);
+  assert.equal(verify.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'privacyai_lineage_meta'").get().count, 0);
+  verify.close();
+});
+
 test("an interrupted uncommitted write is absent after recovery and later appends remain usable", async t => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-lineage-interrupt-"));
   await chmod(root, 0o700);
@@ -631,21 +697,48 @@ test("read-only inspection never creates or mutates lineage state", async t => {
   const { path, repository } = await fixture(t);
   await seed(repository);
   repository.close();
-  const before = await Promise.all([path, `${path}-wal`, `${path}-shm`].map(async candidate => {
-    try { const info = await stat(candidate); return [candidate, info.size, info.mtimeMs]; } catch { return [candidate, null]; }
-  }));
+  const before = await lineageFilesSnapshot(path);
   const inspection = await openLineageInspection({ lineageDbPath: path });
   assert.equal(inspection.chronological().length, 3);
-  assert.throws(() => inspection.database.exec("INSERT INTO lineage_events DEFAULT VALUES"));
+  assert.equal(Object.hasOwn(inspection, "database"), false);
+  assert.equal(Object.hasOwn(inspection, "append"), false);
+  assert.equal(Object.isFrozen(inspection), true);
   inspection.close();
-  const after = await Promise.all([path, `${path}-wal`, `${path}-shm`].map(async candidate => {
-    try { const info = await stat(candidate); return [candidate, info.size, info.mtimeMs]; } catch { return [candidate, null]; }
-  }));
+  const after = await lineageFilesSnapshot(path);
   assert.deepEqual(after, before);
   await assert.rejects(
     () => openLineageInspection({ lineageDbPath: join(dirname(path), "missing.sqlite3") }),
     error => error?.code === "PRIVACYAI_LINEAGE_NOT_FOUND"
   );
+});
+
+test("read-only inspection failures never create or mutate missing, malformed, unknown, or version-mismatched state", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-lineage-inspection-failures-"));
+  await chmod(root, 0o700);
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const { DatabaseSync } = await import("node:sqlite");
+  const cases = [];
+  const missing = join(root, "missing.sqlite3");
+  cases.push([missing, "PRIVACYAI_LINEAGE_NOT_FOUND"]);
+  const malformed = join(root, "malformed.sqlite3");
+  await writeFile(malformed, "not sqlite", { mode: 0o600 });
+  cases.push([malformed, "PRIVACYAI_LINEAGE_CORRUPT"]);
+  const unknown = join(root, "unknown.sqlite3");
+  let db = new DatabaseSync(unknown); db.exec("CREATE TABLE unrelated(value TEXT)"); db.close();
+  cases.push([unknown, "PRIVACYAI_LINEAGE_SCHEMA_INVALID"]);
+  for (const [version, code] of [["0", "PRIVACYAI_LINEAGE_SCHEMA_MIGRATION_REQUIRED"], ["999", "PRIVACYAI_LINEAGE_SCHEMA_UNSUPPORTED"]]) {
+    const path = join(root, `version-${version}.sqlite3`);
+    const repository = await openLineageRepository({ lineageDbPath: path }); repository.close();
+    db = new DatabaseSync(path);
+    db.prepare("UPDATE privacyai_lineage_meta SET value = ? WHERE key = 'schema_version'").run(version);
+    db.close();
+    cases.push([path, code]);
+  }
+  for (const [path, code] of cases) {
+    const before = await lineageFilesSnapshot(path);
+    await assert.rejects(() => openLineageInspection({ lineageDbPath: path }), error => error?.code === code);
+    assert.deepEqual(await lineageFilesSnapshot(path), before, path);
+  }
 });
 
 test("recorder persists only opaque lifecycle references for protected provider traffic", async t => {
@@ -664,6 +757,29 @@ test("recorder persists only opaque lifecycle references for protected provider 
   repository.close();
   const bytes = await readFile(path);
   assert.equal(bytes.includes(Buffer.from(secret)), false);
+});
+
+test("recorder records cache-hit requests with reused mappings without duplicate origins", async t => {
+  const { repository } = await fixture(t);
+  const recorder = createLineageRecorder(repository);
+  const first = await recorder.protectedRequest({
+    sessionKey: "cache-session", provider: "codex", operation: "responses.create",
+    placeholders: ["[EMAIL_1]"], cacheActivity: { misses: 1, writes: 1 }
+  });
+  await recorder.providerResponse(first, { success: true });
+  await recorder.restoration(first, { restoredCount: 1 });
+  const second = await recorder.protectedRequest({
+    sessionKey: "cache-session", provider: "codex", operation: "responses.create",
+    placeholders: ["[EMAIL_1]"], cacheActivity: { hits: 1 }
+  });
+  await recorder.providerResponse(second, { success: true });
+  await recorder.restoration(second, { restoredCount: 1 });
+  const events = repository.chronological();
+  assert.equal(events.filter(event => event.eventType === "value_protected").length, 1);
+  assert.equal(events.filter(event => event.eventType === "placeholder_assigned").length, 1);
+  assert.deepEqual(events.slice(-4).map(event => event.eventType), [
+    "cache_hit", "provider_request", "provider_response", "restoration"
+  ]);
 });
 
 function runChild(args) {
@@ -712,4 +828,26 @@ function waitForLine(child, expected) {
 function waitForExit(child) {
   if (child.exitCode != null || child.signalCode != null) return Promise.resolve();
   return new Promise(resolve => child.once("close", resolve));
+}
+
+async function lineageFilesSnapshot(path) {
+  return Promise.all([path, `${path}-wal`, `${path}-shm`].map(async candidate => {
+    try {
+      const info = await stat(candidate);
+      return [candidate, info.size, info.mtimeMs, info.mode & 0o777];
+    } catch (error) {
+      if (error?.code === "ENOENT") return [candidate, null, null, null];
+      throw error;
+    }
+  }));
+}
+
+function lineageCounts(repository) {
+  const events = repository.chronological();
+  return {
+    events: events.length,
+    sessions: events.filter(event => event.eventType === "session_created").length,
+    values: events.filter(event => event.eventType === "value_protected").length,
+    placeholders: events.filter(event => event.eventType === "placeholder_assigned").length
+  };
 }

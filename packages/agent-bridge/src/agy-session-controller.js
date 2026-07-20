@@ -113,13 +113,13 @@ export async function createAgySessionController(options = {}) {
           onBatchComplete: context.onSanitizerBatchComplete,
           onArtifactComplete: context.onSanitizerArtifactComplete
         });
+        const candidateMap = mergeAgySessionMaps(sessionMap, result.sessionMapAdditions);
         const lineageHandle = await recordLineage(context.lineageRecorder, "protectedRequest", {
           sessionKey, provider: "antigravity", operation: "generate_content",
-          placeholders: Object.keys(result.sessionMapAdditions), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: requestOptions.signal
+          placeholders: Object.keys(candidateMap), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: requestOptions.signal
         });
         throwIfAborted(requestOptions.signal);
 
-        const candidateMap = mergeAgySessionMaps(sessionMap, result.sessionMapAdditions);
         let completeMap = candidateMap;
         if (!sessionMapsEqual(currentVault?.sessionMap || {}, candidateMap)) {
           const persisted = await context.vault.update(sessionKey, latest =>

@@ -324,13 +324,13 @@ async function handleRequestCore(request, response, context) {
       onArtifactComplete: context.onSanitizerArtifactComplete,
       onSchemaTrace: context.onSchemaTrace
     });
+    const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
     const lineageHandle = await recordLineage(context.lineageRecorder, "protectedRequest", {
       sessionKey: identity.sessionKey, provider: "codex", operation: "responses.create",
       model: typeof body.model === "string" ? body.model : undefined,
-      placeholders: Object.keys(result.sessionMapAdditions), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: context.requestSignal
+      placeholders: Object.keys(completeMap), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: context.requestSignal
     });
     throwIfAborted(context.requestSignal);
-    const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
     if (!sessionMapsEqual(currentVault?.sessionMap || {}, completeMap)) {
       await context.vault.save(identity.sessionKey, completeMap);
     }

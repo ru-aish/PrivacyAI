@@ -113,7 +113,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   let ownsLineageRepository = false;
 
   try {
-    if (flavor === "codex") {
+    if (flavor === "codex" && codexInvocation.mode === "gateway") {
       launchLock = await (options.acquireNativeLaunchLock || acquireNativeLaunchLock)(
         flavor,
         cwd,

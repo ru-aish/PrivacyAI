@@ -18,6 +18,7 @@ import {
   openLineageRepository
 } from "../src/lineage/index.js";
 import { initializeLineageSchema } from "../src/lineage/schema.js";
+import { isSqliteContention, retryLineageContention, sanitizedContentionCause } from "../src/lineage/retry.js";
 
 const opaque = (namespace, character) => `${namespace}:${character.repeat(32)}`;
 
@@ -110,4 +111,40 @@ test("closed repositories fail before traversal argument validation", async t =>
       error => error?.code === "PRIVACYAI_LINEAGE_CLOSED"
     );
   }
+});
+
+test("busy timeout is bounded and nested SQLite lock errors retain only a conventional sanitized code", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-lineage-busy-options-"));
+  await chmod(root, 0o700); t.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(
+    () => openLineageRepository({ lineageDbPath: join(root, "lineage.sqlite3"), lineageBusyTimeoutMs: 101 }),
+    error => error?.code === "PRIVACYAI_LINEAGE_INVALID_OPTIONS"
+  );
+  const nested = { cause: { code: "ERR_SQLITE_ERROR", message: "private table is locked: raw-secret" } };
+  assert.equal(isSqliteContention(nested), true);
+  const cause = sanitizedContentionCause(nested);
+  assert.equal(cause.code, "SQLITE_LOCKED");
+  assert.equal(cause.message.includes("raw-secret"), false);
+});
+
+test("retry rejects already-aborted signals and removes its abort listener", async () => {
+  const already = new AbortController(); already.abort();
+  await assert.rejects(
+    () => retryLineageContention(() => { throw Object.assign(new Error("database is busy"), { code: "SQLITE_BUSY" }); }, { timeoutMs: 100, signal: already.signal }),
+    error => error?.code === "PRIVACYAI_LINEAGE_ABORTED"
+  );
+  let adds = 0; let removes = 0;
+  const signal = {
+    aborted: false,
+    addEventListener() { adds += 1; },
+    removeEventListener() { removes += 1; }
+  };
+  let attempts = 0;
+  await retryLineageContention(() => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error("database is busy"), { code: "SQLITE_BUSY" });
+    return "ok";
+  }, { timeoutMs: 100, signal });
+  assert.equal(adds, 1);
+  assert.equal(removes, 1);
 });

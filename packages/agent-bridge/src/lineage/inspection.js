@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { lineageError } from "./domain.js";
-import { validateLineageSchema } from "./schema.js";
+import { validateLineageSchema, validateSchemaVersion } from "./schema.js";
 import { SqliteLineageRepository } from "./sqlite-repository.js";
 
 /**
@@ -30,6 +30,7 @@ export async function openLineageInspection(options = {}) {
     // immutable=1 prevents SQLite's WAL read machinery from creating -wal/-shm
     // sidecars. Inspection is intentionally a snapshot, never a live repair.
     database = new sqlite.DatabaseSync(`${pathToFileURL(path).href}?immutable=1`, { readOnly: true });
+    validateSchemaVersion(database);
     validateLineageSchema(database);
     const repository = new SqliteLineageRepository(database, path, { readOnly: true, lineageRetryTimeoutMs: 1 });
     // Do not return the repository: its database and append members are an
