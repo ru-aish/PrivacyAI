@@ -86,6 +86,8 @@ export async function openInstallationPrivacyIdentity(options = {}) {
       if (error?.code !== "EEXIST" && error?.code !== "ENOENT") throw error;
     }
     await lock.assertOwned();
+    await rm(tempPath, { force: true });
+    tempPath = null;
 
     let identityRoot;
     try {
