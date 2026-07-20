@@ -143,6 +143,126 @@ test("CLI inspection returns metadata without stored originals", async t => {
   }
 });
 
+test("CLI inspection fails closed for corrupt persisted JSON metadata", async t => {
+  let sqlite;
+  try {
+    sqlite = await import("node:sqlite");
+  } catch (error) {
+    if (error?.code === "ERR_UNKNOWN_BUILTIN_MODULE" || error?.code === "ERR_MODULE_NOT_FOUND") {
+      t.skip("node:sqlite is unavailable");
+      return;
+    }
+    throw error;
+  }
+
+  const cases = [
+    {
+      name: "parent_keys_json",
+      corrupt(database, privateValue) {
+        database.prepare("UPDATE threads SET parent_keys_json = ? WHERE session_key = ?")
+          .run(privateValue, "session-hash");
+      },
+      inspect(service) {
+        return service.inspectLineage({ action: "show", key: "session-hash" });
+      }
+    },
+    {
+      name: "session_map_json",
+      corrupt(database, privateValue) {
+        database.prepare("UPDATE threads SET session_map_json = ? WHERE session_key = ?")
+          .run(privateValue, "session-hash");
+      },
+      inspect(service) {
+        return service.inspectLineage({ action: "show", key: "session-hash" });
+      }
+    },
+    {
+      name: "additions_json",
+      corrupt(database, privateValue) {
+        database.prepare("UPDATE verified_items SET additions_json = ? WHERE cache_key = ?")
+          .run(privateValue, "cache-hash");
+      },
+      inspect(service) {
+        return service.inspectCache({ action: "show", key: "cache-hash" });
+      }
+    }
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const root = await mkdtemp(join(tmpdir(), `privacyai-inspection-corrupt-${scenario.name}-`));
+      const path = join(root, "context.sqlite3");
+      const privateValue = `not-json-private-${scenario.name}`;
+      let database;
+      let service;
+      try {
+        database = new sqlite.DatabaseSync(path);
+        database.exec(`
+          CREATE TABLE privacyai_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          CREATE TABLE threads(
+            session_key TEXT PRIMARY KEY,
+            parent_keys_json TEXT NOT NULL,
+            session_map_json TEXT NOT NULL,
+            policy_fingerprint TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+          );
+          CREATE TABLE verified_items(
+            cache_key TEXT PRIMARY KEY,
+            content_hash TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            policy_fingerprint TEXT NOT NULL,
+            additions_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            last_used_at INTEGER NOT NULL,
+            hit_count INTEGER NOT NULL
+          );
+          CREATE TABLE thread_items(
+            session_key TEXT NOT NULL,
+            slot_key TEXT NOT NULL,
+            cache_key TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            artifact_type TEXT NOT NULL,
+            last_seen_at INTEGER NOT NULL
+          );
+          CREATE TABLE ledger_worktrees(worktree_id TEXT PRIMARY KEY);
+          CREATE TABLE ledger_manifests(manifest_hash TEXT PRIMARY KEY);
+          CREATE TABLE ledger_file_mutations(mutation_id TEXT PRIMARY KEY);
+        `);
+        database.prepare("INSERT INTO privacyai_meta(key,value) VALUES('schema_version','3')").run();
+        database.prepare(`
+          INSERT INTO threads(session_key,parent_keys_json,session_map_json,policy_fingerprint,updated_at)
+          VALUES(?,?,?,?,?)
+        `).run("session-hash", "[]", "{}", "policy-hash", 10);
+        database.prepare(`
+          INSERT INTO verified_items(cache_key,content_hash,artifact_type,policy_fingerprint,additions_json,created_at,last_used_at,hit_count)
+          VALUES(?,?,?,?,?,?,?,?)
+        `).run("cache-hash", "content-hash", "prompt", "policy-hash", "{}", 1, 2, 3);
+        scenario.corrupt(database, privateValue);
+        database.close();
+        database = null;
+
+        service = await createCliInspectionService({ verificationDbPath: path });
+        assert.throws(
+          () => scenario.inspect(service),
+          error =>
+            error?.code === "PRIVACYAI_INSPECTION_CORRUPT" &&
+            error.message === "PrivacyAI local state contains invalid inspection metadata." &&
+            !error.message.includes(privateValue) &&
+            !error.message.includes(path)
+        );
+      } finally {
+        service?.close();
+        try {
+          database?.close();
+        } catch {
+          // Cleanup only.
+        }
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("CLI inspection reads pre-v3 mutations without requiring a writable migration", async t => {
   let sqlite;
   try {

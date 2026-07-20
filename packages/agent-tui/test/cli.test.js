@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -274,6 +277,107 @@ test("missing inspection records use exit code 4 and stderr only", async () => {
   assert.equal(code, CLI_EXIT_CODES.notFound);
   assert.equal(stdout.text(), "");
   assert.equal(stderr.text(), "Cache entry not found.\n");
+});
+
+test("corrupt inspection state uses exit code 1 and stderr only", async t => {
+  let sqlite;
+  try {
+    sqlite = await import("node:sqlite");
+  } catch (error) {
+    if (error?.code === "ERR_UNKNOWN_BUILTIN_MODULE" || error?.code === "ERR_MODULE_NOT_FOUND") {
+      t.skip("node:sqlite is unavailable");
+      return;
+    }
+    throw error;
+  }
+
+  const root = await mkdtemp(join(tmpdir(), "privacyai-cli-corrupt-inspection-"));
+  const path = join(root, "context.sqlite3");
+  const privateValue = "not-json-private@example.test";
+  const publicMessage = "PrivacyAI local state contains invalid inspection metadata.";
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const database = new sqlite.DatabaseSync(path);
+  database.exec(`
+    CREATE TABLE privacyai_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE threads(
+      session_key TEXT PRIMARY KEY,
+      parent_keys_json TEXT NOT NULL,
+      session_map_json TEXT NOT NULL,
+      policy_fingerprint TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE verified_items(
+      cache_key TEXT PRIMARY KEY,
+      content_hash TEXT NOT NULL,
+      artifact_type TEXT NOT NULL,
+      policy_fingerprint TEXT NOT NULL,
+      additions_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER NOT NULL,
+      hit_count INTEGER NOT NULL
+    );
+    CREATE TABLE thread_items(
+      session_key TEXT NOT NULL,
+      slot_key TEXT NOT NULL,
+      cache_key TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      artifact_type TEXT NOT NULL,
+      last_seen_at INTEGER NOT NULL
+    );
+    CREATE TABLE ledger_worktrees(worktree_id TEXT PRIMARY KEY);
+    CREATE TABLE ledger_manifests(manifest_hash TEXT PRIMARY KEY);
+    CREATE TABLE ledger_file_mutations(mutation_id TEXT PRIMARY KEY);
+  `);
+  database.prepare("INSERT INTO privacyai_meta(key,value) VALUES('schema_version','3')").run();
+  database.prepare("INSERT INTO threads VALUES(?,?,?,?,?)")
+    .run("session-hash", "[]", "{}", "policy-hash", 10);
+  database.prepare("INSERT INTO verified_items VALUES(?,?,?,?,?,?,?,?)")
+    .run("cache-hash", "content-hash", "prompt", "policy-hash", "{}", 1, 2, 3);
+  database.close();
+
+  const scenarios = [
+    {
+      argv: ["lineage", "show", "session-hash", "--json"],
+      corrupt(db) {
+        db.prepare("UPDATE threads SET parent_keys_json = ?, session_map_json = '{}' WHERE session_key = ?")
+          .run(privateValue, "session-hash");
+      }
+    },
+    {
+      argv: ["lineage", "show", "session-hash", "--json"],
+      corrupt(db) {
+        db.prepare("UPDATE threads SET parent_keys_json = '[]', session_map_json = ? WHERE session_key = ?")
+          .run(privateValue, "session-hash");
+      }
+    },
+    {
+      argv: ["cache", "show", "cache-hash", "--json"],
+      corrupt(db) {
+        db.prepare("UPDATE verified_items SET additions_json = ? WHERE cache_key = ?")
+          .run(privateValue, "cache-hash");
+      }
+    }
+  ];
+
+  for (const scenario of scenarios) {
+    const writer = new sqlite.DatabaseSync(path);
+    scenario.corrupt(writer);
+    writer.close();
+
+    const stdout = capture();
+    const stderr = capture();
+    const code = await runPrivacyAiCli(scenario.argv, {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      verificationDbPath: path
+    });
+    assert.equal(code, CLI_EXIT_CODES.failure);
+    assert.equal(stdout.text(), "");
+    assert.equal(stderr.text(), `${publicMessage}\n`);
+    assert.equal(stderr.text().includes(privateValue), false);
+    assert.equal(stderr.text().includes(path), false);
+  }
 });
 
 test("the real binary exposes help and version without loading an agent", async () => {

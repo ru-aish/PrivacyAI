@@ -300,22 +300,27 @@ function normalizeNumbers(row) {
 }
 
 function parseJsonArray(value) {
-  try {
-    const parsed = JSON.parse(String(value || "[]"));
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  return parseStoredJson(value, Array.isArray);
 }
 
 function jsonObjectKeyCount(value) {
+  const parsed = parseStoredJson(
+    value,
+    item => Boolean(item) && typeof item === "object" && !Array.isArray(item)
+  );
+  return Object.keys(parsed).length;
+}
+
+function parseStoredJson(value, isExpectedShape) {
   try {
-    const parsed = JSON.parse(String(value || "{}"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? Object.keys(parsed).length
-      : 0;
+    const parsed = JSON.parse(String(value));
+    if (!isExpectedShape(parsed)) throw new TypeError("Unexpected stored JSON shape.");
+    return parsed;
   } catch {
-    return 0;
+    throw inspectionError(
+      "PRIVACYAI_INSPECTION_CORRUPT",
+      "PrivacyAI local state contains invalid inspection metadata."
+    );
   }
 }
 
