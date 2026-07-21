@@ -8,7 +8,7 @@
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "demo": "pnpm --filter @privacy-ai/web-demo dev",
-    "test:deployment-assurance": "node scripts/deployment-assurance/run.mjs"
+    "test:deployment-assurance": "python3 scripts/deployment-assurance/pty-runner.test.py && node scripts/deployment-assurance/run.mjs"
   },
   "dependencies": {
     "@privacy-ai/sdk": "workspace:*"

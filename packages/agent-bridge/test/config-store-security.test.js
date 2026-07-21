@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import {
   chmod,
   link,
+  lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   rm,
@@ -44,6 +46,39 @@ test("configuration storage creates private state and preserves safe caller dire
   assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
 
+test("macOS configuration writes do not require descriptor-path traversal", {
+  skip: process.platform === "win32"
+}, async t => {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  Object.defineProperty(process, "platform", { ...platformDescriptor, value: "darwin" });
+  t.after(() => Object.defineProperty(process, "platform", platformDescriptor));
+  const root = await temporaryRoot(t, "privacyai-config-darwin-path-");
+  const path = join(root, "config.json");
+
+  await savePrivacyConfig(FIXED_CONFIG, { path });
+  const loaded = await loadPrivacyConfig({ path });
+
+  assert.equal(loaded.configured, true);
+  assert.equal(loaded.config.model, FIXED_CONFIG.model);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+});
+
+test("configuration storage accepts trusted macOS system symlink ancestors", {
+  skip: process.platform !== "darwin"
+}, async t => {
+  assert.equal((await lstat("/var")).isSymbolicLink(), true);
+  const root = await mkdtemp("/var/tmp/privacyai-config-system-alias-");
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const path = join(root, "config.json");
+
+  await savePrivacyConfig(FIXED_CONFIG, { path });
+  const loaded = await loadPrivacyConfig({ path });
+
+  assert.equal(loaded.configured, true);
+  assert.equal(loaded.config.model, FIXED_CONFIG.model);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+});
+
 test("configuration storage rejects symlinked parents and files without redirected writes", {
   skip: process.platform === "win32"
 }, async t => {
@@ -57,6 +92,15 @@ test("configuration storage rejects symlinked parents and files without redirect
     savePrivacyConfig(FIXED_CONFIG, { path: join(linkedDirectory, "config.json") })
   );
   assert.deepEqual(await readdir(redirected), []);
+
+  const nestedRedirect = join(redirected, "nested");
+  await mkdir(nestedRedirect, { mode: 0o700 });
+  await assertConfigFailure(
+    savePrivacyConfig(FIXED_CONFIG, {
+      path: join(linkedDirectory, "nested", "config.json")
+    })
+  );
+  assert.deepEqual(await readdir(nestedRedirect), []);
 
   const realDirectory = join(root, "real-config");
   const target = join(root, "target.json");
@@ -103,6 +147,45 @@ test("failed configuration replacement removes private temporary files", {
   await assertConfigFailure(savePrivacyConfig(FIXED_CONFIG, { path }));
   assert.deepEqual(await readdir(root), ["config.json"]);
   assert.deepEqual(await readdir(path), []);
+});
+
+test("configuration storage tolerates only unsupported fsync errors", {
+  skip: process.platform === "win32"
+}, async t => {
+  const root = await temporaryRoot(t, "privacyai-config-fsync-");
+  const path = join(root, "config.json");
+  const probePath = join(root, "probe");
+  const probe = await open(probePath, "w");
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  const originalSync = fileHandlePrototype.sync;
+  await probe.close();
+  await rm(probePath, { force: true });
+  t.after(() => { fileHandlePrototype.sync = originalSync; });
+
+  for (const code of ["EINVAL", "ENOTSUP"]) {
+    let syncCalls = 0;
+    fileHandlePrototype.sync = async function fixtureUnsupportedSync() {
+      syncCalls += 1;
+      const error = new Error("fixture unsupported fsync");
+      error.code = code;
+      throw error;
+    };
+    const model = "assurance-" + code;
+    await savePrivacyConfig({ ...FIXED_CONFIG, model }, { path });
+    assert.ok(syncCalls >= 2, code + " must exercise file and directory synchronization");
+    assert.equal((await loadPrivacyConfig({ path })).config.model, model);
+  }
+
+  fileHandlePrototype.sync = async function fixtureUnexpectedSyncFailure() {
+    const error = new Error("fixture unexpected fsync failure");
+    error.code = "EIO";
+    throw error;
+  };
+  await assertConfigFailure(
+    savePrivacyConfig({ ...FIXED_CONFIG, model: "must-not-replace" }, { path })
+  );
+  assert.equal((await loadPrivacyConfig({ path })).config.model, "assurance-ENOTSUP");
+  assert.deepEqual(await readdir(root), ["config.json"]);
 });
 
 async function temporaryRoot(t, prefix) {

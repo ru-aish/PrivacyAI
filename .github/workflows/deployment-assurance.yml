@@ -109,3 +109,28 @@ jobs:
           path: deployment-assurance.log
           if-no-files-found: ignore
           retention-days: 3
+
+  macos-installed-release-gate:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - name: Test macOS installed deployment lifecycle
+        run: pnpm test:deployment-assurance
+      - name: Test macOS configuration storage boundaries
+        run: node --test packages/agent-bridge/test/config-store-security.test.js

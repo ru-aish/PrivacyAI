@@ -62,12 +62,12 @@ export async function savePrivacyConfig(config, options = {}) {
       storage.operationDirectoryPath,
       `${storage.fileName}.${process.pid}.${randomUUID()}.tmp`
     );
-    await writePrivateConfig(tempPath, normalized);
+    await writePrivateConfig(tempPath, normalized, storage);
     await assertConfigStorageStable(storage);
     await rename(tempPath, storage.filePath);
-    tempPath = null;
     await assertPrivateConfig(storage);
-    await syncDirectory(storage.directoryHandle);
+    tempPath = null;
+    await syncHandle(storage.directoryHandle);
     return { path, config: normalized };
   } catch (error) {
     throw configStorageError(error, "storage_write");
@@ -156,9 +156,10 @@ async function openConfigStorage(path, options) {
       throw new Error("PrivacyAI configuration directory changed during access.");
     }
 
-    const operationDirectoryPath = await configDirectoryDescriptorPath(
+    const operationDirectoryPath = await configDirectoryOperationPath(
       directoryHandle,
-      openedMetadata
+      openedMetadata,
+      directoryPath
     );
     const fileName = basename(path);
     return {
@@ -176,9 +177,11 @@ async function openConfigStorage(path, options) {
 }
 
 async function ensureDirectoryComponents(path, create) {
-  for (const component of directoryComponents(path)) {
+  const components = directoryComponents(path);
+  for (const [index, component] of components.entries()) {
+    const final = index === components.length - 1;
     try {
-      validateConfigDirectory(await lstat(component));
+      await validateConfigPathComponent(component, await lstat(component), { final });
     } catch (error) {
       if (error?.code !== "ENOENT" || !create) throw error;
       try {
@@ -186,15 +189,18 @@ async function ensureDirectoryComponents(path, create) {
       } catch (mkdirError) {
         if (mkdirError?.code !== "EEXIST") throw mkdirError;
       }
-      validateConfigDirectory(await lstat(component));
+      await validateConfigPathComponent(component, await lstat(component), { final });
     }
   }
   await validateDirectoryComponents(path);
 }
 
 async function validateDirectoryComponents(path) {
-  for (const component of directoryComponents(path)) {
-    validateConfigDirectory(await lstat(component));
+  const components = directoryComponents(path);
+  for (const [index, component] of components.entries()) {
+    await validateConfigPathComponent(component, await lstat(component), {
+      final: index === components.length - 1
+    });
   }
 }
 
@@ -210,6 +216,32 @@ function directoryComponents(path) {
   return components;
 }
 
+async function validateConfigPathComponent(path, metadata, options = {}) {
+  if (!metadata.isSymbolicLink()) {
+    validateConfigDirectory(metadata, options);
+    return;
+  }
+  if (options.final || !await isTrustedSystemDirectorySymlink(path, metadata)) {
+    throw new Error("PrivacyAI configuration path contains an unsafe filesystem entry.");
+  }
+}
+
+async function isTrustedSystemDirectorySymlink(path, metadata) {
+  if (typeof process.getuid !== "function" || metadata.uid !== 0) return false;
+  const [parentMetadata, targetMetadata] = await Promise.all([
+    stat(dirname(path)),
+    stat(path)
+  ]);
+  return (
+    parentMetadata.isDirectory() &&
+    parentMetadata.uid === 0 &&
+    (parentMetadata.mode & 0o022) === 0 &&
+    targetMetadata.isDirectory() &&
+    targetMetadata.uid === 0 &&
+    (targetMetadata.mode & 0o022) === 0
+  );
+}
+
 function validateConfigDirectory(metadata, options = {}) {
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
     throw new Error("PrivacyAI configuration path contains an unsafe filesystem entry.");
@@ -223,32 +255,42 @@ function validateConfigDirectory(metadata, options = {}) {
   }
 }
 
-async function configDirectoryDescriptorPath(directoryHandle, directoryMetadata) {
-  const candidates = process.platform === "linux"
-    ? [`/proc/self/fd/${directoryHandle.fd}`, `/dev/fd/${directoryHandle.fd}`]
-    : [`/dev/fd/${directoryHandle.fd}`, `/proc/self/fd/${directoryHandle.fd}`];
-  for (const candidate of candidates) {
+async function configDirectoryOperationPath(directoryHandle, directoryMetadata, directoryPath) {
+  if (process.platform === "darwin") {
+    // macOS /dev/fd duplicates descriptors but does not provide openat-style traversal.
+    // File creation is validated against the held directory before any private bytes are written.
+    return directoryPath;
+  }
+  if (process.platform !== "linux") {
+    throw new Error("PrivacyAI configuration storage requires Linux or macOS.");
+  }
+  for (const candidate of [
+    "/proc/self/fd/" + directoryHandle.fd,
+    "/dev/fd/" + directoryHandle.fd
+  ]) {
     try {
       if (sameFile(await stat(candidate), directoryMetadata)) return candidate;
     } catch {
-      // Try the next platform descriptor namespace.
+      // Try the next Linux descriptor namespace.
     }
   }
   throw new Error("PrivacyAI configuration storage requires descriptor-relative access.");
 }
 
 async function assertReplaceableConfigTarget(storage) {
+  await assertConfigStorageStable(storage);
   try {
     validatePrivateConfigMetadata(
       await lstat(join(storage.directoryPath, storage.fileName))
     );
   } catch (error) {
-    if (error?.code === "ENOENT") return;
-    throw error;
+    if (error?.code !== "ENOENT") throw error;
   }
+  await assertConfigStorageStable(storage);
 }
 
 async function readPrivateConfig(storage) {
+  await assertConfigStorageStable(storage);
   const handle = await open(
     storage.filePath,
     constants.O_RDONLY | (constants.O_NOFOLLOW || 0) | (constants.O_NONBLOCK || 0)
@@ -268,7 +310,7 @@ async function readPrivateConfig(storage) {
   }
 }
 
-async function writePrivateConfig(path, config) {
+async function writePrivateConfig(path, config, storage) {
   let handle;
   try {
     const flags = constants.O_WRONLY |
@@ -276,15 +318,17 @@ async function writePrivateConfig(path, config) {
       constants.O_EXCL |
       (constants.O_NOFOLLOW || 0);
     handle = await open(path, flags, 0o600);
-    await handle.writeFile(`${JSON.stringify(config, null, 2)}\n`, "utf8");
+    await assertConfigStorageStable(storage);
+    await handle.writeFile(JSON.stringify(config, null, 2) + "\n", "utf8");
     await handle.chmod(0o600);
-    await handle.sync();
+    await syncHandle(handle);
   } finally {
     await handle?.close().catch(() => {});
   }
 }
 
 async function assertPrivateConfig(storage) {
+  await assertConfigStorageStable(storage);
   const handle = await open(
     storage.filePath,
     constants.O_RDONLY | (constants.O_NOFOLLOW || 0)
@@ -329,9 +373,9 @@ async function assertConfigStorageStable(storage) {
   }
 }
 
-async function syncDirectory(directoryHandle) {
+async function syncHandle(handle) {
   try {
-    await directoryHandle.sync();
+    await handle.sync();
   } catch (error) {
     if (error?.code !== "EINVAL" && error?.code !== "ENOTSUP") throw error;
   }

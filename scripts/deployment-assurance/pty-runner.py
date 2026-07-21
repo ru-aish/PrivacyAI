@@ -27,6 +27,14 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def kill_process_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError as error:
+        if error.errno != errno.ESRCH:
+            raise
+
+
 def main() -> int:
     args = parse_args()
     master, slave = pty.openpty()
@@ -47,7 +55,7 @@ def main() -> int:
     try:
         while True:
             if time.monotonic() >= deadline:
-                os.killpg(child.pid, signal.SIGKILL)
+                kill_process_group(child.pid)
                 child.wait()
                 print("deployment assurance PTY command timed out", file=sys.stderr)
                 return 124
@@ -82,7 +90,7 @@ def main() -> int:
     finally:
         os.close(master)
         if child.poll() is None:
-            os.killpg(child.pid, signal.SIGKILL)
+            kill_process_group(child.pid)
             child.wait()
 
 
