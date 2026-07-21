@@ -4,6 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { MemoryContextVerificationStore, openContextVerificationStore } from "../src/context-verification-store.js";
+import { initializeSchema } from "../src/context-repository/schema.js";
 import { stageProvenancedMutation } from "../src/mutation-provenance.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
@@ -30,6 +31,13 @@ test("migrates a v1 context database and retains existing records", async t => {
   const db = new sqlite.DatabaseSync(path);
   db.exec("CREATE TABLE privacyai_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); CREATE TABLE threads (session_key TEXT PRIMARY KEY,parent_keys_json TEXT NOT NULL,session_map_json TEXT NOT NULL,policy_fingerprint TEXT NOT NULL,updated_at INTEGER NOT NULL); INSERT INTO privacyai_meta VALUES ('schema_version','1'); INSERT INTO threads VALUES ('old','[]','{}','policy',1)");
   db.close();
+  await assert.rejects(
+    openContextVerificationStore({ verificationDbPath: path }),
+    error => error?.code === "PRIVACYAI_CONTEXT_DB_SCHEMA_MIGRATION_REQUIRED"
+  );
+  const migration = new sqlite.DatabaseSync(path);
+  initializeSchema(migration, { allowMigration: true });
+  migration.close();
   const value = await openContextVerificationStore({ verificationDbPath: path });
   t.after(() => value.close());
   assert.equal(value.loadThread("old").policyFingerprint, "policy");
@@ -41,6 +49,13 @@ test("migrates v2 mutations to v3 child geometry tables", async t => {
   const root = await createTestTempDir("privacyai-ledger-v2-migration-"); const path = join(root, "ledger.sqlite3");
   const db = new sqlite.DatabaseSync(path);
   db.exec("CREATE TABLE privacyai_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO privacyai_meta VALUES ('schema_version','2'); CREATE TABLE ledger_file_mutations (mutation_id TEXT PRIMARY KEY,worktree_id TEXT NOT NULL,path_hash TEXT NOT NULL,expected_content_hash TEXT NOT NULL,next_content_hash TEXT NOT NULL,manifest_hash TEXT,status TEXT NOT NULL,opaque_reference TEXT NOT NULL,committed_reference TEXT,created_at INTEGER NOT NULL,last_used_at INTEGER NOT NULL);"); db.close();
+  await assert.rejects(
+    openContextVerificationStore({ verificationDbPath: path }),
+    error => error?.code === "PRIVACYAI_CONTEXT_DB_SCHEMA_MIGRATION_REQUIRED"
+  );
+  const migration = new sqlite.DatabaseSync(path);
+  initializeSchema(migration, { allowMigration: true });
+  migration.close();
   const value = await openContextVerificationStore({ verificationDbPath: path }); t.after(() => value.close());
   assert.deepEqual(value.database.prepare("PRAGMA table_info(ledger_file_mutations)").all().map(column => column.name).filter(name => ["operation_type", "source_length", "next_length"].includes(name)), ["operation_type", "source_length", "next_length"]);
   assert.equal(value.database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ledger_file_mutation_edits'").get().name, "ledger_file_mutation_edits");

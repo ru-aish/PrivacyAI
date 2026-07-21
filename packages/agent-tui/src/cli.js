@@ -95,6 +95,14 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
       return await runLineage(args, { ...options, stdout, stderr });
     }
 
+    if (command === "state") {
+      if (isHelpRequest(args)) {
+        printStateHelp(stdout);
+        return CLI_EXIT_CODES.success;
+      }
+      return await runState(args, { ...options, stdout, stderr });
+    }
+
     throw usageError(`Unknown PrivacyAI command: ${command}`);
   } catch (error) {
     const exitCode = exitCodeForError(error);
@@ -113,7 +121,8 @@ export function printHelp(output = process.stdout) {
   output.write("  privacyai doctor [--json]       Check configuration, model, agents, and local state\n");
   output.write("  privacyai agent <name> [...]    Launch claude, codex, or agy through PrivacyAI\n");
   output.write("  privacyai cache [command]       Inspect protected cache metadata\n");
-  output.write("  privacyai lineage [command]     Inspect session and mutation lineage\n\n");
+  output.write("  privacyai lineage [command]     Inspect session and mutation lineage\n");
+  output.write("  privacyai state [command]       Preflight, back up, migrate, restore, or repair local state\n\n");
   output.write("Compatibility aliases:\n");
   output.write("  claude|codex|agy [...]  Equivalent to privacyai agent <name> [...]\n");
   output.write("  antigravity [...]       Alias for agy\n");
@@ -156,9 +165,10 @@ async function runDoctor(args, options) {
     }
   }
 
+  const operationalState = await inspectDoctorState(bridge, options);
   const brokenAgent = agents.some(agent => !agent.ok);
   const result = {
-    ok: Boolean(loaded.configured && model.ok && !brokenAgent),
+    ok: Boolean(loaded.configured && model.ok && !brokenAgent && (operationalState?.ready ?? true)),
     platform: process.platform,
     architecture: process.arch,
     node: process.version,
@@ -169,7 +179,8 @@ async function runDoctor(args, options) {
       model: loaded.config?.model || null
     },
     localModel: model,
-    agents
+    agents,
+    state: operationalState
   };
 
   if (flags.json) writeJson(options.stdout, result);
@@ -177,6 +188,24 @@ async function runDoctor(args, options) {
 
   if (!loaded.configured) return CLI_EXIT_CODES.configurationRequired;
   return result.ok ? CLI_EXIT_CODES.success : CLI_EXIT_CODES.failure;
+}
+
+async function inspectDoctorState(bridge, options) {
+  if (typeof bridge.inspectOperationalState !== "function") return null;
+  try {
+    return await bridge.inspectOperationalState(stateOperationOptions(options));
+  } catch (error) {
+    return {
+      ready: false,
+      canBackup: false,
+      canMigrate: false,
+      migrationRequired: false,
+      repairRequired: false,
+      components: [],
+      nextSteps: ["Run `privacyai state preflight` for privacy-safe recovery guidance."],
+      reason: safeMessage(error)
+    };
+  }
 }
 
 async function inspectAgents(bridge, options) {
@@ -243,6 +272,60 @@ async function runLineage(args, options) {
   });
 }
 
+async function runState(args, options) {
+  const request = parseStateArguments(args);
+  const bridge = await loadBridgeModule(options.bridgeModule);
+  const common = { ...stateOperationOptions(options), signal: options.signal };
+  let result;
+  if (request.action === "preflight") {
+    requireBridgeOperation(bridge, "inspectOperationalState");
+    result = await bridge.inspectOperationalState(common);
+  } else if (request.action === "plan") {
+    requireBridgeOperation(bridge, "planOperationalStateUpgrade");
+    result = await bridge.planOperationalStateUpgrade(common);
+  } else if (request.action === "backup") {
+    requireBridgeOperation(bridge, "createOperationalStateBackup");
+    result = await bridge.createOperationalStateBackup({ ...common, backupDir: request.backupDir });
+  } else if (request.action === "migrate") {
+    requireBridgeOperation(bridge, "migrateOperationalState");
+    result = await bridge.migrateOperationalState({ ...common, backupDir: request.backupDir });
+  } else if (request.action === "repair") {
+    requireBridgeOperation(bridge, "repairOperationalState");
+    result = await bridge.repairOperationalState({ ...common, backupDir: request.backupDir });
+  } else {
+    requireBridgeOperation(bridge, "restoreOperationalStateBackup");
+    result = await bridge.restoreOperationalStateBackup({
+      ...common,
+      backupDir: request.backupDir,
+      replace: request.replace,
+      replaceIdentity: request.replaceIdentity
+    });
+  }
+
+  if (request.json) writeJson(options.stdout, result);
+  else writeState(options.stdout, result, request);
+  if (request.action === "preflight") return result.ready ? CLI_EXIT_CODES.success : CLI_EXIT_CODES.failure;
+  if (request.action === "plan") return result.actions.length === 0 ? CLI_EXIT_CODES.success : CLI_EXIT_CODES.failure;
+  return CLI_EXIT_CODES.success;
+}
+
+function requireBridgeOperation(bridge, name) {
+  if (typeof bridge?.[name] !== "function") {
+    throw new TypeError("PrivacyAI agent runtime does not expose operational state services.");
+  }
+}
+
+function stateOperationOptions(options) {
+  return {
+    configPath: options.configPath,
+    identityKeyPath: options.identityKeyPath,
+    identityBaseDir: options.identityBaseDir,
+    vaultDir: options.vaultDir,
+    contextDbPath: options.contextDbPath || options.verificationDbPath,
+    lineageDbPath: options.lineageDbPath
+  };
+}
+
 async function withInspectionService(options, operation) {
   if (options.inspectionService) return operation(options.inspectionService);
   const bridge = await loadBridgeModule(options.bridgeModule);
@@ -257,6 +340,62 @@ async function withInspectionService(options, operation) {
   } finally {
     await service.close?.();
   }
+}
+
+function parseStateArguments(args) {
+  let action = "preflight";
+  let actionSet = false;
+  let backupDir = null;
+  let json = false;
+  let replace = false;
+  let replaceIdentity = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--json") { json = true; continue; }
+    if (arg === "--replace") { replace = true; continue; }
+    if (arg === "--replace-identity") { replaceIdentity = true; continue; }
+    if (arg === "--backup") {
+      backupDir = args[++index];
+      if (!backupDir) throw usageError("--backup requires a directory.");
+      continue;
+    }
+    if (arg.startsWith("--backup=")) {
+      backupDir = arg.slice("--backup=".length);
+      if (!backupDir) throw usageError("--backup requires a directory.");
+      continue;
+    }
+    if (arg.startsWith("-")) throw usageError(`Unknown state option: ${arg}`);
+    if (!actionSet) {
+      action = new Map([
+        ["preflight", "preflight"], ["status", "preflight"], ["plan", "plan"],
+        ["backup", "backup"], ["migrate", "migrate"], ["repair", "repair"],
+        ["restore", "restore"]
+      ]).get(arg);
+      if (!action) throw usageError(`Unknown state command: ${arg}`);
+      actionSet = true;
+      continue;
+    }
+    if ((action === "backup" || action === "restore") && backupDir == null) {
+      backupDir = arg;
+      continue;
+    }
+    throw usageError(`Unexpected state argument: ${arg}`);
+  }
+
+  if (["backup", "migrate", "repair", "restore"].includes(action) && !backupDir) {
+    throw usageError(`${action} requires a backup directory.`);
+  }
+  if ((action === "preflight" || action === "plan") && backupDir) {
+    throw usageError(`--backup is not valid for state ${action}.`);
+  }
+  if (action !== "restore" && (replace || replaceIdentity)) {
+    throw usageError("--replace and --replace-identity are only valid for state restore.");
+  }
+  if (replaceIdentity && !replace) {
+    throw usageError("--replace-identity also requires --replace.");
+  }
+  return { action, backupDir, json, replace, replaceIdentity };
 }
 
 function parseDoctorArguments(args) {
@@ -340,6 +479,10 @@ function writeDoctor(output, result) {
     const state = !agent.ok ? agent.reason : agent.installed ? "ready" : "not installed";
     output.write(`Agent ${agent.name}: ${state}\n`);
   }
+  if (result.state) {
+    output.write(`Operational state: ${result.state.ready ? "ready" : "attention required"}\n`);
+    for (const step of result.state.nextSteps || []) output.write(`Next: ${step}\n`);
+  }
 }
 
 function writeCache(output, result, request) {
@@ -398,6 +541,40 @@ function writeLineage(output, result, request) {
   output.write(`Items: ${session.items.length}\n`);
 }
 
+function writeState(output, result, request) {
+  if (request.action === "preflight") {
+    output.write(`PrivacyAI state preflight: ${result.ready ? "ready" : "attention required"}\n`);
+    for (const component of result.components) {
+      const versions = component.currentVersion == null
+        ? ""
+        : ` (v${component.currentVersion} -> v${component.targetVersion})`;
+      output.write(`${component.name}: ${component.status}${versions}\n`);
+    }
+    for (const step of result.nextSteps) output.write(`Next: ${step}\n`);
+    return;
+  }
+  if (request.action === "plan") {
+    if (result.actions.length === 0) output.write("No state upgrade or repair action is required.\n");
+    for (const action of result.actions) output.write(`${action.component}: ${action.action}\n`);
+    for (const step of result.nextSteps) output.write(`Next: ${step}\n`);
+    return;
+  }
+  if (request.action === "backup") {
+    output.write(`State backup created: ${result.backupDir}\n`);
+    output.write(`Components: ${result.components.join(", ") || "none"}\n`);
+    return;
+  }
+  if (request.action === "restore") {
+    output.write(`State restored: ${result.restored.join(", ") || "none"}\n`);
+    output.write(`Installation identity replaced: ${result.identityReplaced ? "yes" : "no"}\n`);
+    return;
+  }
+  const changed = request.action === "migrate" ? result.migrated : result.repaired;
+  output.write(`State ${request.action}: ${result.changed ? "complete" : "no changes"}\n`);
+  if (changed?.length) output.write(`Components: ${changed.join(", ")}\n`);
+  if (result.backup?.backupDir) output.write(`Backup: ${result.backup.backupDir}\n`);
+}
+
 function writeJson(output, value) {
   output.write(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -424,6 +601,9 @@ function printCommandHelp(command, output) {
     case "lineage":
       printLineageHelp(output);
       break;
+    case "state":
+      printStateHelp(output);
+      break;
     case "claude":
     case "codex":
     case "agy":
@@ -449,7 +629,7 @@ function printOnboardHelp(output) {
 
 function printDoctorHelp(output) {
   output.write("Usage: privacyai doctor [--json]\n\n");
-  output.write("Check PrivacyAI configuration, local model readiness, native agent executables, and platform details.\n");
+  output.write("Check PrivacyAI configuration, local model readiness, native agent executables, platform details, and local-state readiness.\n");
   output.write("Exit 3 means onboarding is required; exit 1 means an operational check failed.\n");
 }
 
@@ -465,6 +645,17 @@ function printLineageHelp(output) {
   output.write("  privacyai lineage [summary|list|mutations] [--limit N] [--json]\n");
   output.write("  privacyai lineage show <session-key> [--limit N] [--json]\n\n");
   output.write("Read session and mutation metadata without exposing session-map originals.\n");
+}
+
+function printStateHelp(output) {
+  output.write("Usage:\n");
+  output.write("  privacyai state [preflight|plan] [--json]\n");
+  output.write("  privacyai state backup <directory> [--json]\n");
+  output.write("  privacyai state migrate --backup <directory> [--json]\n");
+  output.write("  privacyai state repair --backup <directory> [--json]\n");
+  output.write("  privacyai state restore <directory> [--replace] [--replace-identity] [--json]\n\n");
+  output.write("Preflight is read-only. Backup, migration, restore, and repair are explicit bounded operations.\n");
+  output.write("Migration and repair always require a new backup directory. Installation identity replacement requires its own flag.\n");
 }
 
 function printLauncherHelp(agent, output) {

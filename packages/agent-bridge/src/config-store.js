@@ -81,6 +81,12 @@ export function normalizeConfig(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new TypeError("PrivacyAI configuration must be an object.");
   }
+  if (value.version != null) {
+    const version = Number(value.version);
+    if (!Number.isSafeInteger(version) || version !== CONFIG_VERSION) {
+      throw new TypeError("PrivacyAI configuration uses an unsupported version.");
+    }
+  }
 
   const provider = String(value.provider || "ollama").trim();
   const model = String(value.model || "").trim();

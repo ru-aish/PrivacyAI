@@ -332,6 +332,144 @@ test("cache and lineage inspection keep metadata on stdout and close the service
   assert.equal(closeCount, 0, "injected services remain caller-owned");
 });
 
+test("state preflight and planning use privacy-safe bridge reports and readiness exits", async () => {
+  const calls = [];
+  const bridgeModule = {
+    inspectOperationalState: async options => {
+      calls.push(["preflight", options]);
+      return {
+        ready: false,
+        canBackup: true,
+        canMigrate: true,
+        migrationRequired: true,
+        repairRequired: false,
+        components: [{
+          name: "vault",
+          status: "migration_required",
+          currentVersion: 1,
+          targetVersion: 2,
+          nextStep: "Run migration."
+        }],
+        nextSteps: ["Run migration."]
+      };
+    },
+    planOperationalStateUpgrade: async options => {
+      calls.push(["plan", options]);
+      return {
+        ready: false,
+        canMigrate: true,
+        migrationRequired: true,
+        repairRequired: false,
+        backupRequired: true,
+        actions: [{ component: "vault", action: "migrate" }],
+        nextSteps: ["Run migration."]
+      };
+    }
+  };
+  const preflight = capture();
+  assert.equal(await runPrivacyAiCli(["state", "preflight", "--json"], {
+    stdout: preflight.stream,
+    bridgeModule,
+    configPath: "/state/config.json",
+    identityKeyPath: "/state/identity.json",
+    vaultDir: "/state/vault",
+    verificationDbPath: "/state/context.sqlite3",
+    lineageDbPath: "/state/lineage.sqlite3"
+  }), CLI_EXIT_CODES.failure);
+  assert.equal(JSON.parse(preflight.text()).components[0].name, "vault");
+  assert.equal(calls[0][1].contextDbPath, "/state/context.sqlite3");
+
+  const plan = capture();
+  assert.equal(await runPrivacyAiCli(["state", "plan"], {
+    stdout: plan.stream,
+    bridgeModule
+  }), CLI_EXIT_CODES.failure);
+  assert.match(plan.text(), /vault: migrate/);
+});
+
+test("state write commands require explicit destinations and preserve restore acknowledgements", async () => {
+  const calls = [];
+  const bridgeModule = {
+    createOperationalStateBackup: async options => {
+      calls.push(["backup", options]);
+      return { backupDir: options.backupDir, components: ["configuration"] };
+    },
+    migrateOperationalState: async options => {
+      calls.push(["migrate", options]);
+      return { changed: true, migrated: ["vault"], backup: { backupDir: options.backupDir } };
+    },
+    repairOperationalState: async options => {
+      calls.push(["repair", options]);
+      return { changed: false, repaired: [], backup: null };
+    },
+    restoreOperationalStateBackup: async options => {
+      calls.push(["restore", options]);
+      return { restored: ["identity", "vault"], identityReplaced: true };
+    }
+  };
+
+  for (const [argv, expected] of [
+    [["state", "backup", "/backup/one", "--json"], "backup"],
+    [["state", "migrate", "--backup", "/backup/two"], "migrate"],
+    [["state", "repair", "--backup=/backup/three"], "repair"],
+    [["state", "restore", "/backup/four", "--replace", "--replace-identity"], "restore"]
+  ]) {
+    const stdout = capture();
+    assert.equal(await runPrivacyAiCli(argv, { stdout: stdout.stream, bridgeModule }), 0);
+    assert.equal(calls.at(-1)[0], expected);
+  }
+  assert.equal(calls.at(-1)[1].replace, true);
+  assert.equal(calls.at(-1)[1].replaceIdentity, true);
+
+  const missing = capture();
+  assert.equal(await runPrivacyAiCli(["state", "migrate"], {
+    stderr: missing.stream,
+    bridgeModule
+  }), CLI_EXIT_CODES.usage);
+  assert.match(missing.text(), /requires a backup directory/);
+
+  const identityOnly = capture();
+  assert.equal(await runPrivacyAiCli(["state", "restore", "/backup", "--replace-identity"], {
+    stderr: identityOnly.stream,
+    bridgeModule
+  }), CLI_EXIT_CODES.usage);
+  assert.match(identityOnly.text(), /also requires --replace/);
+
+  const readOnlyBackup = capture();
+  assert.equal(await runPrivacyAiCli(["state", "preflight", "--backup", "/ignored"], {
+    stderr: readOnlyBackup.stream,
+    bridgeModule
+  }), CLI_EXIT_CODES.usage);
+  assert.match(readOnlyBackup.text(), /not valid for state preflight/);
+});
+
+test("doctor includes operational readiness and actionable next steps without leaking private failures", async () => {
+  const stdout = capture();
+  const secret = "doctor-state-secret@example.test";
+  const bridgeModule = {
+    loadPrivacyConfig: async () => ({
+      configured: true,
+      path: "/tmp/privacyai-config.json",
+      config: { provider: "ollama", model: "local-model" }
+    }),
+    checkPrivacyModel: async () => ({ ok: true }),
+    resolveExecutable: async () => null,
+    verifyNativeExecutable: async () => ({ version: null }),
+    inspectOperationalState: async () => {
+      throw new Error(secret);
+    }
+  };
+  assert.equal(await runPrivacyAiCli(["doctor", "--json"], {
+    stdout: stdout.stream,
+    bridgeModule
+  }), CLI_EXIT_CODES.failure);
+  const result = JSON.parse(stdout.text());
+  assert.equal(result.state.ready, false);
+  assert.match(result.state.nextSteps[0], /state preflight/);
+  assert.equal(result.state.reason, "PrivacyAI encountered an internal failure.");
+  assert.doesNotMatch(stdout.text(), /doctor-state-secret/);
+});
+
 test("missing inspection records use exit code 4 and stderr only", async () => {
   const stdout = capture();
   const stderr = capture();

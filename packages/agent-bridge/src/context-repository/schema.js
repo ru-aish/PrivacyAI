@@ -1,4 +1,4 @@
-import { CONTEXT_SCHEMA_VERSION } from "./constants.js";
+import { CONTEXT_SCHEMA_VERSION, CONTEXT_TABLES } from "./constants.js";
 import { contextStoreError } from "./errors.js";
 import { rollbackWithoutMasking } from "./transactions.js";
 
@@ -200,19 +200,29 @@ function addMissingColumns(db, table, definitions) {
   }
 }
 
-export function initializeSchema(db) {
-  db.exec("CREATE TABLE IF NOT EXISTS privacyai_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
-  const meta = db.prepare("SELECT value FROM privacyai_meta WHERE key='schema_version'").get();
-  const version = meta ? Number(meta.value) : 0;
-  if (!Number.isSafeInteger(version) || version > CONTEXT_SCHEMA_VERSION) throw contextStoreError("PRIVACYAI_CONTEXT_DB_SCHEMA_UNSUPPORTED", "PrivacyAI context verification database uses an unsupported schema version.");
+export function initializeSchema(db, options = {}) {
+  const existing = inspectExistingSchema(db);
+  if (!existing.empty) {
+    if (existing.version < CONTEXT_SCHEMA_VERSION && options.allowMigration !== true) {
+      throw contextStoreError(
+        "PRIVACYAI_CONTEXT_DB_SCHEMA_MIGRATION_REQUIRED",
+        "PrivacyAI context verification database requires explicit backup-first migration. Run `privacyai state migrate --backup <directory>`."
+      );
+    }
+    if (existing.version === CONTEXT_SCHEMA_VERSION) {
+      validateCurrentSchema(db, existing.tables);
+      return;
+    }
+  }
+
   db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(sql);
-    if (version < 3) {
+    if (!existing.empty && existing.version < 3) {
       const columns = db.prepare("PRAGMA table_info(ledger_file_mutations)").all().map(c => c.name);
       for (const [name, definition] of [["operation_type", "TEXT NOT NULL DEFAULT 'unknown'"], ["source_length", "INTEGER"], ["next_length", "INTEGER"]]) if (!columns.includes(name)) db.exec(`ALTER TABLE ledger_file_mutations ADD COLUMN ${name} ${definition}`);
     }
-    if (version < 4) {
+    if (!existing.empty && existing.version < 4) {
       addMissingColumns(db, "threads", [
         ["identity_key_id", "TEXT NOT NULL DEFAULT ''"],
         ["identity_scope_json", "TEXT NOT NULL DEFAULT '{}'"],
@@ -229,4 +239,38 @@ export function initializeSchema(db) {
     rollbackWithoutMasking(db);
     throw error;
   }
+}
+
+function inspectExistingSchema(db) {
+  const tables = new Set(db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+  ).all().map(row => String(row.name)));
+  if (tables.size === 0) return { empty: true, version: 0, tables };
+  if (!tables.has("privacyai_meta")) throw unsupportedSchemaError();
+  const meta = db.prepare("SELECT value FROM privacyai_meta WHERE key='schema_version'").get();
+  const version = Number(meta?.value);
+  if (!Number.isSafeInteger(version) || version < 1 || version > CONTEXT_SCHEMA_VERSION) {
+    throw unsupportedSchemaError();
+  }
+  return { empty: false, version, tables };
+}
+
+function validateCurrentSchema(db, tables) {
+  if (CONTEXT_TABLES.some(table => !tables.has(table))) throw unsupportedSchemaError();
+  const requiredColumns = new Map([
+    ["threads", ["identity_key_id", "identity_scope_json", "identity_map_json"]],
+    ["verified_items", ["identity_key_id", "identity_json"]],
+    ["ledger_file_mutations", ["operation_type", "source_length", "next_length"]]
+  ]);
+  for (const [table, required] of requiredColumns) {
+    const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(row => String(row.name)));
+    if (required.some(column => !columns.has(column))) throw unsupportedSchemaError();
+  }
+}
+
+function unsupportedSchemaError() {
+  return contextStoreError(
+    "PRIVACYAI_CONTEXT_DB_SCHEMA_UNSUPPORTED",
+    "PrivacyAI context verification database uses an unsupported or malformed schema."
+  );
 }

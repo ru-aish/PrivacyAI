@@ -35,10 +35,10 @@ export async function openContextVerificationStore(options = {}) {
       try {
         candidate = new sqlite.DatabaseSync(path);
         candidate.exec("PRAGMA foreign_keys = ON");
-        candidate.exec("PRAGMA journal_mode = WAL");
-        candidate.exec("PRAGMA synchronous = FULL");
         candidate.exec(`PRAGMA busy_timeout = ${busyTimeoutMs}`);
         initializeSchema(candidate);
+        candidate.exec("PRAGMA journal_mode = WAL");
+        candidate.exec("PRAGMA synchronous = FULL");
         return candidate;
       } catch (error) { try { candidate?.close(); } catch {} throw error; }
     }, { timeoutMs: options.verificationRetryTimeoutMs, signal: options.signal });

@@ -135,6 +135,17 @@ export {
 } from "./prompt-flow.js";
 export { SessionVault, loadSessionMap } from "./session-vault.js";
 export {
+  STATE_BACKUP_VERSION,
+  STATE_OPERATIONS_VERSION,
+  createOperationalStateBackup,
+  inspectOperationalState,
+  migrateOperationalState,
+  planOperationalStateUpgrade,
+  repairOperationalState,
+  resolveOperationalStatePaths,
+  restoreOperationalStateBackup
+} from "./state-operations.js";
+export {
   findUnresolvedPlaceholders,
   restoreText,
   restoreValue,

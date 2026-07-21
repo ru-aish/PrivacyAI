@@ -11,6 +11,7 @@ import {
   updateRepositoryThread
 } from "../src/index.js";
 import { stableJson } from "../src/context-repository/domain.js";
+import { initializeSchema } from "../src/context-repository/schema.js";
 import { createTestTempDir } from "./test-temp-dir.js";
 
 const hash = value => `sha256:${value}`;
@@ -313,6 +314,20 @@ test("schema v3 upgrades identity columns without losing existing maps", async t
     0
   );
   database.close();
+
+  await assert.rejects(
+    openContextVerificationStore({ verificationDbPath: path }),
+    error => error?.code === "PRIVACYAI_CONTEXT_DB_SCHEMA_MIGRATION_REQUIRED"
+  );
+  const beforeMigration = new DatabaseSync(path, { readOnly: true });
+  assert.equal(
+    beforeMigration.prepare("SELECT value FROM privacyai_meta WHERE key='schema_version'").get().value,
+    "3"
+  );
+  beforeMigration.close();
+  const migration = new DatabaseSync(path);
+  initializeSchema(migration, { allowMigration: true });
+  migration.close();
 
   const store = await openContextVerificationStore({ verificationDbPath: path });
   t.after(() => store.close());
