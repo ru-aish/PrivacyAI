@@ -44,13 +44,17 @@ test("retry supports AbortSignal, preserves non-contention identity, and honors 
 
 test("retry does not invoke an operation after its deadline", async () => {
   let attempts = 0;
+  const deadlineAt = Date.now() + 10;
   await assert.rejects(
     retryContextStoreOperation(() => {
       attempts += 1;
+      while (Date.now() <= deadlineAt) {
+        // Force the first operation to cross the deadline deterministically.
+      }
       const error = new Error("database is locked");
       error.code = "SQLITE_BUSY";
       throw error;
-    }, { deadlineAt: Date.now() + 5 }),
+    }, { deadlineAt }),
     error => error?.code === "PRIVACYAI_CONTEXT_DB_RETRY_TIMEOUT"
   );
   assert.equal(attempts, 1);

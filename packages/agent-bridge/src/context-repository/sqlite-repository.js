@@ -269,10 +269,16 @@ export class SqliteContextVerificationStore {
     const spans = normalizePrivacySpans(record.spans);
     const editPlan = normalizeEditPlan(record.editPlan);
     const planHash = record.planHash ? requiredHash(record.planHash, "planHash") : verificationFingerprint({ spans, editPlan });
+    const contentHash = requiredHash(record.contentHash, "contentHash");
+    const policyFingerprint = requiredHash(record.policyFingerprint, "policyFingerprint");
     const now = Date.now();
     try {
       withImmediateTransaction(this.database, () => {
-        this.statements.putPrivacyPlan.run(planHash, requiredHash(record.contentHash, "contentHash"), requiredHash(record.policyFingerprint, "policyFingerprint"), now, now);
+        const existing = this.statements.getPrivacyPlan.get(contentHash, policyFingerprint);
+        if (existing && existing.plan_hash !== planHash) {
+          this.statements.deletePrivacyPlan.run(existing.plan_hash);
+        }
+        this.statements.putPrivacyPlan.run(planHash, contentHash, policyFingerprint, now, now);
         this.statements.deletePrivacyPlanSpans.run(planHash);
         this.statements.deletePrivacyPlanEdits.run(planHash);
         for (const span of spans) this.statements.putPrivacyPlanSpan.run(planHash, span.start, span.end, span.classification, span.reference);

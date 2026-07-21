@@ -8,6 +8,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
   writeFile
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -1705,17 +1706,40 @@ function ownedByCurrentUser(info) {
 
 async function assertNoSymlinkComponents(path) {
   let current = resolve(path);
+  let final = true;
   while (true) {
     try {
       const info = await lstat(current);
-      if (info.isSymbolicLink()) throw unsafePathError();
+      if (
+        info.isSymbolicLink() &&
+        (final || !await isTrustedSystemDirectorySymlink(current, info))
+      ) {
+        throw unsafePathError();
+      }
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
     }
     const parent = dirname(current);
     if (parent === current) return;
     current = parent;
+    final = false;
   }
+}
+
+async function isTrustedSystemDirectorySymlink(path, metadata) {
+  if (typeof process.getuid !== "function" || metadata.uid !== 0) return false;
+  const [parentMetadata, targetMetadata] = await Promise.all([
+    stat(dirname(path)),
+    stat(path)
+  ]);
+  return (
+    parentMetadata.isDirectory() &&
+    parentMetadata.uid === 0 &&
+    (parentMetadata.mode & 0o022) === 0 &&
+    targetMetadata.isDirectory() &&
+    targetMetadata.uid === 0 &&
+    (targetMetadata.mode & 0o022) === 0
+  );
 }
 
 async function ensureDirectoryPath(path, options = {}) {
