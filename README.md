@@ -109,6 +109,9 @@ console.log(safePrompt);
 
 * **SDK Library:** [packages/sdk/README.md](packages/sdk/README.md)
 * **Canonical CLI:** [packages/agent-tui/README.md](packages/agent-tui/README.md)
+* **Install and upgrade:** [docs/installing-and-upgrading.md](docs/installing-and-upgrading.md)
+* **Release process:** [docs/releasing.md](docs/releasing.md)
+* **Changelog:** [CHANGELOG.md](CHANGELOG.md)
 * **Web Demo:** [apps/web-demo/README.md](apps/web-demo/README.md)
 * **Extension Source:** [apps/browser-extension/README.md](apps/browser-extension/README.md)
 * **Architecture Docs:** [docs/architecture.md](docs/architecture.md)
@@ -122,7 +125,8 @@ PrivacyAI exposes one global package and one command for all supported agents,
 onboarding, diagnostics, cache and lineage inspection, and explicit local-state operations:
 
 ```bash
-npm install --global @privacy-ai/cli
+npm install --global @privacy-ai/cli@latest
+privacyai --version
 privacyai onboard
 privacyai doctor
 privacyai state preflight
@@ -130,6 +134,10 @@ privacyai agent claude
 privacyai agent codex
 privacyai agent agy --print "your prompt"
 ```
+
+The CLI currently supports Linux and macOS on Node.js 18.18 or newer. Upgrade,
+rollback, migration, global-permission, and interrupted-install recovery steps
+are documented in [Installing and upgrading](docs/installing-and-upgrading.md).
 
 The earlier direct forms (`privacyai claude`, `privacyai codex`, `privacyai agy`,
 and `privacyai antigravity`) remain supported compatibility aliases. Users do
