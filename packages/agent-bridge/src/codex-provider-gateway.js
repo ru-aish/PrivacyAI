@@ -50,6 +50,7 @@ import {
 import { trackServerSockets } from "./runtime/http-server.js";
 import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
 import { SessionVault } from "./session-vault.js";
+import { recordFailedProviderResponse, recordLineageBestEffort } from "./lineage/recorder.js";
 import {
   openInstallationPrivacyIdentity,
   privacyIdentityMetadata,
@@ -333,8 +334,13 @@ async function handleRequestCore(request, response, context) {
       onArtifactComplete: context.onSanitizerArtifactComplete,
       onSchemaTrace: context.onSchemaTrace
     });
-    throwIfAborted(context.requestSignal);
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
+    const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
+      sessionKey: identity.sessionKey, provider: "codex", operation: "responses.create",
+      model: typeof body.model === "string" ? body.model : undefined,
+      placeholders: Object.keys(completeMap), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: context.requestSignal
+    });
+    throwIfAborted(context.requestSignal);
     if (!sessionMapsEqual(currentVault?.sessionMap || {}, completeMap)) {
       await context.vault.save(identity.sessionKey, completeMap);
     }
@@ -374,7 +380,8 @@ async function handleRequestCore(request, response, context) {
     return {
       body: result.body,
       sessionMap: completeMap,
-      sessionKey: identity.sessionKey
+      sessionKey: identity.sessionKey,
+      lineageHandle
     };
   });
 
@@ -388,7 +395,8 @@ async function handleRequestCore(request, response, context) {
     Buffer.from(JSON.stringify(transformed.body)),
     transformed.sessionMap,
     transformed.body.stream === true,
-    transformed.sessionKey
+    transformed.sessionKey,
+    transformed.lineageHandle
   );
 }
 
@@ -446,22 +454,34 @@ async function proxyTransformed(
   body,
   sessionMap,
   expectsSse,
-  sessionKey
+  sessionKey,
+  lineageHandle
 ) {
   const upstream = upstreamUrl(request.headers, context, suffix, search);
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
   const headers = upstreamHeaders(sanitizedHeaders, upstream, body.length);
   context.phase = "upstream_connect";
-  const upstreamResponse = await requestCodexUpstream(upstream, "POST", headers, body, {
-    signal: context.requestSignal,
-    timeoutMs: context.upstreamTimeoutMs
-  });
+  let upstreamSent = false;
+  let upstreamResponse;
+  try {
+    upstreamResponse = await requestCodexUpstream(upstream, "POST", headers, body, {
+      signal: context.requestSignal,
+      timeoutMs: context.upstreamTimeoutMs,
+      onRequestSent: () => { upstreamSent = true; }
+    });
+  } catch (error) {
+    if (upstreamSent) await recordFailedProviderResponse(context.lineageRecorder, lineageHandle);
+    throw error;
+  }
   context.phase = "upstream_response";
 
   assertIdentityResponseEncoding(upstreamResponse);
 
   const contentType = String(upstreamResponse.headers["content-type"] || "").toLowerCase();
   const statusCode = upstreamResponse.statusCode || 502;
+  await recordLineageBestEffort(context.lineageRecorder, "providerResponse", lineageHandle, {
+    success: statusCode >= 200 && statusCode < 300
+  });
   const headerlessExpectedSse =
     expectsSse && contentType.trim() === "" && statusCode >= 200 && statusCode < 300;
   if (contentType.includes("text/event-stream") || headerlessExpectedSse) {
@@ -470,6 +490,7 @@ async function proxyTransformed(
       forceContentType: headerlessExpectedSse,
       sessionKey
     });
+    await recordLineageBestEffort(context.lineageRecorder, "restoration", lineageHandle);
     return;
   }
 
@@ -483,6 +504,7 @@ async function proxyTransformed(
     response.setHeader("content-type", "text/plain; charset=utf-8");
     response.writeHead(statusCode);
     response.end(restoreText(raw.toString("utf8"), sessionMap));
+    await recordLineageBestEffort(context.lineageRecorder, "restoration", lineageHandle);
     return;
   }
 
@@ -521,6 +543,7 @@ async function proxyTransformed(
   forwardResponseHeaders(response, upstreamResponse.headers, true);
   response.writeHead(statusCode);
   response.end(restoredBody);
+  await recordLineageBestEffort(context.lineageRecorder, "restoration", lineageHandle);
 }
 
 async function proxySseResponse(

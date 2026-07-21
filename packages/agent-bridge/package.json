@@ -6,7 +6,8 @@
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./cli": "./src/cli.js"
+    "./cli": "./src/cli.js",
+    "./lineage": "./src/lineage/index.js"
   },
   "bin": {
     "privacyai-agent-hook": "./bin/privacyai-agent-hook.js",

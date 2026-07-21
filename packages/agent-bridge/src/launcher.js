@@ -48,6 +48,7 @@ import {
   auditCodexStaticStartupContext
 } from "./startup-audit.js";
 import { renderedStartupFingerprint } from "./startup-cache.js";
+import { createLineageRecorder, openLineageRepository } from "./lineage/index.js";
 
 const PTY_HELPER = fileURLToPath(new URL("../bin/privacyai-pty.py", import.meta.url));
 
@@ -112,14 +113,29 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   let ownsVerificationStore = false;
   let launchLock;
   let primaryError;
+  let lineageRepository;
+  let ownsLineageRepository = false;
 
   try {
+    // The native Codex launch lock protects every Codex invocation.  Lineage
+    // is provider-gateway traffic only, but must not narrow that lock scope.
     if (flavor === "codex") {
       launchLock = await (options.acquireNativeLaunchLock || acquireNativeLaunchLock)(
         flavor,
         cwd,
         options
       );
+    }
+    if (flavor === "codex" && codexInvocation.mode === "gateway") {
+      if (!options.lineageRecorder) {
+        lineageRepository = await (options.openLineageRepository || openLineageRepository)({
+          lineageRepository: options.lineageRepository,
+          lineageDbPath: options.lineageDbPath,
+          lineageBusyTimeoutMs: options.lineageBusyTimeoutMs,
+          lineageRetryTimeoutMs: options.lineageRetryTimeoutMs
+        });
+        ownsLineageRepository = !options.lineageRepository;
+      }
     }
 
     const sanitizer = options.sanitizer || createPrivacySanitizer(loaded.config, options);
@@ -181,7 +197,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         apiUpstream: options.apiUpstream,
         allowInsecureTestUpstream: options.allowInsecureTestUpstream,
         upstreamTimeoutMs: options.upstreamTimeoutMs,
-        upstreamIdleTimeoutMs: options.upstreamIdleTimeoutMs
+        upstreamIdleTimeoutMs: options.upstreamIdleTimeoutMs,
+        lineageRecorder: options.lineageRecorder || createLineageRecorder(lineageRepository)
       });
       const protectedArgs = buildCodexProviderArgs(gateway.baseURL, options);
 
@@ -321,6 +338,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
   } finally {
     await runCleanupSteps([
       { name: "gateway", run: () => gateway?.close() },
+      { name: "lineage", run: () => ownsLineageRepository ? lineageRepository?.close() : undefined },
       {
         name: "verification-store",
         run: () => ownsVerificationStore ? Promise.resolve(verificationStore?.close()) : undefined
