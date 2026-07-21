@@ -16,6 +16,7 @@ const scriptPath = fileURLToPath(import.meta.url);
 const packageRoot = dirname(dirname(scriptPath));
 const repositoryRoot = dirname(dirname(packageRoot));
 const bridgeRoot = join(repositoryRoot, "packages", "agent-bridge");
+const bridgeManifestPath = join(bridgeRoot, "package.json");
 const sdkManifestPath = join(repositoryRoot, "packages", "sdk", "package.json");
 const manifestPath = join(packageRoot, "package.json");
 const backupPath = join(packageRoot, ".privacyai-package.json.pack-backup");
@@ -57,20 +58,30 @@ async function prepare() {
 
   const originalManifest = await readFile(manifestPath, "utf8");
   const manifest = JSON.parse(originalManifest);
+  const bridgeManifest = JSON.parse(await readFile(bridgeManifestPath, "utf8"));
   const sdkManifest = JSON.parse(await readFile(sdkManifestPath, "utf8"));
   const bridgeSpecifier = manifest.dependencies?.["@privacy-ai/agent-bridge"];
   const sdkSpecifier = manifest.dependencies?.["@privacy-ai/sdk"];
+  const expectedWorkspaceSpecifier = `workspace:${manifest.version}`;
+  if (bridgeManifest.version !== manifest.version || sdkManifest.version !== manifest.version) {
+    throw new Error(
+      "PrivacyAI release versions must match across the SDK, bridge, and CLI packages."
+    );
+  }
   if (
-    typeof bridgeSpecifier !== "string" || !bridgeSpecifier.startsWith("workspace:") ||
-    typeof sdkSpecifier !== "string" || !sdkSpecifier.startsWith("workspace:")
+    bridgeSpecifier !== expectedWorkspaceSpecifier ||
+    sdkSpecifier !== expectedWorkspaceSpecifier ||
+    bridgeManifest.dependencies?.["@privacy-ai/sdk"] !== expectedWorkspaceSpecifier
   ) {
-    throw new Error("PrivacyAI CLI packaging requires internal workspace dependencies.");
+    throw new Error(
+      `PrivacyAI internal dependencies must use ${expectedWorkspaceSpecifier}.`
+    );
   }
 
   delete manifest.dependencies["@privacy-ai/agent-bridge"];
   manifest.dependencies["@privacy-ai/sdk"] = sdkManifest.version;
-  delete manifest.scripts.prepack;
-  delete manifest.scripts["pack:production"];
+  delete manifest.scripts;
+  manifest.files = manifest.files.filter(entry => entry !== "scripts");
   await writeFile(backupPath, originalManifest, { flag: "wx", mode: 0o600 });
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", { mode: 0o644 });
 

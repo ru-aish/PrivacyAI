@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   access,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -17,11 +18,17 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const SDK_ROOT = join(dirname(PACKAGE_ROOT), "sdk");
+const PACKAGES_ROOT = dirname(PACKAGE_ROOT);
+const SDK_ROOT = join(PACKAGES_ROOT, "sdk");
+const BRIDGE_ROOT = join(PACKAGES_ROOT, "agent-bridge");
 
-test("packed CLI contains the internal runtime and no public bridge dependency", async t => {
+test("packed CLI is exact, reproducible, and contains its private runtime", async t => {
   const root = await mkdtemp(join(tmpdir(), "privacyai-cli-pack-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const reproductionRoot = await mkdtemp(join(tmpdir(), "privacyai-cli-pack-reproduction-"));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+    await rm(reproductionRoot, { recursive: true, force: true });
+  });
 
   const sourceManifestBefore = await readFile(join(PACKAGE_ROOT, "package.json"), "utf8");
   const sourceManifest = JSON.parse(sourceManifestBefore);
@@ -47,6 +54,28 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
   const tarball = (await readdir(root)).find(name => name.endsWith(".tgz"));
   assert.ok(tarball, "npm pack did not produce a tarball");
 
+  const reproduced = await runProcess("npm", [
+    "run",
+    "pack:production",
+    "--",
+    "--pack-destination",
+    reproductionRoot
+  ], { cwd: PACKAGE_ROOT });
+  assert.equal(reproduced.code, 0, reproduced.stderr || reproduced.stdout);
+  const reproducedTarball = (await readdir(reproductionRoot)).find(name => name.endsWith(".tgz"));
+  assert.ok(reproducedTarball, "the reproduction pack did not produce a tarball");
+  assert.equal(
+    sha256(await readFile(join(root, tarball))),
+    sha256(await readFile(join(reproductionRoot, reproducedTarball)))
+  );
+
+  const listed = await runProcess("tar", ["-tzf", join(root, tarball)]);
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.deepEqual(
+    listed.stdout.split("\n").filter(Boolean).sort(),
+    await expectedPackedFiles()
+  );
+
   const unpacked = join(root, "unpacked");
   await mkdir(unpacked, { recursive: true });
   const extracted = await runProcess(
@@ -61,11 +90,18 @@ test("packed CLI contains the internal runtime and no public bridge dependency",
   assert.equal(packedManifest.name, "@privacy-ai/cli");
   assert.equal(packedManifest.dependencies["@privacy-ai/sdk"], sdkManifest.version);
   assert.equal(packedManifest.dependencies["@privacy-ai/agent-bridge"], undefined);
-  assert.equal(packedManifest.scripts?.prepack, undefined);
-  assert.equal(packedManifest.scripts?.["pack:production"], undefined);
-  assert.equal(packedManifest.scripts?.postpack, "node scripts/package-runtime.js clean");
+  assert.equal(packedManifest.scripts, undefined);
+  assert.equal(packedManifest.files.includes("scripts"), false);
+  assert.equal(
+    packedManifest.repository?.url,
+    "git+https://github.com/ru-aish/PrivacyAI.git"
+  );
+  assert.equal(packedManifest.repository?.directory, "packages/agent-tui");
   assert.doesNotMatch(packedManifestText, /workspace:/);
-  await access(join(packageRoot, "scripts", "package-runtime.js"));
+  await assert.rejects(
+    access(join(packageRoot, "scripts", "package-runtime.js")),
+    error => error?.code === "ENOENT"
+  );
   await access(join(packageRoot, "vendor", "agent-bridge", "src", "cli.js"));
   await access(join(packageRoot, "vendor", "agent-bridge", "bin", "privacyai-agent-hook.js"));
   await assert.rejects(
@@ -201,16 +237,63 @@ test("normal npm publish dry-run is supported and restores package state", async
   const root = await mkdtemp(join(tmpdir(), "privacyai-cli-publish-dry-run-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const manifestPath = join(PACKAGE_ROOT, "package.json");
+  const backupPath = join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup");
+  const watchPath = join(PACKAGE_ROOT, ".privacyai-package-watch");
+  const vendorRoot = join(PACKAGE_ROOT, "vendor");
   const sourceManifest = await readFile(manifestPath, "utf8");
 
-  const published = await runProcess("npm", ["publish", "--dry-run", "--access", "public"], {
+  const published = await runProcess("npm", [
+    "publish",
+    "--dry-run",
+    "--force",
+    "--access",
+    "public"
+  ], {
     cwd: PACKAGE_ROOT,
     env: { ...process.env, npm_config_cache: join(root, "npm-cache") }
   });
 
   assert.equal(published.code, 0, published.stderr || published.stdout);
   assert.match(published.stderr + published.stdout, /dry-run|dry run/i);
-  assert.equal(await readFile(manifestPath, "utf8"), sourceManifest);
+  await waitForPackageCleanup(
+    manifestPath,
+    sourceManifest,
+    vendorRoot,
+    backupPath,
+    watchPath
+  );
+});
+
+test("production packaging rejects version skew before staging files", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-cli-version-skew-"));
+  const manifestPath = join(PACKAGE_ROOT, "package.json");
+  const sourceManifest = await readFile(manifestPath, "utf8");
+  const skewedManifest = JSON.parse(sourceManifest);
+  skewedManifest.dependencies["@privacy-ai/sdk"] = "workspace:9.9.9";
+  const skewedManifestText = JSON.stringify(skewedManifest, null, 2) + "\n";
+  t.after(async () => {
+    await writeFile(manifestPath, sourceManifest, { mode: 0o644 });
+    await rm(join(PACKAGE_ROOT, "vendor"), { recursive: true, force: true });
+    await rm(join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup"), { force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(manifestPath, skewedManifestText, { mode: 0o644 });
+
+  const packed = await runProcess("npm", [
+    "run",
+    "pack:production",
+    "--",
+    "--pack-destination",
+    root
+  ], { cwd: PACKAGE_ROOT });
+
+  assert.notEqual(packed.code, 0);
+  assert.ok(
+    (packed.stderr + packed.stdout).includes(
+      `internal dependencies must use workspace:${skewedManifest.version}`
+    )
+  );
+  assert.equal(await readFile(manifestPath, "utf8"), skewedManifestText);
   await assert.rejects(access(join(PACKAGE_ROOT, "vendor")), error => error?.code === "ENOENT");
   await assert.rejects(
     access(join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup")),
@@ -242,6 +325,35 @@ test("production pack wrapper restores the source tree when npm cannot create a 
     error => error?.code === "ENOENT"
   );
 });
+
+async function expectedPackedFiles() {
+  const files = ["package/package.json"];
+  for (const entry of ["README.md", "bin", "src"]) {
+    files.push(...await collectSourceFiles(PACKAGE_ROOT, entry, "package/"));
+  }
+  for (const entry of ["bin", "src"]) {
+    files.push(...await collectSourceFiles(
+      BRIDGE_ROOT,
+      entry,
+      "package/vendor/agent-bridge/"
+    ));
+  }
+  return files.sort();
+}
+
+async function collectSourceFiles(root, entry, targetPrefix) {
+  const path = join(root, entry);
+  const info = await lstat(path);
+  if (!info.isDirectory()) {
+    return [`${targetPrefix}${entry.replaceAll("\\", "/")}`];
+  }
+
+  const files = [];
+  for (const child of await readdir(path)) {
+    files.push(...await collectSourceFiles(root, join(entry, child), targetPrefix));
+  }
+  return files;
+}
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");

@@ -1,0 +1,183 @@
+name: Release validation and publish
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/release.yml"
+      - "CHANGELOG.md"
+      - "README.md"
+      - "docs/installing-and-upgrading.md"
+      - "docs/release-notes-template.md"
+      - "docs/releasing.md"
+      - "packages/agent-bridge/**"
+      - "packages/agent-tui/**"
+      - "packages/sdk/**"
+      - "pnpm-lock.yaml"
+      - "scripts/release/**"
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag matching package versions, for example v0.1.0"
+        required: false
+        type: string
+      publish:
+        description: "Publish the validated SDK and CLI artifacts"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privacyai-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      artifact-name: ${{ steps.release.outputs.artifact-name }}
+      commit: ${{ steps.release.outputs.commit }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm client
+        run: npm install --global npm@11.5.1
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+      - name: Check patch whitespace
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${BASE_SHA:-}" && -n "${HEAD_SHA:-}" ]]; then
+            git diff --check "$BASE_SHA...$HEAD_SHA"
+          else
+            git diff-tree --check --no-commit-id -r HEAD
+          fi
+      - name: Test release contracts
+        run: node --test scripts/release/release.test.mjs
+      - name: Test workspace
+        env:
+          PRIVACYAI_CONTEXT_DB: ${{ runner.temp }}/privacyai-release-tests.sqlite3
+        run: pnpm -r test
+      - name: Build and validate release artifacts
+        id: release
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          PUBLISH_INTENT: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="$RUNNER_TEMP/privacyai-release"
+          args=(--output "$artifact_dir" --require-clean)
+          if [[ -n "${RELEASE_TAG:-}" ]]; then
+            args+=(--tag "$RELEASE_TAG")
+          fi
+          if [[ "$PUBLISH_INTENT" == "true" ]]; then
+            if [[ -z "${RELEASE_TAG:-}" ]]; then
+              echo "A release tag is required when publishing." >&2
+              exit 1
+            fi
+            tag_commit="$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")"
+            head_commit="$(git rev-parse HEAD)"
+            if [[ -z "$tag_commit" || "$tag_commit" != "$head_commit" ]]; then
+              echo "Release tag $RELEASE_TAG must exist and point to $head_commit." >&2
+              exit 1
+            fi
+          fi
+          node scripts/release/build.mjs "${args[@]}"
+          version="$(node -p "require('$artifact_dir/release-metadata.json').version")"
+          commit="$(node -p "require('$artifact_dir/release-metadata.json').gitCommit")"
+          tag="$(node -p "require('$artifact_dir/release-metadata.json').tag")"
+          artifact_name="privacyai-release-$version"
+          echo "ARTIFACT_DIR=$artifact_dir" >> "$GITHUB_ENV"
+          echo "artifact-name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Confirm packaging restored the checkout
+        run: git status --short && test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.release.outputs.artifact-name }}
+          path: ${{ env.ARTIFACT_DIR }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Pin trusted-publishing npm client
+        run: npm install --global npm@11.5.1
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.validate.outputs.artifact-name }}
+          path: release-artifacts
+      - name: Verify and publish exact validated artifacts
+        env:
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release/publish.mjs \
+            --artifacts release-artifacts \
+            --tag "$RELEASE_TAG"
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-artifacts/* --clobber
+            exit 0
+          fi
+          args=(
+            "$RELEASE_TAG"
+            release-artifacts/*
+            --verify-tag
+            --title "PrivacyAI $RELEASE_TAG"
+            --generate-notes
+          )
+          if [[ "$RELEASE_VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
