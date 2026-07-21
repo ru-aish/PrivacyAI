@@ -72,7 +72,11 @@ test("packed CLI is exact, reproducible, and contains its private runtime", asyn
   const listed = await runProcess("tar", ["-tzf", join(root, tarball)]);
   assert.equal(listed.code, 0, listed.stderr);
   assert.deepEqual(
-    listed.stdout.split("\n").filter(Boolean).sort(),
+    listed.stdout
+      .split("\n")
+      .map(line => line.trim())
+      .filter(line => line && !line.endsWith("/"))
+      .sort(),
     await expectedPackedFiles()
   );
 
