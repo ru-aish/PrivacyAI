@@ -1464,6 +1464,54 @@ test("Codex provider gateway records real protected request lifecycle without re
   }
 });
 
+test("Codex requests remain available when local lineage recording fails", async t => {
+  const root = await createTestTempDir("privacyai-codex-lineage-unavailable-");
+  const secret = "codex-lineage-storage-failure-secret";
+  const placeholder = "[CODEX_LINEAGE_FAILURE_1]";
+  const lineageRecorder = {
+    protectedRequest() { throw new Error("lineage unavailable"); },
+    providerResponse() { throw new Error("lineage unavailable"); },
+    restoration() { throw new Error("lineage unavailable"); }
+  };
+  const upstream = await startServer(async (request, response) => {
+    const body = await readRequestJson(request);
+    assert.equal(JSON.stringify(body).includes(secret), false);
+    assert.equal(JSON.stringify(body).includes(placeholder), true);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.output_text.delta", item_id: "lineage-failure", delta: `echo ${placeholder}` }) +
+      sse({ type: "response.completed", response: { id: "lineage-failure", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => ({
+      sanitizedPrompt: text.replaceAll(secret, placeholder),
+      sessionMap: text.includes(secret) ? { [placeholder]: secret } : {}
+    }),
+    baseDir: join(root, "vault"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true,
+    lineageRecorder,
+    verificationStore: new MemoryContextVerificationStore()
+  });
+  t.after(async () => {
+    await gateway.close();
+    await upstream.close();
+  });
+  const body = sampleRequest();
+  body.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: secret }] }];
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.text()).includes(secret), true);
+});
+
 test("Codex headerless provider failure records restoration after restoring the local secret", async t => {
   const root = await createTestTempDir("privacyai-codex-headerless-lineage-");
   const lineageDbPath = join(root, "lineage.sqlite3");

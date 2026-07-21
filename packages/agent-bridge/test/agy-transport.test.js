@@ -1053,6 +1053,51 @@ test("AGY transport records real TLS proxy lifecycle without retaining secrets",
   }
 });
 
+test("AGY transport remains available when local lineage recording fails", async t => {
+  const root = await createTestTempDir("privacyai-agy-lineage-unavailable-");
+  const secret = "agy-lineage-storage-failure-secret";
+  const placeholder = "[AGY_LINEAGE_FAILURE_1]";
+  const lineageRecorder = {
+    protectedRequest() { throw new Error("lineage unavailable"); },
+    providerResponse() { throw new Error("lineage unavailable"); },
+    restoration() { throw new Error("lineage unavailable"); }
+  };
+  const runtime = await startAgyTransportRuntime({
+    sanitizer: async text => ({
+      sanitizedPrompt: text.replaceAll(secret, placeholder),
+      sessionMap: text.includes(secret) ? { [placeholder]: secret } : {}
+    }),
+    baseEnv: {},
+    baseDir: join(root, "vault"),
+    tmpDir: root,
+    cwd: root,
+    verificationStore: new MemoryContextVerificationStore(),
+    lineageRecorder,
+    requestUpstream: async request => {
+      assert.equal(request.body.toString("utf8").includes(secret), false);
+      const upstream = Readable.from([
+        Buffer.from(sseEvent(textEvent(`result ${placeholder}`))),
+        Buffer.from(sseEvent(finishEvent()))
+      ]);
+      upstream.statusCode = 200;
+      upstream.headers = { "content-type": "text/event-stream", "content-encoding": "identity" };
+      return upstream;
+    }
+  });
+  t.after(async () => {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const response = await proxyHttpRequest(
+    runtime,
+    minimalRequest(`secret=${secret}`, "agy-lineage-failure-session", "agy-lineage-failure-request")
+  );
+
+  assert.match(response.statusLine, /^HTTP\/1\.1 200/);
+  assert.equal(response.body.includes(`result ${secret}`), true);
+});
+
 test("AGY transport proxy forwards the audited metrics route opaquely", async t => {
   const root = await createTestTempDir("privacyai-agy-metrics-route-");
   const observed = {};

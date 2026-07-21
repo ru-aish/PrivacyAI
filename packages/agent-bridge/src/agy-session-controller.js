@@ -25,7 +25,7 @@ import {
   sessionVerificationCache
 } from "./model-session-state.js";
 import { SessionVault } from "./session-vault.js";
-import { recordLineage } from "./lineage/recorder.js";
+import { recordLineageBestEffort } from "./lineage/recorder.js";
 import {
   openInstallationPrivacyIdentity,
   privacyIdentityMetadata,
@@ -125,7 +125,7 @@ export async function createAgySessionController(options = {}) {
           onArtifactComplete: context.onSanitizerArtifactComplete
         });
         const candidateMap = mergeAgySessionMaps(sessionMap, result.sessionMapAdditions);
-        const lineageHandle = await recordLineage(context.lineageRecorder, "protectedRequest", {
+        const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
           sessionKey, provider: "antigravity", operation: "generate_content",
           placeholders: Object.keys(candidateMap), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: requestOptions.signal
         });

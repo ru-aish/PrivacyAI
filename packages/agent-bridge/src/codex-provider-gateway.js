@@ -50,7 +50,7 @@ import {
 import { trackServerSockets } from "./runtime/http-server.js";
 import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
 import { SessionVault } from "./session-vault.js";
-import { recordFailedProviderResponse, recordLineage } from "./lineage/recorder.js";
+import { recordFailedProviderResponse, recordLineageBestEffort } from "./lineage/recorder.js";
 import {
   openInstallationPrivacyIdentity,
   privacyIdentityMetadata,
@@ -335,7 +335,7 @@ async function handleRequestCore(request, response, context) {
       onSchemaTrace: context.onSchemaTrace
     });
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
-    const lineageHandle = await recordLineage(context.lineageRecorder, "protectedRequest", {
+    const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
       sessionKey: identity.sessionKey, provider: "codex", operation: "responses.create",
       model: typeof body.model === "string" ? body.model : undefined,
       placeholders: Object.keys(completeMap), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: context.requestSignal
@@ -479,7 +479,7 @@ async function proxyTransformed(
 
   const contentType = String(upstreamResponse.headers["content-type"] || "").toLowerCase();
   const statusCode = upstreamResponse.statusCode || 502;
-  await recordLineage(context.lineageRecorder, "providerResponse", lineageHandle, {
+  await recordLineageBestEffort(context.lineageRecorder, "providerResponse", lineageHandle, {
     success: statusCode >= 200 && statusCode < 300
   });
   const headerlessExpectedSse =
@@ -490,7 +490,7 @@ async function proxyTransformed(
       forceContentType: headerlessExpectedSse,
       sessionKey
     });
-    await recordLineage(context.lineageRecorder, "restoration", lineageHandle);
+    await recordLineageBestEffort(context.lineageRecorder, "restoration", lineageHandle);
     return;
   }
 
@@ -504,7 +504,7 @@ async function proxyTransformed(
     response.setHeader("content-type", "text/plain; charset=utf-8");
     response.writeHead(statusCode);
     response.end(restoreText(raw.toString("utf8"), sessionMap));
-    await recordLineage(context.lineageRecorder, "restoration", lineageHandle);
+    await recordLineageBestEffort(context.lineageRecorder, "restoration", lineageHandle);
     return;
   }
 
@@ -543,7 +543,7 @@ async function proxyTransformed(
   forwardResponseHeaders(response, upstreamResponse.headers, true);
   response.writeHead(statusCode);
   response.end(restoredBody);
-  await recordLineage(context.lineageRecorder, "restoration", lineageHandle);
+  await recordLineageBestEffort(context.lineageRecorder, "restoration", lineageHandle);
 }
 
 async function proxySseResponse(
