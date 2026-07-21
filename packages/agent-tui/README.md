@@ -1,8 +1,8 @@
 # PrivacyAI CLI
 
 `@privacy-ai/cli` publishes the single user-facing `privacyai` command. It owns
-onboarding, diagnostics, protected agent launchers, cache inspection, and
-lineage inspection. Users do not install separate PrivacyAI agent packages.
+onboarding, diagnostics, protected agent launchers, cache and lineage inspection,
+and explicit local-state operations. Users do not install separate PrivacyAI agent packages.
 
 ```bash
 npm install --global @privacy-ai/cli
@@ -33,6 +33,11 @@ privacyai doctor [--json]
 privacyai agent <claude|codex|agy> [...]
 privacyai cache [summary|list|show] [--limit N] [--json]
 privacyai lineage [summary|list|show|mutations] [--limit N] [--json]
+privacyai state [preflight|plan] [--json]
+privacyai state backup <directory> [--json]
+privacyai state migrate --backup <directory> [--json]
+privacyai state repair --backup <directory> [--json]
+privacyai state restore <directory> [--replace] [--replace-identity] [--json]
 ```
 
 `setup` remains an alias for `onboard`, and `diagnostics` remains an alias for
@@ -68,7 +73,8 @@ lower-precedence configuration.
 platform details, and installed Claude Code, Codex, and AGY executables. Missing
 agent executables are reported but do not prevent use of another supported
 agent. A broken installed executable or unavailable configured model fails the
-check.
+check. Doctor also reports local-state upgrade, repair, and recovery readiness
+using the same privacy-safe preflight service as `privacyai state`.
 
 ## Cache and lineage inspection
 
@@ -85,6 +91,16 @@ privacyai lineage summary
 privacyai lineage show <session-key> --json
 privacyai lineage mutations --limit 20
 ```
+
+## Local-state operations
+
+`privacyai state preflight` and `privacyai state plan` are read-only. Backups,
+migrations, repairs, and restores require explicit commands and bounded
+destinations. Migration and repair always create a verified backup first.
+Restore needs `--replace` when it overwrites existing state, and replacing
+installation identity needs the separate `--replace-identity` acknowledgement.
+No command silently resets, rotates, or regenerates identity. See [`docs/state-operations.md`](../../docs/state-operations.md)
+for schemas, guarantees, recovery behavior, and limitations.
 
 ## Protected agents
 

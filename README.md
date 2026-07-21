@@ -112,18 +112,20 @@ console.log(safePrompt);
 * **Web Demo:** [apps/web-demo/README.md](apps/web-demo/README.md)
 * **Extension Source:** [apps/browser-extension/README.md](apps/browser-extension/README.md)
 * **Architecture Docs:** [docs/architecture.md](docs/architecture.md)
+* **Local-State Operations:** [docs/state-operations.md](docs/state-operations.md)
 * **P0 Visual Review:** [interactive problem → solution walkthrough](docs/p0-context-privacy-review.html) · [mobile preview](docs/p0-context-privacy-review-preview.png)
 * **Code Examples:** [examples/README.md](examples/README.md)
 
 ## Native Claude Code, Codex, and Antigravity protection
 
 PrivacyAI exposes one global package and one command for all supported agents,
-onboarding, diagnostics, cache inspection, and lineage inspection:
+onboarding, diagnostics, cache and lineage inspection, and explicit local-state operations:
 
 ```bash
 npm install --global @privacy-ai/cli
 privacyai onboard
 privacyai doctor
+privacyai state preflight
 privacyai agent claude
 privacyai agent codex
 privacyai agent agy --print "your prompt"

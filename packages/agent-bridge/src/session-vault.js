@@ -100,6 +100,10 @@ export class SessionVault {
     }
     try {
       const parsed = parseStoredObject(serialized);
+      const version = parsed.version == null ? 1 : Number(parsed.version);
+      if (version !== 1 && version !== VAULT_VERSION) {
+        throw new TypeError("stored session data uses an unsupported version");
+      }
       const sessionMap = normalizeSessionMap(parsed.sessionMap);
       const identity = this.identityRoot
         ? sessionPrivacyIdentity(this.identityRoot, sessionId)
@@ -115,7 +119,7 @@ export class SessionVault {
         assertStoredIdentityMap(identity, parsed.identityMap, identityMap);
       }
       return {
-        version: Number(parsed.version || 1),
+        version,
         sessionId,
         sessionMap,
         identityMap,
@@ -187,6 +191,7 @@ export class SessionVault {
     try {
       throwIfVaultAborted(options.signal);
       const current = await this.load(sessionId);
+      if (current.version < VAULT_VERSION) throw vaultMigrationRequiredError();
       throwIfVaultAborted(options.signal);
       const nextMap = await updater(current);
       throwIfVaultAborted(options.signal);
@@ -348,6 +353,14 @@ function parseStoredObject(serialized) {
 function corruptVaultError() {
   const error = new Error("PrivacyAI found malformed data in its local session vault.");
   error.code = "PRIVACYAI_VAULT_CORRUPT";
+  return error;
+}
+
+function vaultMigrationRequiredError() {
+  const error = new Error(
+    "PrivacyAI session state requires explicit migration. Run `privacyai state migrate --backup <directory>` before continuing."
+  );
+  error.code = "PRIVACYAI_VAULT_MIGRATION_REQUIRED";
   return error;
 }
 

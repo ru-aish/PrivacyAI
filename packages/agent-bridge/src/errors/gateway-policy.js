@@ -37,6 +37,7 @@ const CODE_CATEGORIES = new Map([
   ["PRIVACYAI_CONTEXT_DB_WRITE_FAILED", "privacy_boundary"],
   ["PRIVACYAI_CONTEXT_DB_CLOSED", "privacy_boundary"],
   ["PRIVACYAI_CONTEXT_DB_SCHEMA_UNSUPPORTED", "privacy_boundary"],
+  ["PRIVACYAI_CONTEXT_DB_SCHEMA_MIGRATION_REQUIRED", "privacy_boundary"],
   ["PRIVACYAI_CONTEXT_DB_CORRUPT", "privacy_boundary"],
   ["PRIVACYAI_CONTEXT_DB_RETRY_TIMEOUT", "privacy_boundary"],
   ["PRIVACYAI_SESSION_MAP_FILE_CORRUPT", "privacy_boundary"],

@@ -247,3 +247,11 @@ is permission-protected but not yet encrypted at rest.
 
 Current platform support is Linux and macOS. Windows remains fail-closed until a
 fully tested equivalent launcher and transport boundary is available.
+
+## Operational local-state service
+
+The bridge exports a shared privacy-safe state service for read-only preflight
+and explicit backup, migration, repair, and restore. Supported write operations
+are staged, backup-first where applicable, symlink/hard-link safe, and never
+silently replace installation identity. The public contract and schema matrix
+are documented in [`docs/state-operations.md`](../../docs/state-operations.md).
