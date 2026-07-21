@@ -110,11 +110,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  macos-installed-release-gate:
+  macos-installed-storage-gate:
     runs-on: macos-latest
     timeout-minutes: 20
     env:
       CI: "true"
+      PRIVACYAI_ASSURANCE_SCOPE: platform-storage
     steps:
       - uses: actions/checkout@v4
         with:
@@ -130,7 +131,7 @@ jobs:
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
-      - name: Test macOS installed deployment lifecycle
+      - name: Test macOS installed storage lifecycle
         run: pnpm test:deployment-assurance
       - name: Test macOS configuration storage boundaries
         run: node --test packages/agent-bridge/test/config-store-security.test.js

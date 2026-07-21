@@ -41,6 +41,10 @@ const PRIVATE_FIXTURE = "assurance.private@example.test";
 const PROVIDER_FAILURE_FIXTURE = "provider-failure-secret-do-not-print";
 const EXECUTABLE_FAILURE_FIXTURE = "executable-failure-secret-do-not-print";
 const MAX_CAPTURE_BYTES = 2 * 1024 * 1024;
+const ASSURANCE_SCOPE = process.env.PRIVACYAI_ASSURANCE_SCOPE || "full";
+if (!new Set(["full", "platform-storage"]).has(ASSURANCE_SCOPE)) {
+  throw new Error("Unsupported deployment-assurance scope.");
+}
 
 const timings = [];
 let temporaryRoot;
@@ -78,17 +82,19 @@ try {
   await step("handle missing and corrupt native executables safely", () =>
     exerciseExecutableFailures(runtime)
   );
-  await step("dispatch a sanitized installed AGY flow and clean resources", () =>
-    exerciseSuccessfulDispatch(runtime)
-  );
-  await step("clean up after a failed native child", () =>
-    exerciseFailedDispatch(runtime)
-  );
-  await step("interrupt, reap, restart, and resume installed dispatch", () =>
-    exerciseInterruptedDispatch(runtime)
-  );
+  if (ASSURANCE_SCOPE === "full") {
+    await step("dispatch a sanitized installed AGY flow and clean resources", () =>
+      exerciseSuccessfulDispatch(runtime)
+    );
+    await step("clean up after a failed native child", () =>
+      exerciseFailedDispatch(runtime)
+    );
+    await step("interrupt, reap, restart, and resume installed dispatch", () =>
+      exerciseInterruptedDispatch(runtime)
+    );
+  }
   await step("assert final credential and filesystem hygiene", () =>
-    assertFinalFilesystemHygiene(runtime)
+    assertFinalFilesystemHygiene(runtime, { requireIdentity: ASSURANCE_SCOPE === "full" })
   );
 
   const elapsed = timings.reduce((total, item) => total + item.seconds, 0);
@@ -609,11 +615,15 @@ async function exerciseInterruptedDispatch(runtime) {
   }
 }
 
-async function assertFinalFilesystemHygiene(runtime) {
-  const identityMetadata = await stat(runtime.identityPath);
-  assert.equal(identityMetadata.mode & 0o777, 0o600);
-  assert.equal(identityMetadata.nlink, 1);
-  await assertNotSymlink(runtime.identityPath);
+async function assertFinalFilesystemHygiene(runtime, options = {}) {
+  if (options.requireIdentity) {
+    const identityMetadata = await stat(runtime.identityPath);
+    assert.equal(identityMetadata.mode & 0o777, 0o600);
+    assert.equal(identityMetadata.nlink, 1);
+    await assertNotSymlink(runtime.identityPath);
+  } else {
+    await assertPathMissing(runtime.identityPath);
+  }
 
   const files = await listTree(runtime.runtimeRoot);
   const forbidden = files.filter(path =>

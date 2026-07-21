@@ -28,7 +28,7 @@ The gate is deterministic and local-only. It creates temporary package, home, st
 | Privacy-safe output | Checks onboarding, doctor, executable failures, dispatch, and interruption output for protected fixture values | Fails on any protected prompt or controlled failure secret in public output |
 | Final cleanup | Verifies expected persistent configuration/identity state and private file modes | Rejects unexpected symlinks, temporary files, hook locks, session maps, runtime directories, or persisted fixture secrets |
 
-A normal Linux run currently completes the 13 installed-system stages in approximately 13 seconds. GitHub Actions repeats the installed lifecycle on macOS and also runs the focused security/reliability regressions, the production publish dry-run, the canonical CLI package suite, and the full workspace suite on Linux.
+A normal Linux run currently completes the 13-stage installed-system lifecycle in approximately 13 seconds. GitHub Actions also runs a focused packed-artifact install → onboard → doctor → storage-hygiene lifecycle on macOS, plus the focused security/reliability regressions, production publish dry-run, canonical CLI package suite, and full workspace suite on Linux.
 
 ## CI behavior
 
@@ -38,7 +38,7 @@ A normal Linux run currently completes the 13 installed-system stages in approxi
 - pushes to `main` or `feature/wave3-deployment-assurance` that touch the same deployment inputs;
 - manual `workflow_dispatch` runs.
 
-The Linux job uses Node.js 22 and pnpm 10.17.1, has a 35-minute timeout, and uploads the deployment-assurance log only when it fails. A focused macOS installed-release job uses the same runtime and package manager with a 20-minute timeout. The workflow cancels superseded runs and has read-only repository permissions.
+The Linux job uses Node.js 22 and pnpm 10.17.1, has a 35-minute timeout, and uploads the deployment-assurance log only when it fails. A focused macOS installed-storage job uses the same runtime and package manager with a 20-minute timeout. The workflow cancels superseded runs and has read-only repository permissions.
 
 ## Proven product blocker and fix
 
@@ -50,5 +50,5 @@ The configuration store now validates path components, ownership, permissions, s
 
 - Default CI uses no real credentials, private user prompts, or external providers. Live-provider checks remain explicit, separate opt-in work.
 - The end-to-end native dispatch fixture exercises AGY strict mode. Claude, Codex gateway, and AGY transport semantics remain covered by their focused source-level suites; this gate checks their installed discovery/error boundary rather than contacting those services.
-- Linux and macOS run the installed release gate. Windows is intentionally rejected by the current CLI package contract.
+- Linux runs the complete installed release gate, including AGY dispatch failure/interruption/restart. macOS runs the focused packed-artifact storage lifecycle and configuration boundary tests; native AGY dispatch is not asserted there. Windows is intentionally rejected by the current CLI package contract.
 - The localhost registry reproduces installation from the frozen workspace dependency tree. It validates package-manager extraction and dependency resolution without asserting public-registry availability or publishing authorization.
