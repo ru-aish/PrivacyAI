@@ -67,6 +67,7 @@ export async function sanitizeStructuredValue(value, options = {}) {
     let classifierResult = await options.sanitizer(shield.text, {
       identityConfidenceThreshold: options.identityConfidenceThreshold ?? 0.85,
       artifactType,
+      identity: options.identity,
       signal: options.signal
     });
     throwIfAborted(options.signal);
@@ -111,9 +112,13 @@ export async function sanitizeStructuredValue(value, options = {}) {
   const sanitizedValue = rebuildStructuredValue(template, resolved);
   assertNoProtectedOriginalsInValue(sanitizedValue, state.completeMap);
 
+  const identityMapAdditions = options.identity?.describeSessionMap?.(state.additions, {
+    domain: artifactType
+  });
   return {
     value: sanitizedValue,
     sessionMapAdditions: state.additions,
+    ...(identityMapAdditions ? { identityMapAdditions } : {}),
     changed: !structuredValuesEqual(value, sanitizedValue),
     metrics: {
       modelCallCount: batches.length,

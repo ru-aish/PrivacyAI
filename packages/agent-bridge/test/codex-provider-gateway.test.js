@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { restoreValue } from "@privacy-ai/sdk";
+import { createPrivacyIdentityService } from "@privacy-ai/sdk/identity";
 import {
   createGatewayDiagnosticReporter,
   publicGatewayFailure,
@@ -37,6 +38,14 @@ const sessionMap = {
   "[EMAIL_1]": PRIVATE_EMAIL,
   "[API_KEY_1]": PRIVATE_KEY
 };
+const TEST_PRIVACY_IDENTITY = createPrivacyIdentityService({
+  key: Buffer.alloc(32, 0x43),
+  scope: { kind: "session", id: "codex-provider-gateway-tests" }
+});
+
+function withTestIdentity(options = {}) {
+  return { identity: TEST_PRIVACY_IDENTITY, ...options };
+}
 
 function deterministicSanitizer(text) {
   let sanitizedPrompt = text;
@@ -205,7 +214,7 @@ test("Codex function-call argument keys remain structural while leaf values are 
   }];
 
   let sawCellId = false;
-  const result = await sanitizeCodexRequestBody(body, {
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({
     sanitizer: async text => {
       sawCellId ||= text.includes("cell_id");
       let sanitizedPrompt = text;
@@ -220,7 +229,7 @@ test("Codex function-call argument keys remain structural while leaf values are 
       }
       return { sanitizedPrompt, sessionMap: mapped };
     }
-  });
+  }));
 
   assert.equal(sawCellId, false);
   assert.deepEqual(JSON.parse(result.body.input[0].arguments), {
@@ -448,14 +457,14 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
   const media = sampleRequest();
   media.input = [{ type: "message", role: "user", content: [{ type: "output_image", image_url: "data:x" }] }];
   await assert.rejects(
-    sanitizeCodexRequestBody(media, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(media, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA"
   );
 
   const unknown = sampleRequest();
   unknown.input = [{ type: "future_tool_call", secret: PRIVATE_EMAIL }];
   await assert.rejects(
-    sanitizeCodexRequestBody(unknown, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(unknown, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_INPUT"
   );
 
@@ -466,7 +475,7 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
     content: [{ type: "future_text", payload: PRIVATE_EMAIL }]
   }];
   await assert.rejects(
-    sanitizeCodexRequestBody(futureContent, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(futureContent, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_CONTENT"
   );
 
@@ -477,7 +486,7 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
     content: [{ type: "input_text", text: { private: PRIVATE_EMAIL } }]
   }];
   await assert.rejects(
-    sanitizeCodexRequestBody(malformedText, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(malformedText, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_CONTENT"
   );
 
@@ -513,7 +522,7 @@ test("Codex request controls reject private or unsupported protocol values", asy
     const request = sampleRequest();
     mutate(request);
     await assert.rejects(
-      sanitizeCodexRequestBody(request, { sanitizer: deterministicSanitizer }),
+      sanitizeCodexRequestBody(request, withTestIdentity({ sanitizer: deterministicSanitizer })),
       error => error?.code === code
     );
   }
@@ -523,7 +532,7 @@ test("Codex rejects invalid provider identifiers before forwarding", async () =>
   const body = sampleRequest();
   body.tools[0].name = "invalid.tool.name";
   await assert.rejects(
-    sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_INVALID_TOOL_IDENTIFIER"
   );
 });
@@ -532,21 +541,21 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
   const unknownToolKey = sampleRequest();
   unknownToolKey.tools[0][PRIVATE_EMAIL] = PRIVATE_KEY;
   await assert.rejects(
-    sanitizeCodexRequestBody(unknownToolKey, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(unknownToolKey, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
   );
 
   const unknownItemKey = sampleRequest();
   unknownItemKey.input[0][PRIVATE_EMAIL] = PRIVATE_KEY;
   await assert.rejects(
-    sanitizeCodexRequestBody(unknownItemKey, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(unknownItemKey, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
   );
 
   const hosted = sampleRequest();
   hosted.tools = [{ type: "web_search", external_web_access: true }];
   await assert.rejects(
-    sanitizeCodexRequestBody(hosted, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(hosted, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_PROVIDER_TOOL"
   );
 
@@ -604,7 +613,7 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
     }
   }];
   await assert.rejects(
-    sanitizeCodexRequestBody(protectedGrammar, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(protectedGrammar, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE" &&
       !error.message.includes(PRIVATE_KEY)
   );
@@ -623,7 +632,7 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
       user: PRIVATE_EMAIL
     }
   }];
-  const shellResult = await sanitizeCodexRequestBody(localShell, { sanitizer: deterministicSanitizer });
+  const shellResult = await sanitizeCodexRequestBody(localShell, withTestIdentity({ sanitizer: deterministicSanitizer }));
   const action = shellResult.body.input[0].action;
   assert.deepEqual(action.command, ["printf", "[EMAIL_1]"]);
   assert.equal(action.working_directory, "/tmp/[EMAIL_1]");
@@ -646,7 +655,7 @@ test("additional-tools accepts Codex roles while sanitizing definitions", async 
         parameters: { type: "object", properties: { key: { type: "string" } } }
       }]
     }];
-    const result = await sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer });
+    const result = await sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer }));
     assert.equal(result.body.input[0].tools[0].description.includes(PRIVATE_EMAIL), false);
     assert.match(result.body.input[0].tools[0].description, /\[EMAIL_1\]/);
   }
@@ -654,7 +663,7 @@ test("additional-tools accepts Codex roles while sanitizing definitions", async 
   const invalid = sampleRequest();
   invalid.input = [{ type: "additional_tools", role: "system", tools: [] }];
   await assert.rejects(
-    sanitizeCodexRequestBody(invalid, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(invalid, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_INPUT"
   );
 });
@@ -690,10 +699,11 @@ test("protected tool-search names use reversible provider-safe aliases", async (
       sessionMap: found ? { "[PRIVATE_VALUE_5]": privateToolName } : {}
     };
   };
-  const result = await sanitizeCodexRequestBody(body, { sanitizer });
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer }));
   const providerName = result.body.input[0].tools[0].tools[0].name;
 
-  assert.equal(providerName, "PRIVATE_VALUE_5");
+  assert.notEqual(providerName, "PRIVATE_VALUE_5");
+  assert.match(providerName, /^privacyai_[a-f0-9]{12,52}$/);
   assert.match(providerName, /^[A-Za-z0-9_-]+$/);
   assert.equal(result.body.instructions.includes("[PRIVATE_VALUE_5]"), true);
   assert.equal(result.body.input[0].tools[0].tools[0].description.includes("[PRIVATE_VALUE_5]"), true);
@@ -773,7 +783,9 @@ test("provider identifier aliases survive repeated gateway turns", async t => {
     await response.text();
   }
 
-  assert.deepEqual(seenNames, ["PRIVATE_VALUE_5", "PRIVATE_VALUE_5"]);
+  assert.equal(seenNames.length, 2);
+  assert.match(seenNames[0], /^privacyai_[a-f0-9]{12,52}$/);
+  assert.equal(seenNames[1], seenNames[0]);
 });
 
 test("provider-safe tool aliases avoid collisions with real tool names", async () => {
@@ -795,7 +807,7 @@ test("provider-safe tool aliases avoid collisions with real tool names", async (
   }];
   body.input = [];
 
-  const result = await sanitizeCodexRequestBody(body, {
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({
     sanitizer: async text => {
       const found = text.includes(privateToolName);
       return {
@@ -803,11 +815,11 @@ test("provider-safe tool aliases avoid collisions with real tool names", async (
         sessionMap: found ? { "[PRIVATE_VALUE_5]": privateToolName } : {}
       };
     }
-  });
+  }));
   const alias = result.body.tools[1].name;
 
   assert.notEqual(alias, "PRIVATE_VALUE_5");
-  assert.match(alias, /^privacyai_[a-f0-9]{24}(?:_\d+)?$/);
+  assert.match(alias, /^privacyai_[a-f0-9]{12,52}$/);
   assert.match(alias, /^[A-Za-z0-9_-]+$/);
   assert.equal(result.sessionMapAdditions[alias], privateToolName);
 
@@ -1022,7 +1034,7 @@ test("Codex text.format schema uses the same immutable policy, including boolean
   assert.equal(result.schemaTraces.find(trace => trace.schemaKind === "text_format")?.structurePreserved, true);
 
   body.text.format.schema = true;
-  const booleanResult = await sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer });
+  const booleanResult = await sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer }));
   assert.equal(booleanResult.body.text.format.schema, true);
 });
 
@@ -1033,7 +1045,7 @@ test("Codex schema policy fails closed for detectable or known protected immutab
     $defs: { [PRIVATE_EMAIL]: { type: "string" } }
   };
   await assert.rejects(
-    sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_SCHEMA_IMMUTABLE_PROTECTED_VALUE" && !error.message.includes(PRIVATE_EMAIL)
   );
 
@@ -1063,7 +1075,7 @@ test("Codex schema policy fails closed for detectable or known protected immutab
   ]) {
     body.tools[0].parameters = malformedSchema;
     await assert.rejects(
-      sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
+      sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
       error => error?.code === "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION"
     );
   }
@@ -2786,10 +2798,12 @@ test("Codex gateway preserves legacy injected verification stores without update
     body: JSON.stringify(sampleRequest())
   });
   assert.equal(response.status, 200, await response.text());
-  assert.equal(
-    verificationStore.loadThread("codex-provider:thread-123").sessionMap["[EMAIL_1]"],
-    PRIVATE_EMAIL
-  );
+  const thread = verificationStore.loadThread("codex-provider:thread-123");
+  assert.equal(thread.sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.match(thread.identityKeyId, /^kid1:[a-f0-9]{32}$/);
+  assert.equal(thread.identityScope.kind, "session");
+  assert.match(thread.identityMap["[EMAIL_1]"].id, /^phi1:[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(thread.identityMap).includes(PRIVATE_EMAIL), false);
 });
 
 test("Codex provider args force loopback Responses transport and disable unsupported provider-hosted tools", () => {

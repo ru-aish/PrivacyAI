@@ -12,6 +12,9 @@ CREATE TABLE IF NOT EXISTS threads (
   parent_keys_json TEXT NOT NULL,
   session_map_json TEXT NOT NULL,
   policy_fingerprint TEXT NOT NULL,
+  identity_key_id TEXT NOT NULL DEFAULT '',
+  identity_scope_json TEXT NOT NULL DEFAULT '{}',
+  identity_map_json TEXT NOT NULL DEFAULT '{}',
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS verified_items (
@@ -20,6 +23,8 @@ CREATE TABLE IF NOT EXISTS verified_items (
   artifact_type TEXT NOT NULL,
   policy_fingerprint TEXT NOT NULL,
   additions_json TEXT NOT NULL,
+  identity_key_id TEXT NOT NULL DEFAULT '',
+  identity_json TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL,
   last_used_at INTEGER NOT NULL,
   hit_count INTEGER NOT NULL DEFAULT 0
@@ -188,6 +193,13 @@ CREATE TABLE IF NOT EXISTS ledger_file_mutation_insertions (
   CHECK(length >= 0)
 );`;
 
+function addMissingColumns(db, table, definitions) {
+  const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(column => column.name));
+  for (const [name, definition] of definitions) {
+    if (!columns.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+  }
+}
+
 export function initializeSchema(db) {
   db.exec("CREATE TABLE IF NOT EXISTS privacyai_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
   const meta = db.prepare("SELECT value FROM privacyai_meta WHERE key='schema_version'").get();
@@ -199,6 +211,17 @@ export function initializeSchema(db) {
     if (version < 3) {
       const columns = db.prepare("PRAGMA table_info(ledger_file_mutations)").all().map(c => c.name);
       for (const [name, definition] of [["operation_type", "TEXT NOT NULL DEFAULT 'unknown'"], ["source_length", "INTEGER"], ["next_length", "INTEGER"]]) if (!columns.includes(name)) db.exec(`ALTER TABLE ledger_file_mutations ADD COLUMN ${name} ${definition}`);
+    }
+    if (version < 4) {
+      addMissingColumns(db, "threads", [
+        ["identity_key_id", "TEXT NOT NULL DEFAULT ''"],
+        ["identity_scope_json", "TEXT NOT NULL DEFAULT '{}'"],
+        ["identity_map_json", "TEXT NOT NULL DEFAULT '{}'"]
+      ]);
+      addMissingColumns(db, "verified_items", [
+        ["identity_key_id", "TEXT NOT NULL DEFAULT ''"],
+        ["identity_json", "TEXT NOT NULL DEFAULT '{}'"]
+      ]);
     }
     db.prepare("INSERT INTO privacyai_meta(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(CONTEXT_SCHEMA_VERSION));
     db.exec("COMMIT");

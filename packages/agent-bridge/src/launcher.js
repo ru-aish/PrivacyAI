@@ -19,6 +19,10 @@ import {
 } from "./context-verification-store.js";
 import { resolveExecutable, verifyNativeExecutable } from "./executable.js";
 import { acquireNativeLaunchLock } from "./launch-lock.js";
+import {
+  openInstallationPrivacyIdentity,
+  policyPrivacyIdentity
+} from "./privacy-identity.js";
 import { checkPrivacyModel, privacyModelHealthError } from "./model-health.js";
 import {
   validateNativeArguments,
@@ -119,6 +123,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
     }
 
     const sanitizer = options.sanitizer || createPrivacySanitizer(loaded.config, options);
+    const identityRoot = await openInstallationPrivacyIdentity(options);
     const providerContextMaxChars = derivePrivacyContextMaxChars(loaded.config, options);
     const providerContextMaxTokens = derivePrivacyContextMaxTokens(loaded.config, options);
 
@@ -126,6 +131,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       verificationStore = await openContextVerificationStore(options);
       ownsVerificationStore = !options.verificationStore;
       const policyFingerprint = launchPolicyFingerprint(sanitizer, options, "codex-provider");
+      const privacyIdentity = policyPrivacyIdentity(identityRoot, policyFingerprint);
       env.PRIVACYAI_POLICY_FINGERPRINT = policyFingerprint;
       env.PRIVACYAI_TOOL_POLICY = "gateway";
 
@@ -140,6 +146,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         maxFiles: options.startupContextMaxFiles,
         verificationStore,
         policyFingerprint,
+        identityRoot,
+        identity: privacyIdentity,
         // Gateway mode sanitizes the rendered request before it can leave the
         // machine, so discoveries are cached rather than treated as fatal.
         blockHighRisk: false
@@ -154,6 +162,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
       gateway = await (options.startCodexProviderGateway || startCodexProviderGateway)({
         sanitizer,
         verificationStore,
+        identityRoot,
         cwd,
         baseDir: options.vaultDir,
         maxContextChars: providerContextMaxChars,
@@ -190,6 +199,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         verificationStore,
         policyFingerprint,
+        identityRoot,
+        identity: privacyIdentity,
         renderedFingerprint: await startupRenderFingerprint({ binary, executableProbe, cwd, staticAudit, policyFingerprint, args: protectedArgs, config: loaded.config }),
         blockHighRisk: false,
         primeRequestCache: true
@@ -230,6 +241,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
     verificationStore = await openContextVerificationStore(options);
     ownsVerificationStore = !options.verificationStore;
     const policyFingerprint = launchPolicyFingerprint(sanitizer, options, "startup-context");
+    const privacyIdentity = policyPrivacyIdentity(identityRoot, policyFingerprint);
     env.PRIVACYAI_POLICY_FINGERPRINT = policyFingerprint;
     env.PRIVACYAI_TOOL_POLICY = flavor === "claude" ? "gateway" : "isolate";
 
@@ -243,7 +255,9 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         maxFiles: options.startupContextMaxFiles,
         verificationStore,
-        policyFingerprint
+        policyFingerprint,
+        identityRoot,
+        identity: privacyIdentity
       });
       childArgs = ["--settings", settingsPath, ...isolation.args, ...forwardedArgs];
     } else {
@@ -258,6 +272,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         maxFiles: options.startupContextMaxFiles,
         verificationStore,
         policyFingerprint,
+        identityRoot,
+        identity: privacyIdentity,
         blockHighRisk: true
       });
 
@@ -284,6 +300,8 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         maxContextTokens: options.startupContextMaxTokens ?? providerContextMaxTokens,
         verificationStore,
         policyFingerprint,
+        identityRoot,
+        identity: privacyIdentity,
         // Strict mode has no live provider gateway to re-verify dynamic MCP
         // startup context, so it must render and inspect on every launch.
         blockHighRisk: true

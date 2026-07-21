@@ -20,7 +20,14 @@ test("SQLite verification store persists thread maps and verified items across r
     contentHash: "content-1",
     artifactType: "instructions",
     policyFingerprint,
-    sessionMapAdditions: { "[EMAIL_1]": "private@example.test" }
+    sessionMapAdditions: { "[EMAIL_1]": "private@example.test" },
+    identityKeyId: "kid1:verification-test",
+    identityMapAdditions: {
+      "[EMAIL_1]": {
+        id: "phi1:" + "a".repeat(64),
+        protectedValueId: "pvi1:" + "b".repeat(64)
+      }
+    }
   };
 
   const first = await openContextVerificationStore({ verificationDbPath: path });
@@ -28,7 +35,10 @@ test("SQLite verification store persists thread maps and verified items across r
   first.saveThread("codex-provider:thread-1", {
     parentSessionKeys: ["codex-provider:parent"],
     sessionMap: record.sessionMapAdditions,
-    policyFingerprint
+    policyFingerprint,
+    identityKeyId: record.identityKeyId,
+    identityScope: { kind: "session", id: "thread-1" },
+    identityMap: record.identityMapAdditions
   });
   first.putVerification(record);
   first.recordThreadItem({
@@ -42,8 +52,15 @@ test("SQLite verification store persists thread maps and verified items across r
 
   const second = await openContextVerificationStore({ verificationDbPath: path });
   t.after(() => second.close());
-  assert.deepEqual(second.loadThread("codex-provider:thread-1").sessionMap, record.sessionMapAdditions);
-  assert.deepEqual(second.getVerification(record.cacheKey, policyFingerprint).sessionMapAdditions, record.sessionMapAdditions);
+  const thread = second.loadThread("codex-provider:thread-1");
+  assert.deepEqual(thread.sessionMap, record.sessionMapAdditions);
+  assert.equal(thread.identityKeyId, record.identityKeyId);
+  assert.deepEqual(thread.identityScope, { kind: "session", id: "thread-1" });
+  assert.deepEqual(thread.identityMap, record.identityMapAdditions);
+  const verification = second.getVerification(record.cacheKey, policyFingerprint);
+  assert.deepEqual(verification.sessionMapAdditions, record.sessionMapAdditions);
+  assert.equal(verification.identityKeyId, record.identityKeyId);
+  assert.deepEqual(verification.identityMapAdditions, record.identityMapAdditions);
   assert.equal(second.getVerification(record.cacheKey, "different-policy"), undefined);
   assert.equal((await stat(path)).mode & 0o777, 0o600);
 });

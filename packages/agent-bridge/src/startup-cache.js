@@ -5,7 +5,8 @@ import { lstat, open } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
-import { rebaseSessionAdditions } from "@privacy-ai/sdk";
+import { parsePrivacyPlaceholder, rebaseSessionAdditions } from "@privacy-ai/sdk";
+import { documentPrivacyIdentity } from "./privacy-identity.js";
 
 const execFileAsync = promisify(execFile);
 const CACHE_VERSION = 1;
@@ -169,7 +170,8 @@ export async function sanitizeStartupFiles(manifest, options = {}) {
   for (const record of manifest.records) {
     const cacheKey = startupFileVerificationKey(
       record.contentHash,
-      policyFingerprint
+      policyFingerprint,
+      options.identityRoot
     );
     const cached = store?.getVerification(cacheKey, policyFingerprint);
     let sessionMapAdditions;
@@ -181,7 +183,9 @@ export async function sanitizeStartupFiles(manifest, options = {}) {
             contentHash: record.contentHash
           })
         : null;
-      sessionMapAdditions = text == null ? null : sessionMapFromPrivacyPlan(text, plan);
+      sessionMapAdditions = text == null
+        ? null
+        : sessionMapFromPrivacyPlan(text, plan, options.identityRoot, record.contentHash);
     } else if (cached) {
       sessionMapAdditions = cached.sessionMapAdditions || {};
     }
@@ -194,9 +198,19 @@ export async function sanitizeStartupFiles(manifest, options = {}) {
         contentHash: record.contentHash
       });
       sanitizerCalls += 1;
-      const result = await sanitizer(JSON.stringify({ path: record.pathHash, content: text }));
+      const identity = options.identityRoot
+        ? documentPrivacyIdentity(options.identityRoot, record.contentHash)
+        : undefined;
+      const result = await sanitizer(
+        JSON.stringify({ path: record.pathHash, content: text }),
+        { identity, artifactType: "startup_static_file" }
+      );
       sessionMapAdditions = result?.sessionMap || {};
-      const spans = privacySpansForMappings(text, sessionMapAdditions);
+      const spans = privacySpansForMappings(
+        text,
+        sessionMapAdditions,
+        options.identityRoot
+      );
       store?.putPrivacyPlan({
         contentHash: record.contentHash,
         policyFingerprint,
@@ -208,7 +222,8 @@ export async function sanitizeStartupFiles(manifest, options = {}) {
         contentHash: record.contentHash,
         artifactType: "startup_static_file",
         policyFingerprint,
-        sessionMapAdditions
+        sessionMapAdditions,
+        identityKeyId: options.identityRoot?.keyId || ""
       });
     }
     mergeSessionMappings(completeMap, additions, sessionMapAdditions);
@@ -216,7 +231,15 @@ export async function sanitizeStartupFiles(manifest, options = {}) {
   return { sessionMapAdditions: additions, sanitizerCalls };
 }
 
-export function startupFileVerificationKey(contentHash, policyFingerprint) {
+export function startupFileVerificationKey(contentHash, policyFingerprint, identityRoot) {
+  const material = {
+    version: CACHE_VERSION,
+    policyFingerprint: String(policyFingerprint),
+    contentHash: String(contentHash)
+  };
+  if (identityRoot?.digest) {
+    return `sha256:${identityRoot.digest("cache:startup-static-file", material)}`;
+  }
   return digest(
     "startup-static-file-v" + CACHE_VERSION + "\0" +
     String(policyFingerprint) + "\0" +
@@ -373,11 +396,14 @@ async function gitBlobForCleanPath(repo, file, counters) {
   }
 }
 
-function sessionMapFromPrivacyPlan(text, plan) {
+function sessionMapFromPrivacyPlan(text, plan, identityRoot, contentHash) {
   if (typeof text !== "string" || !Array.isArray(plan?.spans)) return null;
   const sessionMap = {};
   const placeholdersByReference = new Map();
   const counts = new Map();
+  const identity = identityRoot
+    ? documentPrivacyIdentity(identityRoot, contentHash)
+    : null;
   let previousEnd = 0;
 
   for (const span of plan.spans) {
@@ -394,14 +420,21 @@ function sessionMapFromPrivacyPlan(text, plan) {
     }
     previousEnd = span.end;
     const original = text.slice(span.start, span.end);
-    if (digest(original) !== span.reference) return null;
+    if (privacySpanReference(original, identityRoot) !== span.reference) return null;
 
     let placeholder = placeholdersByReference.get(span.reference);
     if (!placeholder) {
       const classification = placeholderClassification(span.classification);
-      const index = (counts.get(classification) || 0) + 1;
-      counts.set(classification, index);
-      placeholder = `[${classification}_${index}]`;
+      if (identity) {
+        placeholder = identity.canonicalPlaceholder(original, {
+          category: classification,
+          domain: "startup_static_file"
+        }).alias;
+      } else {
+        const index = (counts.get(classification) || 0) + 1;
+        counts.set(classification, index);
+        placeholder = "[" + classification + "_" + index + "]";
+      }
       placeholdersByReference.set(span.reference, placeholder);
       sessionMap[placeholder] = original;
     } else if (sessionMap[placeholder] !== original) {
@@ -419,7 +452,7 @@ function placeholderClassification(value) {
   return /^[A-Z][A-Z0-9_]*$/.test(normalized) ? normalized : "PRIVATE_VALUE";
 }
 
-function privacySpansForMappings(text, sessionMap) {
+function privacySpansForMappings(text, sessionMap, identityRoot) {
   if (typeof text !== "string" || !sessionMap || typeof sessionMap !== "object") return [];
   const candidates = Object.entries(sessionMap)
     .filter(([placeholder, original]) =>
@@ -448,15 +481,21 @@ function privacySpansForMappings(text, sessionMap) {
       start: match.index,
       end: match.index + match[0].length,
       classification: startupClassification(candidate.placeholder),
-      reference: digest(candidate.original)
+      reference: privacySpanReference(candidate.original, identityRoot)
     });
   }
   return spans;
 }
 
+function privacySpanReference(original, identityRoot) {
+  return identityRoot?.reference
+    ? identityRoot.reference("startup-protected-span", original)
+    : digest(original);
+}
+
 function startupClassification(placeholder) {
-  const match = String(placeholder).match(/^\[([A-Z][A-Z0-9_]*?)(?:_\d+)?\]$/i);
-  return match ? match[1].toLocaleLowerCase("en-US") : "private_value";
+  const parsed = parsePrivacyPlaceholder(String(placeholder));
+  return parsed ? parsed.category.toLocaleLowerCase("en-US") : "private_value";
 }
 
 function escapeRegExp(value) {
