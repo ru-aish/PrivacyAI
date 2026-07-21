@@ -345,8 +345,8 @@ function agyBaseEnvironment(options = {}) {
   return env;
 }
 
-async function resolveAgyExecutable(options) {
-  const fromPath = await (options.resolveExecutable || resolveExecutable)("agy");
+export async function resolveAgyExecutable(options = {}) {
+  const fromPath = await (options.resolveExecutable || resolveExecutable)("agy", options);
   if (fromPath) return fromPath;
   const candidate = join(options.homeDir || homedir(), ".local", "bin", "agy");
   try {
