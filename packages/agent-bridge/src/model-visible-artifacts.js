@@ -42,7 +42,8 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
       serialized,
       entry.artifactType,
       policyFingerprint,
-      entry.objectKeyPolicyKey
+      entry.objectKeyPolicyKey,
+      options.identityRoot
     );
     const cached = options.cache?.get?.(cacheKey, policyFingerprint);
     const candidate = { ...entry, index, cacheKey, contentHash };
@@ -99,6 +100,7 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
       tokenCounter: options.tokenCounter,
       normalizeClassifierResult: options.normalizeClassifierResult,
       artifactType: `${options.artifactTypePrefix || "model"}_visible_batch`,
+      identity: options.identity,
       signal: options.signal,
       onBatchComplete: typeof options.onBatchComplete === "function"
         ? async details => {
@@ -151,7 +153,11 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
           contentHash: destination.contentHash,
           artifactType: destination.artifactType,
           policyFingerprint,
-          sessionMapAdditions: verificationMap
+          sessionMapAdditions: verificationMap,
+          identityKeyId: options.identityRoot?.keyId || "",
+          identityMapAdditions: options.identity?.describeSessionMap?.(verificationMap, {
+            domain: destination.artifactType
+          }) || {}
         }]);
       }
     }
@@ -246,8 +252,19 @@ function verificationKeyFromSerialized(
   serialized,
   artifactType,
   policyFingerprint,
-  objectKeyPolicyKey
+  objectKeyPolicyKey,
+  identityRoot
 ) {
+  const material = {
+    version: 1,
+    policyFingerprint: String(policyFingerprint),
+    artifactType: String(artifactType),
+    objectKeyPolicyKey: String(objectKeyPolicyKey),
+    serialized
+  };
+  if (identityRoot?.digest) {
+    return identityRoot.digest("cache:model-visible", material);
+  }
   return createHash("sha256")
     .update(String(policyFingerprint))
     .update("\0")

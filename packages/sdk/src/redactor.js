@@ -1,7 +1,7 @@
 import { RedactionPlan, createRedactionPlan } from "./redaction-plan.js";
 
-export function redact(text, detections) {
-  const plan = createRedactionPlan(text, detections);
+export function redact(text, detections, options = {}) {
+  const plan = createRedactionPlan(text, detections, options);
   return plan.toResult("local-regex");
 }
 

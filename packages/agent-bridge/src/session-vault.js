@@ -1,12 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { normalizeSessionMap } from "@privacy-ai/sdk";
 
 import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
+import {
+  identityDomainForAlias,
+  loadInstallationPrivacyIdentity,
+  sessionPrivacyIdentity
+} from "./privacy-identity.js";
 
-const VAULT_VERSION = 1;
+const VAULT_VERSION = 2;
+const VAULT_LOCATOR_VERSION = 1;
+const VAULT_LOCATOR_KIND = "privacyai-vault-locator";
 
 export class SessionVault {
   constructor(options = {}) {
@@ -15,65 +22,147 @@ export class SessionVault {
       process.env.PRIVACYAI_AGENT_VAULT_DIR ||
       join(homedir(), ".local", "share", "privacyai", "agent-sessions")
     );
+    this.identityRoot = options.identityRoot;
   }
 
   pathForSession(sessionId) {
-    if (!sessionId || typeof sessionId !== "string") {
-      throw new TypeError("SessionVault requires a non-empty session id.");
+    requireSessionId(sessionId);
+    if (this.identityRoot?.digest) {
+      const digest = this.identityRoot.digest("vault-path", {
+        version: VAULT_VERSION,
+        sessionId
+      });
+      return join(this.baseDir, `v${VAULT_VERSION}-${digest}.json`);
     }
+    return this.legacyPathForSession(sessionId);
+  }
+
+  legacyPathForSession(sessionId) {
+    requireSessionId(sessionId);
     const digest = createHash("sha256").update(sessionId).digest("hex");
     return join(this.baseDir, `${digest}.json`);
   }
 
   async load(sessionId) {
-    const path = this.pathForSession(sessionId);
+    let path = this.pathForSession(sessionId);
+    const legacyPath = this.legacyPathForSession(sessionId);
     await ensurePrivateDirectory(this.baseDir);
     let serialized;
+    let sourcePath = path;
     try {
       serialized = await readFile(path, "utf8");
     } catch (error) {
       if (error?.code !== "ENOENT") throw error;
-      return {
-        version: VAULT_VERSION,
-        sessionId,
-        sessionMap: {},
-        updatedAt: null,
-        path
-      };
+      if (path !== legacyPath) {
+        try {
+          serialized = await readFile(legacyPath, "utf8");
+          sourcePath = legacyPath;
+        } catch (legacyError) {
+          if (legacyError?.code !== "ENOENT") throw legacyError;
+        }
+      }
+      if (serialized == null && !this.identityRoot) {
+        try {
+          this.identityRoot = await loadInstallationPrivacyIdentity({ baseDir: this.baseDir });
+          path = this.pathForSession(sessionId);
+          if (path !== legacyPath) {
+            serialized = await readFile(path, "utf8");
+            sourcePath = path;
+          }
+        } catch (identityError) {
+          if (identityError?.code !== "ENOENT") throw identityError;
+        }
+      }
+      if (serialized == null) {
+        const identity = this.identityRoot
+          ? sessionPrivacyIdentity(this.identityRoot, sessionId)
+          : null;
+        return {
+          version: VAULT_VERSION,
+          sessionId,
+          sessionMap: {},
+          identityMap: {},
+          identityKeyId: identity?.keyId || null,
+          identityScope: identity?.scope || null,
+          updatedAt: null,
+          path
+        };
+      }
+    }
+    try {
+      const located = await resolveVaultLocator(serialized, sourcePath, this.baseDir);
+      if (located) {
+        serialized = located.serialized;
+        sourcePath = located.path;
+      }
+    } catch {
+      throw corruptVaultError();
     }
     try {
       const parsed = parseStoredObject(serialized);
+      const sessionMap = normalizeSessionMap(parsed.sessionMap);
+      const identity = this.identityRoot
+        ? sessionPrivacyIdentity(this.identityRoot, sessionId)
+        : null;
+      const identityMap = identity
+        ? describeSessionMap(identity, sessionMap)
+        : normalizeStoredIdentityMap(parsed.identityMap);
+      if (
+        identity &&
+        parsed.identityKeyId === identity.keyId &&
+        parsed.identityMap != null
+      ) {
+        assertStoredIdentityMap(identity, parsed.identityMap, identityMap);
+      }
       return {
-        version: parsed.version || VAULT_VERSION,
+        version: Number(parsed.version || 1),
         sessionId,
-        sessionMap: normalizeSessionMap(parsed.sessionMap),
+        sessionMap,
+        identityMap,
+        identityKeyId: identity?.keyId || parsed.identityKeyId || null,
+        identityScope: identity?.scope || parsed.identityScope || null,
         updatedAt: parsed.updatedAt || null,
-        path
+        path,
+        ...(sourcePath !== path ? { legacyPath: sourcePath } : {})
       };
-    } catch {
+    } catch (error) {
+      if (error?.code === "PRIVACYAI_IDENTITY_COLLISION") throw error;
       throw corruptVaultError();
     }
   }
 
   async save(sessionId, sessionMap) {
     const path = this.pathForSession(sessionId);
+    const legacyPath = this.legacyPathForSession(sessionId);
     await ensurePrivateDirectory(this.baseDir);
 
+    const normalizedMap = normalizeSessionMap(sessionMap);
+    const identity = this.identityRoot
+      ? sessionPrivacyIdentity(this.identityRoot, sessionId)
+      : null;
     const record = {
       version: VAULT_VERSION,
       sessionId,
-      sessionMap: normalizeSessionMap(sessionMap),
+      sessionMap: normalizedMap,
+      identityMap: identity ? describeSessionMap(identity, normalizedMap) : {},
+      identityKeyId: identity?.keyId || null,
+      identityScope: identity?.scope || null,
       updatedAt: new Date().toISOString()
     };
-    const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    try {
-      await writeFile(tempPath, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-      await chmod(tempPath, 0o600);
-      await rename(tempPath, path);
-      await chmod(path, 0o600);
-    } catch (error) {
-      await rm(tempPath, { force: true }).catch(() => {});
-      throw error;
+    const previousTarget = legacyPath === path
+      ? null
+      : await readVaultLocatorTarget(legacyPath, this.baseDir);
+    await writePrivateJsonAtomic(path, record);
+    if (legacyPath !== path) {
+      await writePrivateJsonAtomic(legacyPath, {
+        version: VAULT_LOCATOR_VERSION,
+        kind: VAULT_LOCATOR_KIND,
+        file: basename(path),
+        updatedAt: record.updatedAt
+      });
+      if (previousTarget && previousTarget !== path) {
+        await rm(previousTarget, { force: true });
+      }
     }
     return { ...record, path };
   }
@@ -91,7 +180,10 @@ export class SessionVault {
       throw new TypeError("SessionVault.update requires an updater function.");
     }
 
-    const release = await acquireSessionLock(`${this.pathForSession(sessionId)}.lock`, options);
+    const release = await acquireSessionLock(
+      this.legacyPathForSession(sessionId) + ".lock",
+      options
+    );
     try {
       throwIfVaultAborted(options.signal);
       const current = await this.load(sessionId);
@@ -123,6 +215,126 @@ export async function loadSessionMap(options = {}) {
   if (!sessionId) return {};
   const vault = options.vault || new SessionVault(options);
   return (await vault.load(sessionId)).sessionMap;
+}
+
+async function resolveVaultLocator(serialized, sourcePath, baseDir) {
+  const file = parseVaultLocatorFile(serialized);
+  if (!file) return null;
+  const path = join(baseDir, file);
+  if (path === sourcePath) throw new TypeError("vault locator cycle");
+  return { path, serialized: await readFile(path, "utf8") };
+}
+
+async function readVaultLocatorTarget(path, baseDir) {
+  let serialized;
+  try {
+    serialized = await readFile(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  const file = parseVaultLocatorFile(serialized);
+  return file ? join(baseDir, file) : null;
+}
+
+function parseVaultLocatorFile(serialized) {
+  let value;
+  try {
+    value = JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (value.kind !== VAULT_LOCATOR_KIND) return null;
+  if (
+    value.version !== VAULT_LOCATOR_VERSION ||
+    typeof value.file !== "string" ||
+    basename(value.file) !== value.file ||
+    !/^v2-[a-f0-9]{64}\.json$/.test(value.file)
+  ) {
+    throw new TypeError("vault locator is malformed");
+  }
+  return value.file;
+}
+
+async function writePrivateJsonAtomic(path, value) {
+  const tempPath = path + "." + process.pid + "." + randomUUID() + ".tmp";
+  try {
+    await writeFile(tempPath, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
+    await chmod(tempPath, 0o600);
+    await rename(tempPath, path);
+    await chmod(path, 0o600);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+function describeSessionMap(identity, sessionMap) {
+  return identity.describeSessionMap(sessionMap, {
+    domainForAlias: alias => identityDomainForAlias(alias)
+  });
+}
+
+function normalizeStoredIdentityMap(value) {
+  if (value == null) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("stored identity metadata must be an object");
+  }
+  const output = {};
+  for (const [alias, record] of Object.entries(value)) {
+    if (
+      typeof alias !== "string" ||
+      !record ||
+      typeof record !== "object" ||
+      Array.isArray(record) ||
+      typeof record.id !== "string" ||
+      typeof record.protectedValueId !== "string" ||
+      typeof record.keyId !== "string" ||
+      typeof record.category !== "string" ||
+      typeof record.domain !== "string"
+    ) {
+      throw new TypeError("stored identity metadata is malformed");
+    }
+    output[alias] = {
+      version: Number(record.version || 1),
+      id: record.id,
+      alias,
+      category: record.category,
+      domain: record.domain,
+      keyId: record.keyId,
+      scope: record.scope || null,
+      protectedValueId: record.protectedValueId
+    };
+  }
+  return output;
+}
+
+function assertStoredIdentityMap(identity, stored, expected) {
+  const normalized = normalizeStoredIdentityMap(stored);
+  const aliases = Object.keys(expected);
+  if (Object.keys(normalized).length !== aliases.length) throw new TypeError("identity metadata mismatch");
+  for (const alias of aliases) {
+    const left = normalized[alias];
+    const right = expected[alias];
+    if (
+      !left ||
+      !identity.equal(left.id, right.id) ||
+      !identity.equal(left.protectedValueId, right.protectedValueId) ||
+      !identity.equal(left.keyId, right.keyId) ||
+      left.category !== right.category ||
+      left.domain !== right.domain ||
+      JSON.stringify(left.scope) !== JSON.stringify(right.scope)
+    ) {
+      throw new TypeError("identity metadata mismatch");
+    }
+  }
+}
+
+function requireSessionId(sessionId) {
+  if (!sessionId || typeof sessionId !== "string") {
+    throw new TypeError("SessionVault requires a non-empty session id.");
+  }
 }
 
 function parseStoredObject(serialized) {

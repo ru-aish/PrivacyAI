@@ -122,6 +122,7 @@ export function requestHttpResponse(url, options = {}) {
     try {
       if (options.body == null) request.end();
       else request.end(options.body);
+      options.onRequestSent?.();
     } catch (error) {
       request.destroy(error);
       finishError(error);

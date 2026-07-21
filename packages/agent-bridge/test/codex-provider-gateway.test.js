@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import http from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { restoreValue } from "@privacy-ai/sdk";
+import { createPrivacyIdentityService } from "@privacy-ai/sdk/identity";
 import {
   createGatewayDiagnosticReporter,
   publicGatewayFailure,
@@ -30,6 +31,7 @@ import {
   sanitizeCodexRequestBody,
   startCodexProviderGateway
 } from "../src/index.js";
+import { createLineageRecorder, openLineageRepository } from "../src/lineage/index.js";
 
 const PRIVATE_EMAIL = "alice.private@example.test";
 const PRIVATE_KEY = "sk-test-local-secret-123456";
@@ -37,6 +39,14 @@ const sessionMap = {
   "[EMAIL_1]": PRIVATE_EMAIL,
   "[API_KEY_1]": PRIVATE_KEY
 };
+const TEST_PRIVACY_IDENTITY = createPrivacyIdentityService({
+  key: Buffer.alloc(32, 0x43),
+  scope: { kind: "session", id: "codex-provider-gateway-tests" }
+});
+
+function withTestIdentity(options = {}) {
+  return { identity: TEST_PRIVACY_IDENTITY, ...options };
+}
 
 function deterministicSanitizer(text) {
   let sanitizedPrompt = text;
@@ -205,7 +215,7 @@ test("Codex function-call argument keys remain structural while leaf values are 
   }];
 
   let sawCellId = false;
-  const result = await sanitizeCodexRequestBody(body, {
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({
     sanitizer: async text => {
       sawCellId ||= text.includes("cell_id");
       let sanitizedPrompt = text;
@@ -220,7 +230,7 @@ test("Codex function-call argument keys remain structural while leaf values are 
       }
       return { sanitizedPrompt, sessionMap: mapped };
     }
-  });
+  }));
 
   assert.equal(sawCellId, false);
   assert.deepEqual(JSON.parse(result.body.input[0].arguments), {
@@ -448,14 +458,14 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
   const media = sampleRequest();
   media.input = [{ type: "message", role: "user", content: [{ type: "output_image", image_url: "data:x" }] }];
   await assert.rejects(
-    sanitizeCodexRequestBody(media, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(media, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA"
   );
 
   const unknown = sampleRequest();
   unknown.input = [{ type: "future_tool_call", secret: PRIVATE_EMAIL }];
   await assert.rejects(
-    sanitizeCodexRequestBody(unknown, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(unknown, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_INPUT"
   );
 
@@ -466,7 +476,7 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
     content: [{ type: "future_text", payload: PRIVATE_EMAIL }]
   }];
   await assert.rejects(
-    sanitizeCodexRequestBody(futureContent, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(futureContent, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_CONTENT"
   );
 
@@ -477,7 +487,7 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
     content: [{ type: "input_text", text: { private: PRIVATE_EMAIL } }]
   }];
   await assert.rejects(
-    sanitizeCodexRequestBody(malformedText, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(malformedText, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_CONTENT"
   );
 
@@ -513,7 +523,7 @@ test("Codex request controls reject private or unsupported protocol values", asy
     const request = sampleRequest();
     mutate(request);
     await assert.rejects(
-      sanitizeCodexRequestBody(request, { sanitizer: deterministicSanitizer }),
+      sanitizeCodexRequestBody(request, withTestIdentity({ sanitizer: deterministicSanitizer })),
       error => error?.code === code
     );
   }
@@ -523,7 +533,7 @@ test("Codex rejects invalid provider identifiers before forwarding", async () =>
   const body = sampleRequest();
   body.tools[0].name = "invalid.tool.name";
   await assert.rejects(
-    sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_INVALID_TOOL_IDENTIFIER"
   );
 });
@@ -532,21 +542,21 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
   const unknownToolKey = sampleRequest();
   unknownToolKey.tools[0][PRIVATE_EMAIL] = PRIVATE_KEY;
   await assert.rejects(
-    sanitizeCodexRequestBody(unknownToolKey, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(unknownToolKey, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
   );
 
   const unknownItemKey = sampleRequest();
   unknownItemKey.input[0][PRIVATE_EMAIL] = PRIVATE_KEY;
   await assert.rejects(
-    sanitizeCodexRequestBody(unknownItemKey, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(unknownItemKey, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
   );
 
   const hosted = sampleRequest();
   hosted.tools = [{ type: "web_search", external_web_access: true }];
   await assert.rejects(
-    sanitizeCodexRequestBody(hosted, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(hosted, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_PROVIDER_TOOL"
   );
 
@@ -604,7 +614,7 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
     }
   }];
   await assert.rejects(
-    sanitizeCodexRequestBody(protectedGrammar, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(protectedGrammar, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE" &&
       !error.message.includes(PRIVATE_KEY)
   );
@@ -623,7 +633,7 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
       user: PRIVATE_EMAIL
     }
   }];
-  const shellResult = await sanitizeCodexRequestBody(localShell, { sanitizer: deterministicSanitizer });
+  const shellResult = await sanitizeCodexRequestBody(localShell, withTestIdentity({ sanitizer: deterministicSanitizer }));
   const action = shellResult.body.input[0].action;
   assert.deepEqual(action.command, ["printf", "[EMAIL_1]"]);
   assert.equal(action.working_directory, "/tmp/[EMAIL_1]");
@@ -646,7 +656,7 @@ test("additional-tools accepts Codex roles while sanitizing definitions", async 
         parameters: { type: "object", properties: { key: { type: "string" } } }
       }]
     }];
-    const result = await sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer });
+    const result = await sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer }));
     assert.equal(result.body.input[0].tools[0].description.includes(PRIVATE_EMAIL), false);
     assert.match(result.body.input[0].tools[0].description, /\[EMAIL_1\]/);
   }
@@ -654,7 +664,7 @@ test("additional-tools accepts Codex roles while sanitizing definitions", async 
   const invalid = sampleRequest();
   invalid.input = [{ type: "additional_tools", role: "system", tools: [] }];
   await assert.rejects(
-    sanitizeCodexRequestBody(invalid, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(invalid, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_INPUT"
   );
 });
@@ -690,10 +700,11 @@ test("protected tool-search names use reversible provider-safe aliases", async (
       sessionMap: found ? { "[PRIVATE_VALUE_5]": privateToolName } : {}
     };
   };
-  const result = await sanitizeCodexRequestBody(body, { sanitizer });
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer }));
   const providerName = result.body.input[0].tools[0].tools[0].name;
 
-  assert.equal(providerName, "PRIVATE_VALUE_5");
+  assert.notEqual(providerName, "PRIVATE_VALUE_5");
+  assert.match(providerName, /^privacyai_[a-f0-9]{12,52}$/);
   assert.match(providerName, /^[A-Za-z0-9_-]+$/);
   assert.equal(result.body.instructions.includes("[PRIVATE_VALUE_5]"), true);
   assert.equal(result.body.input[0].tools[0].tools[0].description.includes("[PRIVATE_VALUE_5]"), true);
@@ -773,7 +784,9 @@ test("provider identifier aliases survive repeated gateway turns", async t => {
     await response.text();
   }
 
-  assert.deepEqual(seenNames, ["PRIVATE_VALUE_5", "PRIVATE_VALUE_5"]);
+  assert.equal(seenNames.length, 2);
+  assert.match(seenNames[0], /^privacyai_[a-f0-9]{12,52}$/);
+  assert.equal(seenNames[1], seenNames[0]);
 });
 
 test("provider-safe tool aliases avoid collisions with real tool names", async () => {
@@ -795,7 +808,7 @@ test("provider-safe tool aliases avoid collisions with real tool names", async (
   }];
   body.input = [];
 
-  const result = await sanitizeCodexRequestBody(body, {
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({
     sanitizer: async text => {
       const found = text.includes(privateToolName);
       return {
@@ -803,11 +816,11 @@ test("provider-safe tool aliases avoid collisions with real tool names", async (
         sessionMap: found ? { "[PRIVATE_VALUE_5]": privateToolName } : {}
       };
     }
-  });
+  }));
   const alias = result.body.tools[1].name;
 
   assert.notEqual(alias, "PRIVATE_VALUE_5");
-  assert.match(alias, /^privacyai_[a-f0-9]{24}(?:_\d+)?$/);
+  assert.match(alias, /^privacyai_[a-f0-9]{12,52}$/);
   assert.match(alias, /^[A-Za-z0-9_-]+$/);
   assert.equal(result.sessionMapAdditions[alias], privateToolName);
 
@@ -1022,7 +1035,7 @@ test("Codex text.format schema uses the same immutable policy, including boolean
   assert.equal(result.schemaTraces.find(trace => trace.schemaKind === "text_format")?.structurePreserved, true);
 
   body.text.format.schema = true;
-  const booleanResult = await sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer });
+  const booleanResult = await sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer }));
   assert.equal(booleanResult.body.text.format.schema, true);
 });
 
@@ -1033,7 +1046,7 @@ test("Codex schema policy fails closed for detectable or known protected immutab
     $defs: { [PRIVATE_EMAIL]: { type: "string" } }
   };
   await assert.rejects(
-    sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
+    sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_CODEX_SCHEMA_IMMUTABLE_PROTECTED_VALUE" && !error.message.includes(PRIVATE_EMAIL)
   );
 
@@ -1063,7 +1076,7 @@ test("Codex schema policy fails closed for detectable or known protected immutab
   ]) {
     body.tools[0].parameters = malformedSchema;
     await assert.rejects(
-      sanitizeCodexRequestBody(body, { sanitizer: deterministicSanitizer }),
+      sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
       error => error?.code === "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION"
     );
   }
@@ -1409,6 +1422,146 @@ test("localhost gateway sanitizes outbound requests and restores fragmented SSE 
   assert.equal(observed[0].headers["accept-encoding"], "identity");
   assert.equal(JSON.stringify(observed[0].body).includes(PRIVATE_EMAIL), false);
   assert.equal(JSON.stringify(observed[0].body).includes(PRIVATE_KEY), false);
+});
+
+test("Codex provider gateway records real protected request lifecycle without retaining secrets", async t => {
+  const root = await createTestTempDir("privacyai-codex-lineage-http-");
+  const lineageDbPath = join(root, "lineage.sqlite3");
+  const secret = "codex-lineage-raw-secret-1d7b9f";
+  const placeholder = "[LINEAGE_CODEX_SECRET_1]";
+  const repository = await openLineageRepository({ lineageDbPath });
+  const recorder = createLineageRecorder(repository);
+  const upstream = await startServer(async (request, response) => {
+    const body = await readRequestJson(request);
+    assert.equal(JSON.stringify(body).includes(secret), false);
+    assert.equal(JSON.stringify(body).includes(placeholder), true);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(sse({ type: "response.output_text.delta", item_id: "lineage", delta: `echo ${placeholder}` }) +
+      sse({ type: "response.completed", response: { id: "lineage", usage: null } }) + "data: [DONE]\n\n");
+  });
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => ({ sanitizedPrompt: text.replaceAll(secret, placeholder), sessionMap: text.includes(secret) ? { [placeholder]: secret } : {} }),
+    baseDir: join(root, "vault"), apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true, lineageRecorder: recorder,
+    verificationStore: new MemoryContextVerificationStore()
+  });
+  t.after(async () => { await gateway.close(); repository.close(); await upstream.close(); });
+  const requestBody = sampleRequest();
+  requestBody.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: `secret=${secret}` }] }];
+  for (let index = 0; index < 2; index += 1) {
+    const response = await fetch(`${gateway.baseURL}/responses`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(requestBody) });
+    assert.equal(response.status, 200);
+    assert.equal((await response.text()).includes(secret), true);
+  }
+  const types = repository.chronological().map(event => event.eventType);
+  for (const [type, count] of Object.entries({ session_created: 1, value_protected: 1, placeholder_assigned: 1, cache_miss: 1, cache_write: 1, cache_hit: 1, provider_request: 2, provider_response: 2, restoration: 2 })) {
+    assert.equal(types.filter(value => value === type).length, count, type);
+  }
+  await gateway.close(); repository.close();
+  for (const candidate of [lineageDbPath, `${lineageDbPath}-wal`, `${lineageDbPath}-shm`]) {
+    try { assert.equal((await readFile(candidate)).includes(Buffer.from(secret)), false, candidate); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+});
+
+test("Codex requests remain available when local lineage recording fails", async t => {
+  const root = await createTestTempDir("privacyai-codex-lineage-unavailable-");
+  const secret = "codex-lineage-storage-failure-secret";
+  const placeholder = "[CODEX_LINEAGE_FAILURE_1]";
+  const lineageRecorder = {
+    protectedRequest() { throw new Error("lineage unavailable"); },
+    providerResponse() { throw new Error("lineage unavailable"); },
+    restoration() { throw new Error("lineage unavailable"); }
+  };
+  const upstream = await startServer(async (request, response) => {
+    const body = await readRequestJson(request);
+    assert.equal(JSON.stringify(body).includes(secret), false);
+    assert.equal(JSON.stringify(body).includes(placeholder), true);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.output_text.delta", item_id: "lineage-failure", delta: `echo ${placeholder}` }) +
+      sse({ type: "response.completed", response: { id: "lineage-failure", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => ({
+      sanitizedPrompt: text.replaceAll(secret, placeholder),
+      sessionMap: text.includes(secret) ? { [placeholder]: secret } : {}
+    }),
+    baseDir: join(root, "vault"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true,
+    lineageRecorder,
+    verificationStore: new MemoryContextVerificationStore()
+  });
+  t.after(async () => {
+    await gateway.close();
+    await upstream.close();
+  });
+  const body = sampleRequest();
+  body.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: secret }] }];
+
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal((await response.text()).includes(secret), true);
+});
+
+test("Codex headerless provider failure records restoration after restoring the local secret", async t => {
+  const root = await createTestTempDir("privacyai-codex-headerless-lineage-");
+  const lineageDbPath = join(root, "lineage.sqlite3");
+  const secret = "codex-headerless-lineage-secret";
+  const placeholder = "[CODEX_HEADERLESS_SECRET]";
+  const repository = await openLineageRepository({ lineageDbPath });
+  const recorder = createLineageRecorder(repository);
+  const upstream = await startServer((_request, response) => {
+    response.writeHead(500);
+    response.end(`provider failed for ${placeholder}`);
+  });
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => ({ sanitizedPrompt: text.replaceAll(secret, placeholder), sessionMap: { [placeholder]: secret } }),
+    baseDir: join(root, "vault"), apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true, lineageRecorder: recorder, verificationStore: new MemoryContextVerificationStore()
+  });
+  t.after(async () => { await gateway.close(); repository.close(); await upstream.close(); });
+  const body = sampleRequest();
+  body.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: secret }] }];
+  const response = await fetch(`${gateway.baseURL}/responses`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  assert.equal(response.status, 500);
+  assert.equal(await response.text(), `provider failed for ${secret}`);
+  const events = repository.chronological();
+  assert.deepEqual(events.filter(event => ["provider_request", "provider_response", "restoration"].includes(event.eventType)).map(event => event.eventType), ["provider_request", "provider_response", "restoration"]);
+  await gateway.close(); repository.close();
+  for (const candidate of [lineageDbPath, `${lineageDbPath}-wal`, `${lineageDbPath}-shm`]) {
+    try { assert.equal((await readFile(candidate)).includes(Buffer.from(secret)), false, candidate); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+});
+
+test("Codex cancellation after protected request and before dispatch records no provider lifecycle", async t => {
+  const root = await createTestTempDir("privacyai-codex-cancelled-lineage-");
+  const repository = await openLineageRepository({ lineageDbPath: join(root, "lineage.sqlite3") });
+  const recorder = createLineageRecorder(repository);
+  let upstreamRequests = 0;
+  const upstream = await startServer((_request, response) => { upstreamRequests += 1; response.end(); });
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer, baseDir: join(root, "vault"), apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true, lineageRecorder: recorder, verificationStore: new MemoryContextVerificationStore(),
+    onSanitizedRequest: () => { throw Object.assign(new Error("cancelled before dispatch"), { name: "AbortError", code: "ABORT_ERR" }); }
+  });
+  t.after(async () => { await gateway.close(); repository.close(); await upstream.close(); });
+  const response = await fetch(`${gateway.baseURL}/responses`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(sampleRequest()) });
+  assert.equal(response.status >= 400, true);
+  assert.equal(upstreamRequests, 0);
+  const types = repository.chronological().map(event => event.eventType);
+  assert.equal(types.includes("value_protected"), true);
+  assert.equal(types.includes("provider_request"), false);
+  assert.equal(types.includes("provider_response"), false);
 });
 
 test("Codex gateway prunes legacy function-argument key mappings before schema validation", async t => {
@@ -2786,10 +2939,12 @@ test("Codex gateway preserves legacy injected verification stores without update
     body: JSON.stringify(sampleRequest())
   });
   assert.equal(response.status, 200, await response.text());
-  assert.equal(
-    verificationStore.loadThread("codex-provider:thread-123").sessionMap["[EMAIL_1]"],
-    PRIVATE_EMAIL
-  );
+  const thread = verificationStore.loadThread("codex-provider:thread-123");
+  assert.equal(thread.sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.match(thread.identityKeyId, /^kid1:[a-f0-9]{32}$/);
+  assert.equal(thread.identityScope.kind, "session");
+  assert.match(thread.identityMap["[EMAIL_1]"].id, /^phi1:[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(thread.identityMap).includes(PRIVATE_EMAIL), false);
 });
 
 test("Codex provider args force loopback Responses transport and disable unsupported provider-hosted tools", () => {

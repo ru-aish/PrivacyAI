@@ -16,6 +16,7 @@ export function requestCodexUpstream(url, method, headers, body, options = {}) {
     headers,
     body,
     signal: options.signal,
+    onRequestSent: options.onRequestSent,
     timeoutMs: options.timeoutMs,
     timeoutLabel: "Codex upstream response-header timeout",
     timeoutError: () => codexUpstreamTimeoutError("response headers")

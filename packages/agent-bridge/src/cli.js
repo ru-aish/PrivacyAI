@@ -1,11 +1,8 @@
 import { isPrivacyError } from "@privacy-ai/sdk";
-
-import { launchAgy } from "./agy.js";
-import { BoundedQueue } from "./bounded-queue.js";
 import { loadPrivacyConfig } from "./config-store.js";
-import { launchNativeTui } from "./launcher.js";
 import { checkPrivacyModel } from "./model-health.js";
 import { runOnboarding } from "./onboard.js";
+import { getProviderAdapter } from "./provider-registry.js";
 
 const GENERIC_FAILURE_MESSAGE = "PrivacyAI encountered an internal failure.";
 
@@ -16,47 +13,10 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
   const [command, ...args] = argv;
 
   try {
+    const provider = getProviderAdapter(command);
+    if (provider) return await provider.invoke(args, options);
+
     switch (command) {
-      case "claude":
-      case "codex": {
-        const launchOptions = { ...options.launchOptions };
-        if (command === "codex" && typeof launchOptions.onGatewayError !== "function") {
-          const render = diagnostic => writeGatewayDiagnostic(stderr, diagnostic);
-          // Codex owns an alternate-screen TUI while its child is running. Do
-          // not write through that screen; flush safe, structured summaries
-          // when the launcher gives control back. Pipes stay immediately useful.
-          if (stderr.isTTY) {
-            const deferred = new BoundedQueue(
-              positiveQueueCapacity(options.maxDeferredGatewayDiagnostics, 128),
-              "deferred gateway diagnostics"
-            );
-            launchOptions.onGatewayError = diagnostic => deferred.push(diagnostic);
-            try {
-              return await (options.launchNativeTui || launchNativeTui)(command, args, launchOptions);
-            } finally {
-              for (const diagnostic of deferred.drain()) {
-                try {
-                  render(diagnostic);
-                } catch {
-                  // Diagnostic rendering must never replace the launcher result.
-                }
-              }
-              if (deferred.dropped > 0) {
-                try {
-                  stderr.write(`[PrivacyAI] Suppressed ${deferred.dropped} older Codex gateway diagnostics.\n`);
-                } catch {
-                  // Diagnostic rendering must never replace the launcher result.
-                }
-              }
-            }
-          }
-          launchOptions.onGatewayError = render;
-        }
-        return await (options.launchNativeTui || launchNativeTui)(command, args, launchOptions);
-      }
-      case "agy":
-      case "antigravity":
-        return await (options.launchAgy || launchAgy)(args, options.agyOptions);
       case "onboard":
         if (options.requireInteractive !== false && (!stdin.isTTY || !stdout.isTTY)) {
           throw cliUsageError(
@@ -124,17 +84,6 @@ export function printHelp(output = process.stdout) {
   output.write("  privacyai doctor        Check local setup\n");
 }
 
-function writeGatewayDiagnostic(output, diagnostic) {
-  const code = safeDiagnosticField(diagnostic?.code, "PRIVACYAI_CODEX_GATEWAY_FAILURE");
-  const category = safeDiagnosticField(diagnostic?.category, "gateway").toLowerCase();
-  output.write(`[PrivacyAI] Codex gateway failure: ${category} (${code}).\n`);
-}
-
-function safeDiagnosticField(value, fallback) {
-  const text = String(value || "");
-  return /^[A-Za-z0-9_]{1,96}$/.test(text) ? text : fallback;
-}
-
 function safeMessage(error) {
   if (error instanceof CliUsageError) return error.message;
   if (isPrivacyError(error) && typeof error.publicMessage === "string" && error.publicMessage) {
@@ -151,14 +100,6 @@ function bridgeExitCode(error) {
   if (error?.code === "PRIVACYAI_CLI_USAGE") return 2;
   if (error?.code === "PRIVACYAI_ONBOARDING_REQUIRED") return 3;
   return 1;
-}
-
-function positiveQueueCapacity(value, fallback) {
-  const normalized = value == null ? fallback : Number(value);
-  if (!Number.isSafeInteger(normalized) || normalized <= 0 || normalized > 10_000) {
-    throw new TypeError("Deferred gateway diagnostic capacity must be between 1 and 10000.");
-  }
-  return normalized;
 }
 
 class CliUsageError extends Error {

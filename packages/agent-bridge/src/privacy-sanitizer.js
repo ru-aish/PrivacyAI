@@ -176,5 +176,10 @@ export function normalizeSanitizerResult(result) {
     throw new TypeError("PrivacyAI sanitizer did not return sanitized text.");
   }
 
-  return { sanitizedPrompt, sessionMap };
+  return {
+    sanitizedPrompt,
+    sessionMap,
+    ...(result.identity ? { identity: result.identity } : {}),
+    ...(result.identityMap ? { identityMap: result.identityMap } : {})
+  };
 }

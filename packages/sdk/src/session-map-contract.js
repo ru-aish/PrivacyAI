@@ -1,4 +1,8 @@
 import { escapeRegExp, foldCase } from "./text-matching.js";
+import {
+  allocateLegacyPlaceholderAlias,
+  looksLikeMalformedCanonicalPlaceholder
+} from "./placeholder-identity.js";
 
 const UNSAFE_PLACEHOLDERS = new Set(["__proto__", "prototype", "constructor"]);
 
@@ -74,7 +78,7 @@ export function rebaseSessionAdditions(sanitizedText, additions = {}, existing =
       existingOriginals.has(foldedPlaceholder) ||
       (placeholderCollision && placeholderCollision.original !== original)
     ) {
-      target = allocatePrivatePlaceholder(placeholder, occupied);
+      target = allocateLegacyPlaceholderAlias(placeholder, occupied);
       replacements.push([placeholder, target]);
     }
     occupied.add(foldCase(target));
@@ -103,7 +107,12 @@ function validateEntries(entries) {
 
   for (const [placeholder, original] of entries) {
     const placeholderKey = foldCase(placeholder);
-    if (UNSAFE_PLACEHOLDERS.has(placeholderKey)) throw invalidSessionMapError();
+    if (
+      UNSAFE_PLACEHOLDERS.has(placeholderKey) ||
+      looksLikeMalformedCanonicalPlaceholder(placeholder)
+    ) {
+      throw invalidSessionMapError();
+    }
     rememberUnambiguous(placeholders, placeholderKey, placeholder);
     rememberUnambiguous(originals, foldCase(original), original);
   }
@@ -159,25 +168,6 @@ function replaceExactAliases(text, replacements) {
     "g"
   );
   return text.replace(pattern, source => replacementsBySource.get(source));
-}
-
-function allocatePrivatePlaceholder(placeholder, occupied) {
-  const match = placeholder.match(/^\[([A-Z][A-Z0-9_]*)_(\d+)\]$/);
-  const type = match?.[1] || inferPlaceholderType(placeholder);
-  let index = match ? Number(match[2]) + 1 : 1;
-  let candidate = `[${type}_${index}]`;
-  while (occupied.has(foldCase(candidate))) {
-    index += 1;
-    candidate = `[${type}_${index}]`;
-  }
-  return candidate;
-}
-
-function inferPlaceholderType(placeholder) {
-  if (/api|key|token|secret|credential/i.test(placeholder)) return "API_KEY";
-  if (/email|@/i.test(placeholder)) return "EMAIL";
-  if (/phone|555/i.test(placeholder)) return "PHONE";
-  return "PRIVATE_VALUE";
 }
 
 function invalidSessionMapError() {

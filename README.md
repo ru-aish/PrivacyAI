@@ -50,7 +50,7 @@ Install dependencies, configure your local environment, and setup your chosen AI
 ```bash
 npm run setup
 ```
-*(This script works on macOS, Linux, and Windows).*
+*(The workspace setup script works on macOS, Linux, and Windows. The native agent bridge and its persistent installation-identity storage currently support Linux and macOS only; Windows fails closed before key creation or rotation.)*
 
 ### 2. Build the Workspace
 To build the SDK and the browser extension:

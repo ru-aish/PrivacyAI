@@ -25,13 +25,20 @@ import {
   sessionVerificationCache
 } from "./model-session-state.js";
 import { SessionVault } from "./session-vault.js";
+import { recordLineageBestEffort } from "./lineage/recorder.js";
+import {
+  openInstallationPrivacyIdentity,
+  privacyIdentityMetadata,
+  sessionPrivacyIdentity
+} from "./privacy-identity.js";
 
 export async function createAgySessionController(options = {}) {
   if (typeof options.sanitizer !== "function") {
     throw new TypeError("AGY session controller requires a local sanitizer function.");
   }
 
-  const vault = options.vault || new SessionVault(options);
+  const identityRoot = await openInstallationPrivacyIdentity(options);
+  const vault = options.vault || new SessionVault({ ...options, identityRoot });
   const imageSanitizer = options.imageSanitizer || createAgyImageSanitizer(options.imageSanitizerOptions);
   const ownsImageSanitizer = !options.imageSanitizer;
   const verificationStore = await openContextVerificationStore(options);
@@ -50,6 +57,7 @@ export async function createAgySessionController(options = {}) {
   const activeOperations = new Set();
   const context = {
     ...options,
+    identityRoot,
     vault,
     imageSanitizer,
     verificationStore,
@@ -82,6 +90,7 @@ export async function createAgySessionController(options = {}) {
     async transform(body, requestOptions = {}) {
       assertOpen();
       const sessionKey = agySessionKey(body, requestOptions.fallbackSessionId);
+      const privacyIdentity = sessionPrivacyIdentity(context.identityRoot, sessionKey);
       return trackOperation(context.serial.run(sessionKey, async () => {
         throwIfAborted(requestOptions.signal);
         const [currentVault, currentThread] = await Promise.all([
@@ -93,13 +102,16 @@ export async function createAgySessionController(options = {}) {
           mergeAgySessionMaps(
             currentVault?.sessionMap || {},
             currentThread.sessionMap || {}
-          )
+          ),
+          privacyIdentity
         );
         await commitAgyMutationHistory(body, sessionKey, sessionMap, context);
         const cache = sessionVerificationCache(context, sessionKey);
         const result = await sanitizeAgyRequestBody(body, {
           sanitizer: context.sanitizer,
           imageSanitizer: context.imageSanitizer,
+          identity: privacyIdentity,
+          identityRoot: context.identityRoot,
           sessionMap,
           cache,
           policyFingerprint: context.policyFingerprint,
@@ -112,9 +124,13 @@ export async function createAgySessionController(options = {}) {
           onBatchComplete: context.onSanitizerBatchComplete,
           onArtifactComplete: context.onSanitizerArtifactComplete
         });
+        const candidateMap = mergeAgySessionMaps(sessionMap, result.sessionMapAdditions);
+        const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
+          sessionKey, provider: "antigravity", operation: "generate_content",
+          placeholders: Object.keys(candidateMap), cacheActivity: { hits: result.metrics?.cacheHitCount, misses: result.metrics?.uncachedSlotCount, writes: result.cacheWrites.length }, signal: requestOptions.signal
+        });
         throwIfAborted(requestOptions.signal);
 
-        const candidateMap = mergeAgySessionMaps(sessionMap, result.sessionMapAdditions);
         let completeMap = candidateMap;
         if (!sessionMapsEqual(currentVault?.sessionMap || {}, candidateMap)) {
           const persisted = await context.vault.update(sessionKey, latest =>
@@ -126,7 +142,8 @@ export async function createAgySessionController(options = {}) {
           baseSessionMap: currentThread.sessionMap || {},
           parentSessionKeys: [],
           sessionMap: completeMap,
-          policyFingerprint: context.policyFingerprint
+          policyFingerprint: context.policyFingerprint,
+          ...privacyIdentityMetadata(privacyIdentity, completeMap)
         }));
         commitVerificationWrites(cache, result.cacheWrites, {
           maxEntries: context.maxCacheEntriesPerSession,
@@ -140,7 +157,7 @@ export async function createAgySessionController(options = {}) {
         if (typeof context.onSanitizedRequest === "function") {
           await context.onSanitizedRequest(result.body, { sessionKey });
         }
-        return { body: result.body, sessionKey, sessionMap: completeMap };
+        return { body: result.body, sessionKey, sessionMap: completeMap, lineageHandle };
       }));
     },
     async stageToolCalls(sessionKey, calls) {

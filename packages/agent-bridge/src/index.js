@@ -66,6 +66,11 @@ export {
 } from "./config-store.js";
 export { resolveExecutable, verifyNativeExecutable } from "./executable.js";
 export { acquireNativeLaunchLock } from "./launch-lock.js";
+export {
+  getProviderAdapter,
+  listProviderAdapters,
+  requireProviderAdapter
+} from "./provider-registry.js";
 export { buildCodexIsolationArgs, prepareAgentRuntimeIsolation } from "./runtime-isolation.js";
 export {
   auditClaudeStartupContext,
@@ -138,3 +143,16 @@ export {
   transformValue,
   valuesEqual
 } from "./transform.js";
+export {
+  LINEAGE_EVENT_TYPES,
+  LINEAGE_REASON_CODES,
+  LINEAGE_SCHEMA_VERSION,
+  SqliteLineageRepository,
+  createLineageId,
+  createLineageRecorder,
+  normalizeEvent as normalizeLineageEvent,
+  openLineageInspection,
+  openLineageRepository,
+  opaqueIdentity as normalizeLineageIdentity,
+  stableJson as stableLineageJson
+} from "./lineage/index.js";

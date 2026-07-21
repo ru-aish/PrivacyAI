@@ -23,6 +23,7 @@ import {
   trackServerSockets
 } from "./runtime/http-server.js";
 import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
+import { recordFailedProviderResponse, recordLineageBestEffort } from "./lineage/recorder.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MODEL_HOST = "daily-cloudcode-pa.googleapis.com";
@@ -214,20 +215,29 @@ async function handleInterceptedRequest(request, response, context) {
     const transformed = await context.sessionController.transform(body, { signal: lifecycle.signal });
     const payload = Buffer.from(JSON.stringify(transformed.body));
     const headers = buildAgyUpstreamHeaders(request.headers, context.modelHost, payload.length, { modelRoute: true });
-    const upstream = await (context.requestUpstream || makeUpstreamRequest)({
-      hostname: context.modelHost,
-      method: "POST",
-      path: `${url.pathname}${url.search}`,
-      headers,
-      body: payload,
-      signal: lifecycle.signal,
-      agent: context.upstreamAgent
-    });
+    let upstreamSent = false;
+    let upstream;
+    try {
+      upstream = await (context.requestUpstream || makeUpstreamRequest)({
+        hostname: context.modelHost,
+        method: "POST",
+        path: `${url.pathname}${url.search}`,
+        headers,
+        body: payload,
+        signal: lifecycle.signal,
+        agent: context.upstreamAgent,
+        onRequestSent: () => { upstreamSent = true; }
+      });
+    } catch (error) {
+      if (upstreamSent) await recordFailedProviderResponse(context.lineageRecorder, transformed.lineageHandle);
+      throw error;
+    }
     await proxyModelResponse(
       response,
       upstream,
       transformed.sessionMap,
       transformed.sessionKey,
+      transformed.lineageHandle,
       context,
       lifecycle.signal
     );
@@ -321,10 +331,12 @@ async function proxyModelResponse(
   upstream,
   sessionMap,
   sessionKey,
+  lineageHandle,
   context,
   signal
 ) {
   const status = upstream.statusCode || 502;
+  await recordLineageBestEffort(context.lineageRecorder, "providerResponse", lineageHandle, { success: status >= 200 && status < 300 });
   const contentType = String(upstream.headers["content-type"] || "").toLowerCase();
   const contentEncoding = String(upstream.headers["content-encoding"] || "identity").toLowerCase();
   if (contentEncoding !== "identity" && contentEncoding !== "") {
@@ -365,6 +377,7 @@ async function proxyModelResponse(
     );
     for (const value of finalOutput) await writeWithBackpressure(response, value);
     response.end();
+    await recordLineageBestEffort(context.lineageRecorder, "restoration", lineageHandle);
     return;
   }
 
@@ -376,6 +389,7 @@ async function proxyModelResponse(
   forwardResponseHeaders(response, upstream.headers, { transformed: textual });
   response.writeHead(status);
   response.end(body);
+  await recordLineageBestEffort(context.lineageRecorder, "restoration", lineageHandle);
 }
 
 async function stageAgyToolCalls(sessionController, sessionKey, calls) {
@@ -438,6 +452,7 @@ function makeUpstreamRequest(options) {
     headers: options.headers,
     body: options.body,
     signal: options.signal,
+    onRequestSent: options.onRequestSent,
     abortError,
     servername: options.hostname,
     agent: options.agent

@@ -1,5 +1,5 @@
 import { prepareStatements } from "./statements.js";
-import { contentIdentityRow, emptyThread, fileMetadataRow, fileMutationRow, manifestEntryRow, nextThreadUpdatedAt, normalizeEditPlan, normalizeFileMutation, normalizeManifestEntries, normalizePrivacySpans, normalizeSessionMap, opaque, optionalInteger, parseSessionMap, parseStringArray, positiveInteger, privacyEditRow, privacySpanRow, requiredHash, requiredOpaqueReference, resolveSavedThread, resolveUpdatedThread, sameMutation, sameMutationChildren, verificationFingerprint, mutationConflict } from "./domain.js";
+import { contentIdentityRow, emptyThread, fileMetadataRow, fileMutationRow, manifestEntryRow, nextThreadUpdatedAt, normalizeEditPlan, normalizeFileMutation, normalizeManifestEntries, normalizePrivacySpans, normalizeSessionMap, normalizeIdentityObject, threadIdentityFields, opaque, optionalInteger, parseJson, parseSessionMap, parseStringArray, positiveInteger, privacyEditRow, privacySpanRow, requiredHash, requiredOpaqueReference, resolveSavedThread, resolveUpdatedThread, sameMutation, sameMutationChildren, verificationFingerprint, mutationConflict } from "./domain.js";
 import { DEFAULT_MAX_AGE_MS, DEFAULT_MAX_LEDGER_ITEMS, DEFAULT_MAX_THREAD_ITEMS, DEFAULT_MAX_THREADS, DEFAULT_MAX_VERIFIED_ITEMS, LEDGER_ROOT_TABLES } from "./constants.js";
 import { contextStoreError, writeError } from "./errors.js";
 import { withImmediateTransaction } from "./transactions.js";
@@ -67,6 +67,11 @@ export class SqliteContextVerificationStore {
       parentSessionKeys: parseStringArray(row.parent_keys_json, "thread parent keys"),
       sessionMap: parseSessionMap(row.session_map_json, "thread session map"),
       policyFingerprint: String(row.policy_fingerprint || ""),
+      ...threadIdentityFields({
+        identityKeyId: String(row.identity_key_id || ""),
+        identityScope: parseJson(row.identity_scope_json || "{}", "thread identity scope"),
+        identityMap: parseJson(row.identity_map_json || "{}", "thread identity map")
+      }),
       updatedAt: Number(row.updated_at || 0)
     };
   }
@@ -77,6 +82,9 @@ export class SqliteContextVerificationStore {
       JSON.stringify(record.parentSessionKeys),
       JSON.stringify(record.sessionMap),
       record.policyFingerprint,
+      record.identityKeyId || "",
+      JSON.stringify(normalizeIdentityObject(record.identityScope)),
+      JSON.stringify(normalizeIdentityObject(record.identityMap)),
       record.updatedAt
     );
   }
@@ -97,7 +105,9 @@ export class SqliteContextVerificationStore {
       contentHash: String(row.content_hash),
       artifactType: String(row.artifact_type),
       policyFingerprint: String(row.policy_fingerprint),
-      sessionMapAdditions: additions
+      sessionMapAdditions: additions,
+      identityKeyId: String(row.identity_key_id || ""),
+      identityMapAdditions: normalizeIdentityObject(parseJson(row.identity_json || "{}", "verified item identity metadata"))
     };
   }
 
@@ -110,6 +120,8 @@ export class SqliteContextVerificationStore {
       record.artifactType,
       record.policyFingerprint,
       JSON.stringify(normalizeSessionMap(record.sessionMapAdditions)),
+      String(record.identityKeyId || ""),
+      JSON.stringify(normalizeIdentityObject(record.identityMapAdditions ?? record.identityMap)),
       now,
       now
     );

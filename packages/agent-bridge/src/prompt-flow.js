@@ -4,6 +4,10 @@ import { dirname, join, resolve } from "node:path";
 
 import { rebaseSessionAdditions as rebaseSdkSessionAdditions } from "@privacy-ai/sdk";
 import { SessionVault } from "./session-vault.js";
+import {
+  openInstallationPrivacyIdentity,
+  sessionPrivacyIdentity
+} from "./privacy-identity.js";
 
 export const REINJECT_MARKER_PREFIX = "PRIVACYAI_REINJECT:";
 
@@ -24,6 +28,8 @@ export async function processPromptSubmission(event, options = {}) {
   const runtimeDir = resolveRequiredRuntimeDir(options.runtimeDir);
   const prompt = event.prompt;
   const sessionId = event.session_id;
+  const identityRoot = await openInstallationPrivacyIdentity(options);
+  const privacyIdentity = sessionPrivacyIdentity(identityRoot, sessionId);
 
   const nativeIngress = nativeContextIngress(prompt);
   if (nativeIngress) {
@@ -49,14 +55,17 @@ export async function processPromptSubmission(event, options = {}) {
       }
     };
   }
-  if (await consumeAllowance(runtimeDir, sessionId, prompt)) return null;
+  if (await consumeAllowance(runtimeDir, sessionId, prompt, { identityRoot })) return null;
 
   if (typeof options.sanitizer !== "function") {
     throw new TypeError("Prompt flow requires a sanitizer function.");
   }
 
-  const vault = options.vault || new SessionVault(options);
-  const result = await options.sanitizer(prompt);
+  const vault = options.vault || new SessionVault({ ...options, identityRoot });
+  const result = await options.sanitizer(prompt, {
+    identity: privacyIdentity,
+    artifactType: "native_prompt"
+  });
   if (typeof result?.sanitizedPrompt !== "string") {
     throw new TypeError("Sanitizer did not return sanitizedPrompt.");
   }
@@ -97,7 +106,7 @@ export async function processPromptSubmission(event, options = {}) {
     sanitizedPrompt,
     createdAt: new Date().toISOString()
   });
-  await createAllowance(runtimeDir, sessionId, sanitizedPrompt);
+  await createAllowance(runtimeDir, sessionId, sanitizedPrompt, { identityRoot });
 
   return {
     id,
@@ -116,14 +125,14 @@ export function rebaseSessionAdditions(sanitizedPrompt, additions = {}, existing
   return { sanitizedPrompt: result.sanitizedText, sessionMap: result.sessionMap };
 }
 
-export async function createAllowance(runtimeDir, sessionId, prompt) {
-  const path = allowancePath(runtimeDir, sessionId, prompt);
+export async function createAllowance(runtimeDir, sessionId, prompt, options = {}) {
+  const path = allowancePath(runtimeDir, sessionId, prompt, options);
   await writePrivateJson(path, { createdAt: Date.now() });
   return path;
 }
 
-export async function consumeAllowance(runtimeDir, sessionId, prompt) {
-  const path = allowancePath(runtimeDir, sessionId, prompt);
+export async function consumeAllowance(runtimeDir, sessionId, prompt, options = {}) {
+  const path = allowancePath(runtimeDir, sessionId, prompt, options);
   try {
     const record = JSON.parse(await readFile(path, "utf8"));
     await rm(path, { force: true });
@@ -134,8 +143,11 @@ export async function consumeAllowance(runtimeDir, sessionId, prompt) {
   }
 }
 
-export function allowancePath(runtimeDir, sessionId, prompt) {
-  const digest = createHash("sha256").update(`${sessionId}\0${prompt}`).digest("hex");
+export function allowancePath(runtimeDir, sessionId, prompt, options = {}) {
+  const material = { version: 1, sessionId: String(sessionId), prompt: String(prompt) };
+  const digest = options.identityRoot?.digest
+    ? options.identityRoot.digest("runtime:prompt-allowance", material)
+    : createHash("sha256").update(`${sessionId}\0${prompt}`).digest("hex");
   return join(resolveRequiredRuntimeDir(runtimeDir), "allow", `${digest}.json`);
 }
 
