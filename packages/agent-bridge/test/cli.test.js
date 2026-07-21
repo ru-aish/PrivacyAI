@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 
+import { createPrivacyError } from "@privacy-ai/sdk";
+
 import { printHelp, runPrivacyAiCli } from "../src/cli.js";
 
 test("CLI help directs resume and fork through the protected wrapper", () => {
@@ -140,13 +142,36 @@ test("Codex CLI flushes deferred TUI diagnostics when the launcher fails", async
         code: "PRIVACYAI_CODEX_UPSTREAM_TIMEOUT",
         category: "timeout"
       });
-      throw new Error("launcher failed safely");
+      throw new Error("launcher-secret@example.test");
     }
   });
 
   assert.equal(code, 1);
   assert.match(text, /timeout \(PRIVACYAI_CODEX_UPSTREAM_TIMEOUT\)/);
-  assert.match(text, /launcher failed safely/);
+  assert.match(text, /PrivacyAI encountered an internal failure\./);
+  assert.doesNotMatch(text, /launcher-secret@example\.test/);
+});
+
+test("bridge CLI preserves PrivacyError public messages", async () => {
+  const stderr = new PassThrough();
+  let text = "";
+  stderr.on("data", chunk => { text += chunk.toString(); });
+
+  const code = await runPrivacyAiCli(["agy"], {
+    stderr,
+    launchAgy: async () => {
+      throw createPrivacyError({
+        code: "PRIVACYAI_TEST_PROVIDER_FAILURE",
+        category: "upstream",
+        message: "private-provider-secret@example.test",
+        publicMessage: "PrivacyAI provider failed safely."
+      });
+    }
+  });
+
+  assert.equal(code, 1);
+  assert.equal(text, "PrivacyAI provider failed safely.\n");
+  assert.doesNotMatch(text, /private-provider-secret@example\.test/);
 });
 
 

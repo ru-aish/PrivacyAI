@@ -1,11 +1,15 @@
+import { isPrivacyError } from "@privacy-ai/sdk";
 import { loadPrivacyConfig } from "./config-store.js";
 import { checkPrivacyModel } from "./model-health.js";
 import { runOnboarding } from "./onboard.js";
 import { getProviderAdapter } from "./provider-registry.js";
 
+const GENERIC_FAILURE_MESSAGE = "PrivacyAI encountered an internal failure.";
+
 export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}) {
   const stdout = options.stdout || process.stdout;
   const stderr = options.stderr || process.stderr;
+  const stdin = options.stdin || process.stdin;
   const [command, ...args] = argv;
 
   try {
@@ -14,9 +18,14 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
 
     switch (command) {
       case "onboard":
+        if (options.requireInteractive !== false && (!stdin.isTTY || !stdout.isTTY)) {
+          throw cliUsageError(
+            "PrivacyAI onboarding requires an interactive terminal. Run it from a TTY."
+          );
+        }
         await (options.runOnboarding || runOnboarding)({
           ...options.onboardOptions,
-          input: options.stdin || process.stdin,
+          input: stdin,
           output: stdout
         });
         return 0;
@@ -33,11 +42,12 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
         printHelp(stdout);
         return 0;
       default:
-        throw new Error(`Unknown PrivacyAI command: ${command}\nRun: privacyai --help`);
+        throw cliUsageError(`Unknown PrivacyAI command: ${command}`);
     }
   } catch (error) {
     stderr.write(`${safeMessage(error)}\n`);
-    return 1;
+    if (error?.code === "PRIVACYAI_CLI_USAGE") stderr.write("Run: privacyai --help\n");
+    return bridgeExitCode(error);
   }
 }
 
@@ -45,7 +55,7 @@ async function runDoctor(options) {
   const loaded = await loadPrivacyConfig({ path: options.configPath });
   if (!loaded.configured) {
     options.stdout.write("PrivacyAI configuration: missing\nRun: privacyai onboard\n");
-    return 1;
+    return 3;
   }
 
   const health = await checkPrivacyModel(loaded.config, {
@@ -75,5 +85,26 @@ export function printHelp(output = process.stdout) {
 }
 
 function safeMessage(error) {
-  return error instanceof Error ? error.message : "PrivacyAI failed safely.";
+  if (error instanceof CliUsageError) return error.message;
+  if (isPrivacyError(error) && typeof error.publicMessage === "string" && error.publicMessage) {
+    return error.publicMessage;
+  }
+  return GENERIC_FAILURE_MESSAGE;
+}
+
+function cliUsageError(message) {
+  return new CliUsageError(message);
+}
+
+function bridgeExitCode(error) {
+  if (error?.code === "PRIVACYAI_CLI_USAGE") return 2;
+  if (error?.code === "PRIVACYAI_ONBOARDING_REQUIRED") return 3;
+  return 1;
+}
+
+class CliUsageError extends Error {
+  constructor(message) {
+    super(message);
+    this.code = "PRIVACYAI_CLI_USAGE";
+  }
 }

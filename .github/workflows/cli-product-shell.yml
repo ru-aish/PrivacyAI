@@ -1,0 +1,49 @@
+name: CLI product shell
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/cli-product-shell.yml"
+      - "README.md"
+      - "packages/agent-tui/**"
+      - "packages/agent-bridge/**"
+      - "packages/sdk/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Test canonical CLI
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm --filter @privacy-ai/cli test 2>&1 | tee cli-test.log
+      - name: Upload failed CLI test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-test-log
+          path: cli-test.log
+          if-no-files-found: error
+          retention-days: 1
+      - run: pnpm --filter @privacy-ai/agent-bridge test
+      - run: pnpm -r test
+      - run: git diff --check

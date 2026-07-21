@@ -1,67 +1,124 @@
-# PrivacyAI native agent wrapper
+# PrivacyAI CLI
 
-This is the user-facing package for PrivacyAI's protected Claude Code, Codex,
-and Antigravity commands. It launches the user's installed official CLI and
-keeps the existing provider account and subscription.
+`@privacy-ai/cli` publishes the single user-facing `privacyai` command. It owns
+onboarding, diagnostics, protected agent launchers, cache inspection, and
+lineage inspection. Users do not install separate PrivacyAI agent packages.
 
 ```bash
-npm install --global @privacy-ai/agent-tui
+npm install --global @privacy-ai/cli
 privacyai onboard
+privacyai doctor
+privacyai agent claude
+privacyai agent codex
+privacyai agent agy --print "Summarize this safely"
+```
+
+The direct launcher forms remain supported migration aliases:
+
+```bash
 privacyai claude
 privacyai codex
-privacyai agy --print "Summarize this safely"
+privacyai agy
+privacyai antigravity
 ```
 
-Onboarding selects a loopback-local Ollama or LM Studio model for privacy
-classification. Embedding-only models are excluded.
+Users migrating from `@privacy-ai/agent-tui` should uninstall that package and
+install `@privacy-ai/cli`. The global binary remains `privacyai`.
 
-## Codex
-
-`privacyai codex` keeps stock Codex and the user's normal `CODEX_HOME`, including
-history, skills, plugins, user MCP servers, configuration, and login. PrivacyAI
-routes supported Responses traffic through a nonce-protected localhost gateway:
+## Command hierarchy
 
 ```text
-stock Codex → local sanitize → OpenAI → local restore → stock Codex
+privacyai onboard
+privacyai doctor [--json]
+privacyai agent <claude|codex|agy> [...]
+privacyai cache [summary|list|show] [--limit N] [--json]
+privacyai lineage [summary|list|show|mutations] [--limit N] [--json]
 ```
 
-Normal filesystem, shell, patch, Git, resume, fork, exec, and review workflows
-remain available. The model still sees its normal Codex tool definitions, and no
-extra OpenAI model request is added.
+`setup` remains an alias for `onboard`, and `diagnostics` remains an alias for
+`doctor`.
 
-Provider-hosted search, apps/connectors, browser/computer use, images, realtime,
-WebSockets, remote clients, and alternate provider overrides are blocked until
-they have a protected transport boundary.
+Exit codes are stable for scripts:
 
-The previous prompt-only Codex mode remains available as an explicit fallback:
+- `0`: success
+- `1`: operational or health failure
+- `2`: invalid command or arguments
+- `3`: onboarding/configuration required
+- `4`: requested cache or lineage record not found
+
+Onboarding requires an interactive terminal and fails immediately instead of
+waiting for input when stdin or stdout is not a TTY.
+
+## Configuration discovery
+
+PrivacyAI uses one configuration file. Discovery order is explicit:
+
+1. An explicit path supplied by an embedding API.
+2. `PRIVACYAI_CONFIG_FILE`.
+3. `PRIVACYAI_CONFIG_DIR/config.json`.
+4. `~/.config/privacyai/config.json`.
+
+The first selected path is authoritative. An invalid or unreadable file fails
+with a safe validation error; PrivacyAI does not silently fall through to a
+lower-precedence configuration.
+
+## Diagnostics
+
+`privacyai doctor` checks the saved local-model configuration, model readiness,
+platform details, and installed Claude Code, Codex, and AGY executables. Missing
+agent executables are reported but do not prevent use of another supported
+agent. A broken installed executable or unavailable configured model fails the
+check.
+
+## Cache and lineage inspection
+
+Inspection commands open the existing context database in SQLite read-only,
+query-only mode. They never create, migrate, prune, clear, or update local
+state. Output contains only metadata such as opaque identifiers, hashes,
+counts, statuses, and timestamps; session-map originals are never returned.
 
 ```bash
-privacyai codex --privacy-strict
+privacyai cache summary
+privacyai cache list --limit 20 --json
+privacyai cache show <cache-key>
+privacyai lineage summary
+privacyai lineage show <session-key> --json
+privacyai lineage mutations --limit 20
 ```
 
-That mode uses a credential-only temporary home and denies tool-capable paths.
+## Protected agents
 
-## Claude Code
+### Codex
+
+`privacyai agent codex` keeps stock Codex and the user's normal `CODEX_HOME`,
+including history, skills, plugins, user MCP servers, configuration, and login.
+Supported Responses traffic passes through the nonce-protected localhost
+PrivacyAI gateway. Resume and fork through the wrapper so they retain that
+boundary. `--privacy-strict` remains the prompt-only fallback.
+
+### Claude Code
 
 Claude Code uses native prompt and tool lifecycle hooks plus startup-context
 isolation. Supported tool inputs are restored locally and successful structured
-results are classified before becoming model-visible. A failure path that cannot
-be replaced safely stops before another model request.
+results are classified before becoming model-visible. A failure path that
+cannot be replaced safely stops before another model request.
 
-## Antigravity
+### AGY / Antigravity
 
-The installed AGY hook API cannot rewrite tool arguments or outputs. PrivacyAI
-therefore supports fresh one-shot prompts only:
+`privacyai agent agy` launches the installed AGY client through PrivacyAI's
+protected transport. `privacyai antigravity` is retained as a compatibility
+alias, and `--privacy-strict --print "..."` remains the prompt-only fallback.
 
-```bash
-privacyai agy --print "your prompt"
-```
+## Package boundary
 
-The prompt is sanitized before launch and every scoped tool call is denied.
-Interactive, resumed, reused, and permission-bypass modes fail closed.
+The internal `@privacy-ai/agent-bridge` workspace package is marked private.
+Use ordinary `npm publish` for a registry release, or run
+`npm run pack:production -- [npm pack options]` to build a local release
+tarball. Both paths copy the runtime source and hook binaries into the package,
+rewrite the packed manifest to depend only on the public SDK, and restore the
+workspace manifest and staging files after npm exits. The production pack
+wrapper also performs synchronous `finally` cleanup when tarball creation
+fails. Publish the matching SDK release before the CLI release.
 
-The implementation lives in `@privacy-ai/agent-bridge`; this package owns only
-the public `privacyai` command.
-
-Current platform support: Linux and macOS. Windows remains intentionally blocked
-until an equivalent tested boundary is available.
+Current platform support is Linux and macOS. Windows remains blocked until an
+equivalent tested boundary is available.

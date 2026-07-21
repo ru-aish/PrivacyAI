@@ -1,20 +1,34 @@
 {
-  "name": "@privacy-ai/agent-tui",
+  "name": "@privacy-ai/cli",
   "version": "0.0.2",
-  "description": "PrivacyAI wrapper for Claude Code, Codex, and Antigravity CLI.",
+  "description": "Canonical PrivacyAI command for protected agents, onboarding, diagnostics, cache, and lineage inspection.",
   "type": "module",
+  "main": "./src/cli.js",
+  "exports": {
+    ".": "./src/cli.js"
+  },
   "bin": {
-    "privacyai": "./bin/privacyai.js"
+    "privacyai": "bin/privacyai.js"
   },
   "files": [
     "bin",
-    "README.md"
+    "src",
+    "vendor",
+    "README.md",
+    "scripts"
   ],
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "pack:production": "node scripts/package-runtime.js pack",
+    "prepack": "node scripts/package-runtime.js lifecycle",
+    "postpack": "node scripts/package-runtime.js clean"
   },
   "dependencies": {
-    "@privacy-ai/agent-bridge": "workspace:0.0.2"
+    "@privacy-ai/agent-bridge": "workspace:0.0.2",
+    "@privacy-ai/sdk": "workspace:0.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "engines": {
     "node": ">=18.18"
