@@ -137,3 +137,16 @@ export {
   transformValue,
   valuesEqual
 } from "./transform.js";
+export {
+  LINEAGE_EVENT_TYPES,
+  LINEAGE_REASON_CODES,
+  LINEAGE_SCHEMA_VERSION,
+  SqliteLineageRepository,
+  createLineageId,
+  createLineageRecorder,
+  normalizeEvent as normalizeLineageEvent,
+  openLineageInspection,
+  openLineageRepository,
+  opaqueIdentity as normalizeLineageIdentity,
+  stableJson as stableLineageJson
+} from "./lineage/index.js";

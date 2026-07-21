@@ -9,6 +9,7 @@ import { PassThrough, Readable } from "node:stream";
 import tls from "node:tls";
 import test from "node:test";
 
+import { createPrivacyIdentityService } from "@privacy-ai/sdk/identity";
 import {
   normalizeAgySessionMap,
   sanitizeAgyRequestBody
@@ -22,6 +23,7 @@ import { hookFileMutationId } from "../src/hook-file-mutation.js";
 import { createEphemeralTlsAuthority } from "../src/ephemeral-tls-authority.js";
 import { mergeSessionMaps } from "../src/model-session-state.js";
 import { SessionVault } from "../src/session-vault.js";
+import { createLineageRecorder, openLineageRepository } from "../src/lineage/index.js";
 
 const PRIVATE_EMAIL = "alice.private@example.test";
 const PRIVATE_KEY = "agy-local-secret-key";
@@ -32,6 +34,14 @@ const SESSION_MAP = {
   "[API_KEY_1]": PRIVATE_KEY,
   "[TOOL_1]": "send_private_email"
 };
+const TEST_PRIVACY_IDENTITY = createPrivacyIdentityService({
+  key: Buffer.alloc(32, 0x41),
+  scope: { kind: "session", id: "agy-transport-tests" }
+});
+
+function withTestIdentity(options = {}) {
+  return { identity: TEST_PRIVACY_IDENTITY, ...options };
+}
 
 async function deterministicSanitizer(text) {
   let sanitizedPrompt = text;
@@ -46,7 +56,7 @@ async function deterministicSanitizer(text) {
 
 test("AGY request transformation sanitizes per-item artifacts and preserves the envelope", async () => {
   const body = sampleRequest();
-  const result = await sanitizeAgyRequestBody(body, { sanitizer: deterministicSanitizer });
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer }));
 
   assert.equal(result.sessionKey, "agy:session-123");
   assert.equal(result.body.project, body.project);
@@ -100,13 +110,13 @@ test("AGY tool schemas sanitize only prose annotations and preserve future struc
 
   const sanitizerInputs = [];
   const traces = [];
-  const result = await sanitizeAgyRequestBody(body, {
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({
     sanitizer: async text => {
       sanitizerInputs.push(text);
       return deterministicSanitizer(text);
     },
     onSchemaTrace: trace => traces.push(trace)
-  });
+  }));
 
   const schema = result.body.request.tools[0].functionDeclarations[0].parameters;
   assert.equal(schema.description, "Parameters for [EMAIL_1]");
@@ -147,7 +157,7 @@ test("AGY tool schemas sanitize only prose annotations and preserve future struc
     properties: { [PRIVATE_EMAIL]: { type: "string" } }
   };
   await assert.rejects(
-    sanitizeAgyRequestBody(protectedIdentifier, { sanitizer: deterministicSanitizer }),
+    sanitizeAgyRequestBody(protectedIdentifier, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_AGY_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE" &&
       !error.message.includes(PRIVATE_EMAIL)
   );
@@ -172,7 +182,7 @@ test("AGY session-map migration replaces stale bracket tool placeholders", () =>
   const migrated = normalizeAgySessionMap(body, {
     "[TOOL_9]": "send_private_email",
     "[EMAIL_1]": PRIVATE_EMAIL
-  });
+  }, TEST_PRIVACY_IDENTITY);
   const toolAlias = Object.entries(migrated)
     .find(([, original]) => original === "send_private_email")?.[0];
 
@@ -222,7 +232,7 @@ test("AGY request transformation leaves protocol identities outside the sanitize
     return deterministicSanitizer(text);
   };
 
-  const result = await sanitizeAgyRequestBody(body, { sanitizer });
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer }));
   const inspected = observed.join("\n");
 
   assert.doesNotMatch(inspected, /session-123|request-123|call-1|opaque-signature/);
@@ -241,9 +251,10 @@ test("AGY request transformation aliases native MCP names before provider valida
   body.request.contents[1].parts[0].functionResponse.name = nativeName;
   body.request.toolConfig.functionCallingConfig.allowedFunctionNames = [nativeName, "public_tool"];
 
-  const result = await sanitizeAgyRequestBody(body, {
-    sanitizer: deterministicSanitizer
-  });
+  const result = await sanitizeAgyRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
   const declarationName = result.body.request.tools[0].functionDeclarations[0].name;
   const responseName = result.body.request.contents[1].parts[0].functionResponse.name;
 
@@ -262,7 +273,7 @@ test("AGY request transformation rejects malformed native function names", async
   body.request.tools[0].functionDeclarations[0].name = "stealth browser/browser_status";
 
   await assert.rejects(
-    sanitizeAgyRequestBody(body, { sanitizer: deterministicSanitizer }),
+    sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_AGY_INVALID_FUNCTION_NAME"
   );
 });
@@ -274,7 +285,7 @@ test("AGY request transformation rejects non-boolean thought metadata", async t 
       body.request.contents[1].parts[0].thought = invalidThought;
 
       await assert.rejects(
-        sanitizeAgyRequestBody(body, { sanitizer: deterministicSanitizer }),
+        sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
         error => error?.code === "PRIVACYAI_AGY_INVALID_PART"
       );
     });
@@ -289,17 +300,17 @@ test("AGY request cache reuses unchanged history and tools after session-map gro
     return deterministicSanitizer(text);
   };
 
-  const first = await sanitizeAgyRequestBody(sampleRequest(), { sanitizer, cache });
+  const first = await sanitizeAgyRequestBody(sampleRequest(), withTestIdentity({ sanitizer, cache }));
   for (const [key, record] of first.cacheWrites) cache.set(key, record);
   const firstCalls = calls;
   assert.equal(firstCalls, 1, "uncached artifacts should share one bounded classifier batch");
   assert.equal(first.metrics.modelCallCount, 1);
 
-  const second = await sanitizeAgyRequestBody(sampleRequest(), {
+  const second = await sanitizeAgyRequestBody(sampleRequest(), withTestIdentity({
     sanitizer,
     cache,
     sessionMap: first.sessionMapAdditions
-  });
+  }));
 
   assert.equal(calls, firstCalls);
   assert.equal(second.cacheWrites.length, 0);
@@ -389,10 +400,12 @@ test("AGY controller preserves legacy injected verification stores without updat
 
   const result = await controller.transform(sampleRequest());
   assert.equal(JSON.stringify(result.body).includes(PRIVATE_EMAIL), false);
-  assert.equal(
-    verificationStore.loadThread("agy:session-123").sessionMap["[EMAIL_1]"],
-    PRIVATE_EMAIL
-  );
+  const thread = verificationStore.loadThread("agy:session-123");
+  assert.equal(thread.sessionMap["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.match(thread.identityKeyId, /^kid1:[a-f0-9]{32}$/);
+  assert.equal(thread.identityScope.kind, "session");
+  assert.match(thread.identityMap["[EMAIL_1]"].id, /^phi1:[a-f0-9]{64}$/);
+  assert.equal(JSON.stringify(thread.identityMap).includes(PRIVATE_EMAIL), false);
 });
 
 test("AGY session controllers atomically merge concurrent mappings", async t => {
@@ -609,7 +622,7 @@ test("AGY images in prompts and tool results share mappings with text", async ()
 
   const imageCalls = [];
   const artifacts = [];
-  const result = await sanitizeAgyRequestBody(body, {
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({
     sanitizer: deterministicSanitizer,
     imageSanitizer: {
       async sanitize(inlineData, context) {
@@ -632,7 +645,7 @@ test("AGY images in prompts and tool results share mappings with text", async ()
     onArtifactComplete(details) {
       artifacts.push(details);
     }
-  });
+  }));
 
   assert.equal(imageCalls.length, 2);
   assert.deepEqual(imageCalls[0].sessionMap, {});
@@ -660,7 +673,7 @@ test("AGY permits a text placeholder and provider-safe tool alias for one privat
     inlineData: { mimeType: "image/png", data: "AAAA" }
   });
 
-  const result = await sanitizeAgyRequestBody(body, {
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({
     sanitizer: deterministicSanitizer,
     imageSanitizer: {
       async sanitize() {
@@ -671,7 +684,7 @@ test("AGY permits a text placeholder and provider-safe tool alias for one privat
         };
       }
     }
-  });
+  }));
 
   const providerAlias = result.body.request.tools[0].functionDeclarations[0].name;
   assert.match(providerAlias, /^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$/);
@@ -687,7 +700,7 @@ test("AGY image validation and limits fail closed before provider forwarding", a
     inlineData: { mimeType: "image/png", data: "AAAA" }
   });
   await assert.rejects(
-    sanitizeAgyRequestBody(required, { sanitizer: deterministicSanitizer }),
+    sanitizeAgyRequestBody(required, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_AGY_IMAGE_SANITIZER_REQUIRED"
   );
 
@@ -766,7 +779,7 @@ test("AGY image and text sanitizer failures preserve fail-closed error boundarie
   const future = sampleRequest();
   future.request.futureContext = { value: PRIVATE_EMAIL };
   await assert.rejects(
-    sanitizeAgyRequestBody(future, { sanitizer: deterministicSanitizer }),
+    sanitizeAgyRequestBody(future, withTestIdentity({ sanitizer: deterministicSanitizer })),
     error => error?.code === "PRIVACYAI_AGY_UNSUPPORTED_FIELD"
   );
 
@@ -993,6 +1006,96 @@ test("AGY transport proxy sanitizes a real CONNECT request and restores streamed
   assert.match(unknownRoute.body, /PRIVACYAI_AGY_UNSUPPORTED_HOST_ROUTE/);
   assert.equal(observed.length, 2);
   assert.equal(imageCalls.length, 4);
+});
+
+test("AGY transport records real TLS proxy lifecycle without retaining secrets", async t => {
+  const root = await createTestTempDir("privacyai-agy-lineage-transport-");
+  const lineageDbPath = join(root, "lineage.sqlite3");
+  const secret = "agy-lineage-raw-secret-4d2f8a";
+  const placeholder = "[LINEAGE_AGY_SECRET_1]";
+  const repository = await openLineageRepository({ lineageDbPath });
+  const recorder = createLineageRecorder(repository);
+  let requests = 0;
+  const runtime = await startAgyTransportRuntime({
+    sanitizer: async text => ({ sanitizedPrompt: text.replaceAll(secret, placeholder), sessionMap: text.includes(secret) ? { [placeholder]: secret } : {} }),
+    baseEnv: {}, baseDir: join(root, "vault"), tmpDir: root, cwd: root,
+    verificationStore: new MemoryContextVerificationStore(), lineageRecorder: recorder,
+    createSessionController: async options => {
+      assert.equal(options.lineageRecorder, recorder);
+      return createAgySessionController(options);
+    },
+    requestUpstream: async request => {
+      requests += 1;
+      assert.equal(request.body.toString("utf8").includes(secret), false);
+      assert.equal(request.body.toString("utf8").includes(placeholder), true);
+      const upstream = Readable.from([Buffer.from(sseEvent(textEvent(`result ${placeholder}`))), Buffer.from(sseEvent(finishEvent()))]);
+      upstream.statusCode = 200;
+      upstream.headers = { "content-type": "text/event-stream", "content-encoding": "identity" };
+      return upstream;
+    }
+  });
+  t.after(async () => { await runtime.close(); repository.close(); await rm(root, { recursive: true, force: true }); });
+  const request = minimalRequest(`secret=${secret}`, "agy-lineage-session", "agy-lineage-request");
+  for (let index = 0; index < 2; index += 1) {
+    const response = await proxyHttpRequest(runtime, request);
+    assert.match(response.statusLine, /^HTTP\/1\.1 200/);
+    assert.equal(response.body.includes(secret), true);
+  }
+  assert.equal(requests, 2);
+  const types = repository.chronological().map(event => event.eventType);
+  for (const [type, count] of Object.entries({ session_created: 1, value_protected: 1, placeholder_assigned: 1, cache_miss: 1, cache_write: 1, cache_hit: 1, provider_request: 2, provider_response: 2, restoration: 2 })) {
+    assert.equal(types.filter(value => value === type).length, count, type);
+  }
+  await runtime.close(); repository.close();
+  for (const candidate of [lineageDbPath, `${lineageDbPath}-wal`, `${lineageDbPath}-shm`]) {
+    try { assert.equal((await readFile(candidate)).includes(Buffer.from(secret)), false, candidate); }
+    catch (error) { if (error?.code !== "ENOENT") throw error; }
+  }
+});
+
+test("AGY transport remains available when local lineage recording fails", async t => {
+  const root = await createTestTempDir("privacyai-agy-lineage-unavailable-");
+  const secret = "agy-lineage-storage-failure-secret";
+  const placeholder = "[AGY_LINEAGE_FAILURE_1]";
+  const lineageRecorder = {
+    protectedRequest() { throw new Error("lineage unavailable"); },
+    providerResponse() { throw new Error("lineage unavailable"); },
+    restoration() { throw new Error("lineage unavailable"); }
+  };
+  const runtime = await startAgyTransportRuntime({
+    sanitizer: async text => ({
+      sanitizedPrompt: text.replaceAll(secret, placeholder),
+      sessionMap: text.includes(secret) ? { [placeholder]: secret } : {}
+    }),
+    baseEnv: {},
+    baseDir: join(root, "vault"),
+    tmpDir: root,
+    cwd: root,
+    verificationStore: new MemoryContextVerificationStore(),
+    lineageRecorder,
+    requestUpstream: async request => {
+      assert.equal(request.body.toString("utf8").includes(secret), false);
+      const upstream = Readable.from([
+        Buffer.from(sseEvent(textEvent(`result ${placeholder}`))),
+        Buffer.from(sseEvent(finishEvent()))
+      ]);
+      upstream.statusCode = 200;
+      upstream.headers = { "content-type": "text/event-stream", "content-encoding": "identity" };
+      return upstream;
+    }
+  });
+  t.after(async () => {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const response = await proxyHttpRequest(
+    runtime,
+    minimalRequest(`secret=${secret}`, "agy-lineage-failure-session", "agy-lineage-failure-request")
+  );
+
+  assert.match(response.statusLine, /^HTTP\/1\.1 200/);
+  assert.equal(response.body.includes(`result ${secret}`), true);
 });
 
 test("AGY transport proxy forwards the audited metrics route opaquely", async t => {

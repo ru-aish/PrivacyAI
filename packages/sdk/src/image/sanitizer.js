@@ -38,6 +38,7 @@ export function createImageSanitizer(options = {}) {
         maxContextTokens: context.maxContextTokens,
         tokenCounter: context.tokenCounter,
         artifactType: context.artifactType || "image_ocr",
+        identity: context.identity,
         signal: context.signal,
         onBatchComplete: context.onBatchComplete
       });
@@ -52,7 +53,10 @@ export function createImageSanitizer(options = {}) {
         }
         return {
           ...unchangedResult(dataUrl, lines.length),
-          sessionMapAdditions: classified.sessionMapAdditions
+          sessionMapAdditions: classified.sessionMapAdditions,
+          ...(classified.identityMapAdditions
+            ? { identityMapAdditions: classified.identityMapAdditions }
+            : {})
         };
       }
 
@@ -81,6 +85,9 @@ export function createImageSanitizer(options = {}) {
           return {
             dataUrl: encodePngDataUrl(rendered),
             sessionMapAdditions: classified.sessionMapAdditions,
+            ...(classified.identityMapAdditions
+              ? { identityMapAdditions: classified.identityMapAdditions }
+              : {}),
             changed: true,
             detectedLineCount: lines.length,
             regionCount: attemptRegions.length,

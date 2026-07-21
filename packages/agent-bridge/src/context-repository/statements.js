@@ -3,34 +3,44 @@ const prepare = (database, sql) => database.prepare(sql);
 export function prepareStatements(database) {
   return {
     loadThread: prepare(database, `
-      SELECT parent_keys_json, session_map_json, policy_fingerprint, updated_at
+      SELECT parent_keys_json, session_map_json, policy_fingerprint,
+             identity_key_id, identity_scope_json, identity_map_json, updated_at
       FROM threads WHERE session_key = ?
     `),
     latestThreadUpdatedAt: prepare(database, "SELECT MAX(updated_at) AS updated_at FROM threads"),
     saveThread: prepare(database, `
-      INSERT INTO threads(session_key, parent_keys_json, session_map_json, policy_fingerprint, updated_at)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO threads(
+        session_key, parent_keys_json, session_map_json, policy_fingerprint,
+        identity_key_id, identity_scope_json, identity_map_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_key) DO UPDATE SET
         parent_keys_json = excluded.parent_keys_json,
         session_map_json = excluded.session_map_json,
         policy_fingerprint = excluded.policy_fingerprint,
+        identity_key_id = excluded.identity_key_id,
+        identity_scope_json = excluded.identity_scope_json,
+        identity_map_json = excluded.identity_map_json,
         updated_at = excluded.updated_at
     `),
 
     getVerification: prepare(database, `
-      SELECT content_hash, artifact_type, policy_fingerprint, additions_json, last_used_at
+      SELECT content_hash, artifact_type, policy_fingerprint, additions_json,
+             identity_key_id, identity_json, last_used_at
       FROM verified_items WHERE cache_key = ? AND policy_fingerprint = ?
     `),
     putVerification: prepare(database, `
       INSERT INTO verified_items(
         cache_key, content_hash, artifact_type, policy_fingerprint,
-        additions_json, created_at, last_used_at, hit_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+        additions_json, identity_key_id, identity_json,
+        created_at, last_used_at, hit_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
       ON CONFLICT(cache_key) DO UPDATE SET
         content_hash = excluded.content_hash,
         artifact_type = excluded.artifact_type,
         policy_fingerprint = excluded.policy_fingerprint,
         additions_json = excluded.additions_json,
+        identity_key_id = excluded.identity_key_id,
+        identity_json = excluded.identity_json,
         last_used_at = excluded.last_used_at
     `),
     touchVerification: prepare(database, `

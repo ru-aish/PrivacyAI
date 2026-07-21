@@ -1,10 +1,11 @@
 import { GENERATED_DUMMY_PATTERN_SOURCE } from "./dummy-data.js";
+import { CANONICAL_PRIVACY_PLACEHOLDER_PATTERN_SOURCE } from "./placeholder-identity.js";
 import { normalizeSessionMap } from "./session-map-contract.js";
 import { visitText } from "./structured-value.js";
 import { escapeRegExp, foldCase } from "./text-matching.js";
 
 const DEFAULT_PLACEHOLDER_PATTERN = new RegExp(
-  String.raw`(?:\[[A-Z][A-Z0-9_]*_\d+\]|${GENERATED_DUMMY_PATTERN_SOURCE})`,
+  String.raw`(?:${CANONICAL_PRIVACY_PLACEHOLDER_PATTERN_SOURCE}|\[[A-Z][A-Z0-9_]*_\d+\]|${GENERATED_DUMMY_PATTERN_SOURCE})`,
   "gi"
 );
 

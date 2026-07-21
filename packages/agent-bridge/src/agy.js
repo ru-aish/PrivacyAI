@@ -24,8 +24,14 @@ import {
   derivePrivacyContextMaxTokens
 } from "./privacy-sanitizer.js";
 import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
+import {
+  openInstallationPrivacyIdentity,
+  requestPrivacyIdentity
+} from "./privacy-identity.js";
 import { runInheritedProcess } from "./process-supervisor.js";
 import { startAgyTransportRuntime } from "./agy-transport-runtime.js";
+import { createLineageRecorder, openLineageRepository } from "./lineage/index.js";
+import { runCleanupSteps } from "./resource-cleanup.js";
 
 const AGY_HOOK_PATH = fileURLToPath(new URL("../bin/privacyai-agy-hook.js", import.meta.url));
 const HOOK_PREFIX = "privacyai-agent-bridge-";
@@ -62,12 +68,14 @@ export async function launchAgy(userArgs = [], options = {}) {
   }
 
   const sanitizer = options.sanitizer || createPrivacySanitizer(loaded.config, options);
+  const identityRoot = await openInstallationPrivacyIdentity(options);
   if (privacyMode.mode === "strict") {
     return launchAgyStrict(privacyMode.args, {
       ...options,
       binary,
       loaded,
-      sanitizer
+      sanitizer,
+      identityRoot
     });
   }
 
@@ -79,18 +87,24 @@ export async function launchAgy(userArgs = [], options = {}) {
     );
   });
   const startRuntime = options.startAgyTransportRuntime || startAgyTransportRuntime;
-  const runtime = await startRuntime({
-    ...options,
-    sanitizer,
-    baseEnv,
-    maxContextChars:
-      options.maxContextChars ?? derivePrivacyContextMaxChars(loaded.config, options),
-    maxContextTokens:
-      options.maxContextTokens ?? derivePrivacyContextMaxTokens(loaded.config, options),
-    tokenCounter: options.tokenCounter,
-    onProxyError
-  });
+  let lineageRepository;
+  let runtime;
+  let primaryError;
+  const ownsLineageRepository = !options.lineageRecorder && !options.lineageRepository;
   try {
+    lineageRepository = options.lineageRecorder ? undefined : await (options.openLineageRepository || openLineageRepository)({
+      lineageRepository: options.lineageRepository,
+      lineageDbPath: options.lineageDbPath,
+      lineageBusyTimeoutMs: options.lineageBusyTimeoutMs,
+      lineageRetryTimeoutMs: options.lineageRetryTimeoutMs
+    });
+    runtime = await startRuntime({
+      ...options, sanitizer, identityRoot, baseEnv,
+      lineageRecorder: options.lineageRecorder || createLineageRecorder(lineageRepository),
+      maxContextChars: options.maxContextChars ?? derivePrivacyContextMaxChars(loaded.config, options),
+      maxContextTokens: options.maxContextTokens ?? derivePrivacyContextMaxTokens(loaded.config, options),
+      tokenCounter: options.tokenCounter, onProxyError
+    });
     output.write(
       "PrivacyAI AGY transport active: native tools and integrations remain available; " +
       "supported model-bound content is sanitized locally.\n"
@@ -106,8 +120,14 @@ export async function launchAgy(userArgs = [], options = {}) {
         PRIVACYAI_AGY_PRIVACY_MODE: "transport"
       }
     });
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await runtime.close();
+    await runCleanupSteps([
+      { name: "AGY transport runtime", run: () => runtime?.close() },
+      { name: "lineage", run: () => ownsLineageRepository ? lineageRepository?.close() : undefined }
+    ], { primaryError, message: "PrivacyAI could not fully clean up the AGY transport launch." });
   }
 }
 
@@ -135,7 +155,12 @@ export function parseAgyPrivacyMode(args) {
 
 async function launchAgyStrict(userArgs, options) {
   const parsed = parseAgyArguments(userArgs);
-  const result = await options.sanitizer(parsed.prompt);
+  const sessionToken = options.sessionToken || randomUUID();
+  const identity = requestPrivacyIdentity(options.identityRoot, sessionToken);
+  const result = await options.sanitizer(parsed.prompt, {
+    identity,
+    artifactType: "agy_prompt"
+  });
   if (!result || typeof result.sanitizedPrompt !== "string") {
     throw new TypeError("PrivacyAI sanitizer did not return sanitizedPrompt for AGY.");
   }
@@ -144,7 +169,6 @@ async function launchAgyStrict(userArgs, options) {
   let cleanupHook = null;
   try {
     await chmod(runtimeDir, 0o700);
-    const sessionToken = options.sessionToken || randomUUID();
     const mapPath = join(runtimeDir, "session-map.json");
     await writeFile(
       mapPath,

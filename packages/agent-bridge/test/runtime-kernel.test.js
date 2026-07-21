@@ -235,6 +235,27 @@ test("HTTP client surfaces DNS failure, response-header timeout, reset, and canc
   await closeHttpServer(cancelledServer, new Set());
 });
 
+test("HTTP client marks a request sent only after request.end returns", async () => {
+  let received = false;
+  const upstream = http.createServer((request, response) => {
+    received = true;
+    response.end("ok");
+  });
+  await listenOnHost(upstream, 0, LOOPBACK);
+  let sent = 0;
+  try {
+    const response = await requestHttpResponse(new URL(`http://${LOOPBACK}:${upstream.address().port}/`), {
+      method: "POST", body: Buffer.from("body"), onRequestSent: () => { sent += 1; }
+    });
+    response.resume();
+    await once(response, "end");
+    assert.equal(sent, 1);
+    assert.equal(received, true);
+  } finally {
+    await closeHttpServer(upstream, new Set());
+  }
+});
+
 test("HTTP client abort propagates after response headers during streaming", async () => {
   const upstream = http.createServer((_request, response) => {
     response.writeHead(200, { "content-type": "text/plain" });

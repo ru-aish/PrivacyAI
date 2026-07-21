@@ -1,11 +1,10 @@
-import { createHash } from "node:crypto";
-
 import { normalizeSessionMap } from "@privacy-ai/sdk";
 import {
   collectAgyToolSchema,
   finalizeAgyToolSchemaTrace
 } from "./agy-tool-schema-policy.js";
 import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
+import { deterministicProviderIdentifier } from "./privacy-identity.js";
 
 const OUTER_FIELDS = new Set([
   "project",
@@ -95,6 +94,7 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
         const entry = imageSlots[imageIndex];
         const result = await sanitizeImage(entry.value, {
           sanitizer: options.sanitizer,
+          identity: options.identity,
           sessionMap: completeSessionMap,
           maxContextChars: options.maxContextChars,
           maxContextTokens: options.maxContextTokens,
@@ -146,6 +146,8 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
       })),
       {
         sanitizer: options.sanitizer,
+        identity: options.identity,
+        identityRoot: options.identityRoot,
         sessionMap: completeSessionMap,
         cache: options.cache,
         policyFingerprint: options.policyFingerprint,
@@ -184,7 +186,8 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
   const providerToolNames = resolveAgyProviderToolNames(
     slots,
     completeSessionMap,
-    protectedToolOriginals
+    protectedToolOriginals,
+    options.identity
   );
   mergeAgySessionAdditions(
     completeSessionMap,
@@ -435,7 +438,7 @@ function collectAgySchemaSlots(value, path, sessionMap, schemaTraces, slots, sch
   schemaTraces.push(collected.trace);
 }
 
-export function normalizeAgySessionMap(body, sessionMap = {}) {
+export function normalizeAgySessionMap(body, sessionMap = {}, identity) {
   const normalized = normalizeSessionMap(sessionMap);
   const toolNames = collectAgyToolNames(body);
   if (toolNames.size === 0) return normalized;
@@ -461,7 +464,7 @@ export function normalizeAgySessionMap(body, sessionMap = {}) {
         mappedOriginal === original && isProviderFunctionName(alias)
       )?.[0];
     if (existingAlias) continue;
-    const alias = allocateAgyToolAlias(original, occupied);
+    const alias = allocateAgyToolAlias(original, occupied, identity);
     output[alias] = original;
     occupied.add(alias);
   }
@@ -482,7 +485,12 @@ function removeLegacyAgyToolMappings(slots, completeMap, aggregateAdditions) {
   return protectedOriginals;
 }
 
-function resolveAgyProviderToolNames(slots, sessionMap, additionallyProtected = new Set()) {
+function resolveAgyProviderToolNames(
+  slots,
+  sessionMap,
+  additionallyProtected = new Set(),
+  identity
+) {
   const originals = [...new Set(
     slots.filter(slot => slot.artifactType === "tool_name").map(slot => slot.value)
   )];
@@ -508,7 +516,7 @@ function resolveAgyProviderToolNames(slots, sessionMap, additionallyProtected = 
         isProviderFunctionName(candidate) &&
         !originals.includes(candidate)
       )?.[0];
-    const alias = existingAlias || allocateAgyToolAlias(original, occupied);
+    const alias = existingAlias || allocateAgyToolAlias(original, occupied, identity);
     values.set(original, alias);
     occupied.add(alias);
     if (!Object.hasOwn(sessionMap || {}, alias)) sessionMapAdditions[alias] = original;
@@ -548,16 +556,17 @@ function collectAgyToolNames(body) {
   return names;
 }
 
-function allocateAgyToolAlias(original, occupied) {
-  const digest = createHash("sha256").update(String(original)).digest("hex");
-  for (let length = 12; length <= digest.length; length += 4) {
-    const candidate = `privacyai_tool_${digest.slice(0, length)}`;
-    if (!occupied.has(candidate)) return candidate;
+function allocateAgyToolAlias(original, occupied, identity) {
+  try {
+    return deterministicProviderIdentifier(identity, "agy", original, occupied);
+  } catch (error) {
+    if (error?.code !== "PRIVACYAI_IDENTITY_COLLISION") throw error;
+    throw agyError(
+      "PRIVACYAI_AGY_TOOL_ALIAS_COLLISION",
+      "PrivacyAI could not allocate a unique private AGY tool alias.",
+      error
+    );
   }
-  throw agyError(
-    "PRIVACYAI_AGY_TOOL_ALIAS_COLLISION",
-    "PrivacyAI could not allocate a unique private AGY tool alias."
-  );
 }
 
 function isLegacyToolPlaceholder(value) {
