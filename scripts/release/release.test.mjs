@@ -4,12 +4,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  combineReleaseErrors,
   deriveDistTag,
   hashFile,
   validateMetadataShape,
   validateReleaseState,
   verifyArtifactDirectory
 } from "./lib.mjs";
+import {
+  isRetryableRegistryFailure,
+  parseRegistryIntegrityResult
+} from "./publish.mjs";
 
 test("release validation accepts one coordinated stable or prerelease version", () => {
   const stable = releaseState("1.4.0");
@@ -46,6 +51,71 @@ test("release validation rejects version and internal dependency skew", () => {
   assert.throws(
     () => validateReleaseState(releaseState("1.4.0-01")),
     /Invalid release version: 1\.4\.0-01/
+  );
+});
+
+test("release errors preserve both operation and restoration failures", () => {
+  const operationError = new Error("pack failed");
+  const restorationError = new Error("manifest was not restored");
+  const combined = combineReleaseErrors(operationError, restorationError);
+
+  assert.ok(combined instanceof AggregateError);
+  assert.deepEqual(combined.errors, [operationError, restorationError]);
+  assert.match(combined.message, /Release operation failed: pack failed/);
+  assert.match(combined.message, /Source restoration verification also failed/);
+});
+
+test("registry integrity parsing distinguishes missing, valid, and malformed responses", () => {
+  assert.equal(
+    parseRegistryIntegrityResult(
+      { code: 0, stdout: "", stderr: "" },
+      "@privacy-ai/sdk",
+      "1.4.0"
+    ),
+    null
+  );
+  assert.equal(
+    parseRegistryIntegrityResult(
+      { code: 0, stdout: "null\n", stderr: "" },
+      "@privacy-ai/sdk",
+      "1.4.0"
+    ),
+    null
+  );
+  assert.equal(
+    parseRegistryIntegrityResult(
+      { code: 0, stdout: '"sha512-valid"\n', stderr: "" },
+      "@privacy-ai/sdk",
+      "1.4.0"
+    ),
+    "sha512-valid"
+  );
+  assert.equal(
+    parseRegistryIntegrityResult(
+      { code: 1, stdout: "", stderr: "npm error code E404" },
+      "@privacy-ai/sdk",
+      "1.4.0"
+    ),
+    null
+  );
+  assert.throws(
+    () => parseRegistryIntegrityResult(
+      { code: 0, stdout: '"sha1-invalid"', stderr: "" },
+      "@privacy-ai/sdk",
+      "1.4.0"
+    ),
+    /invalid integrity metadata/
+  );
+});
+
+test("registry propagation retries only recognized transient failures", () => {
+  assert.equal(isRetryableRegistryFailure(new Error("npm error code ETIMEDOUT")), true);
+  assert.equal(isRetryableRegistryFailure(new Error("503 Service Unavailable")), true);
+  assert.equal(
+    isRetryableRegistryFailure(
+      new Error("Registry returned invalid integrity metadata for @privacy-ai/sdk@1.500.0")
+    ),
+    false
   );
 });
 

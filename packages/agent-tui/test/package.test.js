@@ -301,6 +301,42 @@ test("production packaging rejects version skew before staging files", async t =
   );
 });
 
+test("production packaging requires an explicit files allowlist", async t => {
+  const root = await mkdtemp(join(tmpdir(), "privacyai-cli-files-allowlist-"));
+  const manifestPath = join(PACKAGE_ROOT, "package.json");
+  const sourceManifest = await readFile(manifestPath, "utf8");
+  const invalidManifest = JSON.parse(sourceManifest);
+  delete invalidManifest.files;
+  const invalidManifestText = JSON.stringify(invalidManifest, null, 2) + "\n";
+  t.after(async () => {
+    await writeFile(manifestPath, sourceManifest, { mode: 0o644 });
+    await rm(join(PACKAGE_ROOT, "vendor"), { recursive: true, force: true });
+    await rm(join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup"), { force: true });
+    await rm(root, { recursive: true, force: true });
+  });
+  await writeFile(manifestPath, invalidManifestText, { mode: 0o644 });
+
+  const packed = await runProcess("npm", [
+    "run",
+    "pack:production",
+    "--",
+    "--pack-destination",
+    root
+  ], { cwd: PACKAGE_ROOT });
+
+  assert.notEqual(packed.code, 0);
+  assert.match(
+    packed.stderr + packed.stdout,
+    /packaging requires an explicit files allowlist/
+  );
+  assert.equal(await readFile(manifestPath, "utf8"), invalidManifestText);
+  await assert.rejects(access(join(PACKAGE_ROOT, "vendor")), error => error?.code === "ENOENT");
+  await assert.rejects(
+    access(join(PACKAGE_ROOT, ".privacyai-package.json.pack-backup")),
+    error => error?.code === "ENOENT"
+  );
+});
+
 test("production pack wrapper restores the source tree when npm cannot create a tarball", async t => {
   const manifestPath = join(PACKAGE_ROOT, "package.json");
   const sourceManifest = await readFile(manifestPath, "utf8");

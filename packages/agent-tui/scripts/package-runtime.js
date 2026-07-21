@@ -78,6 +78,16 @@ async function prepare() {
     );
   }
 
+  if (!Array.isArray(manifest.files)) {
+    throw new Error("PrivacyAI CLI packaging requires an explicit files allowlist.");
+  }
+  const requiredFiles = ["README.md", "bin", "src", "vendor"];
+  if (requiredFiles.some(entry => !manifest.files.includes(entry))) {
+    throw new Error(
+      `PrivacyAI CLI files must include: ${requiredFiles.join(", ")}.`
+    );
+  }
+
   delete manifest.dependencies["@privacy-ai/agent-bridge"];
   manifest.dependencies["@privacy-ai/sdk"] = sdkManifest.version;
   delete manifest.scripts;

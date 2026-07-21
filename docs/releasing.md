@@ -158,9 +158,13 @@ the cause; never force or replace the existing version.
 
 ### Trusted publishing is not configured
 
-The publish job fails without releasing a package. Configure both npm packages
-to trust this repository and the exact release workflow, then rerun the same tag.
-Do not add a broad, long-lived `NPM_TOKEN` as a workaround.
+The publish job stops at the package whose trusted-publisher configuration is
+missing. Because the SDK is published before the CLI, the SDK may already be
+public when CLI authentication fails. Check the published SDK `dist.integrity`
+against `release-metadata.json`, configure both npm packages to trust this
+repository and the exact release workflow, then rerun the same tag. The recovery
+path verifies and skips the exact SDK artifact before retrying the CLI. Do not
+add a broad, long-lived `NPM_TOKEN` as a workaround.
 
 ### Tag points to the wrong commit
 
@@ -183,5 +187,5 @@ privacyai doctor
 
 Confirm that the CLI registry manifest depends on the matching SDK and does not
 reference `@privacy-ai/agent-bridge`. Publish the completed release notes from
-the changelog and attach `SHA256SUMS` plus `release-metadata.json` to the GitHub
-release when desired.
+the changelog, then verify that the GitHub release contains both tarballs,
+`SHA256SUMS`, and `release-metadata.json`.

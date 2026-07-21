@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import {
   gitHead,
   gitTagCommit,
@@ -9,34 +10,41 @@ import {
   verifyArtifactDirectory
 } from "./lib.mjs";
 
-try {
-  const options = parseArgs(process.argv.slice(2));
-  const metadata = await verifyArtifactDirectory(options.artifacts, {
-    expectedTag: options.tag
-  });
-  const head = await gitHead();
-  if (metadata.gitCommit !== head) {
-    throw new Error(
-      `Artifacts were built from ${metadata.gitCommit}, but this checkout is ${head}.`
-    );
-  }
-  const taggedCommit = await gitTagCommit(options.tag);
-  if (taggedCommit !== head) {
-    throw new Error(`Release tag ${options.tag} does not point to ${head}.`);
-  }
+const scriptPath = fileURLToPath(import.meta.url);
+if (process.argv[1] && resolve(process.argv[1]) === scriptPath) {
+  await main();
+}
 
-  for (const packageName of metadata.publishOrder) {
-    const packageEntry = metadata.packages.find(entry => entry.name === packageName);
-    if (options.dryRun) {
-      await publishDryRun(options.artifacts, packageEntry, metadata.npmDistTag);
-      process.stdout.write(`Dry-run passed for ${packageName}@${metadata.version}.\n`);
-      continue;
+async function main() {
+  try {
+    const options = parseArgs(process.argv.slice(2));
+    const metadata = await verifyArtifactDirectory(options.artifacts, {
+      expectedTag: options.tag
+    });
+    const head = await gitHead();
+    if (metadata.gitCommit !== head) {
+      throw new Error(
+        `Artifacts were built from ${metadata.gitCommit}, but this checkout is ${head}.`
+      );
     }
-    await publishOrVerifyExisting(options.artifacts, packageEntry, metadata.npmDistTag);
+    const taggedCommit = await gitTagCommit(options.tag);
+    if (taggedCommit !== head) {
+      throw new Error(`Release tag ${options.tag} does not point to ${head}.`);
+    }
+
+    for (const packageName of metadata.publishOrder) {
+      const packageEntry = metadata.packages.find(entry => entry.name === packageName);
+      if (options.dryRun) {
+        await publishDryRun(options.artifacts, packageEntry, metadata.npmDistTag);
+        process.stdout.write(`Dry-run passed for ${packageName}@${metadata.version}.\n`);
+        continue;
+      }
+      await publishOrVerifyExisting(options.artifacts, packageEntry, metadata.npmDistTag);
+    }
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exitCode = 1;
   }
-} catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exitCode = 1;
 }
 
 async function publishOrVerifyExisting(artifacts, packageEntry, npmDistTag) {
@@ -110,8 +118,24 @@ export async function readRegistryIntegrity(name, version) {
     ],
     { allowFailure: true }
   );
+  return parseRegistryIntegrityResult(result, name, version);
+}
+
+export function parseRegistryIntegrityResult(result, name, version) {
   if (result.code === 0) {
-    const value = JSON.parse(result.stdout || "null");
+    const output = (result.stdout || "").trim();
+    if (!output) return null;
+
+    let value;
+    try {
+      value = JSON.parse(output);
+    } catch (error) {
+      throw new Error(
+        `Registry returned malformed integrity metadata for ${name}@${version}.`,
+        { cause: error }
+      );
+    }
+    if (value === null || value === "") return null;
     if (typeof value !== "string" || !value.startsWith("sha512-")) {
       throw new Error(`Registry returned invalid integrity metadata for ${name}@${version}.`);
     }
@@ -125,13 +149,33 @@ export async function readRegistryIntegrity(name, version) {
   );
 }
 
+export function isRetryableRegistryFailure(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\b(?:EAI_AGAIN|ECONNRESET|ECONNREFUSED|ENETUNREACH|EPIPE|ETIMEDOUT)\b|\bE(?:408|425|429|500|502|503|504)\b|\b(?:HTTP|status(?: code)?)\s*:?[ ]*(?:408|425|429|500|502|503|504)\b|\b(?:408 Request Timeout|425 Too Early|429 Too Many Requests|500 Internal Server Error|502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout)\b|socket hang up|network timeout/i.test(
+    message
+  );
+}
+
 async function waitForRegistryIntegrity(name, version) {
+  let lastTransientError;
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    const integrity = await readRegistryIntegrity(name, version);
-    if (integrity) return integrity;
-    await delay(5000);
+    try {
+      const integrity = await readRegistryIntegrity(name, version);
+      if (integrity) return integrity;
+    } catch (error) {
+      if (!isRetryableRegistryFailure(error)) throw error;
+      lastTransientError = error;
+    }
+    if (attempt < 11) await delay(5000);
   }
-  throw new Error(`Timed out waiting for ${name}@${version} to become visible in the registry.`);
+
+  const suffix = lastTransientError
+    ? ` Last transient registry error: ${lastTransientError.message}`
+    : "";
+  throw new Error(
+    `Timed out waiting for ${name}@${version} to become visible in the registry.${suffix}`,
+    lastTransientError ? { cause: lastTransientError } : undefined
+  );
 }
 
 function parseArgs(args) {

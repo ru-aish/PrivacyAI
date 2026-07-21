@@ -110,20 +110,42 @@ export async function buildArtifactSet(outputDirectory, options = {}) {
   const cliManifestBefore = await readFile(join(CLI_ROOT, "package.json"), "utf8");
   const release = validateReleaseState(await loadReleaseState(), { tag });
 
+  let metadata;
+  let operationError;
   try {
     const sdkTarball = await packSdk(output, release.version);
     const cliTarball = await packCli(output, release.version);
     const packages = await inspectReleasePackages({ sdkTarball, cliTarball, release });
-    const metadata = await createReleaseMetadata(release, packages);
+    metadata = await createReleaseMetadata(release, packages);
     await writeReleaseMetadata(output, metadata);
 
     if (installSmoke) await runGlobalInstallSmoke(output, metadata);
     if (publishDryRun) await runPublishDryRuns(output, metadata);
-
-    return metadata;
-  } finally {
-    await assertSourceRestored({ sourceStatus, cliManifestBefore });
+  } catch (error) {
+    operationError = error;
   }
+
+  let restorationError;
+  try {
+    await assertSourceRestored({ sourceStatus, cliManifestBefore });
+  } catch (error) {
+    restorationError = error;
+  }
+
+  if (operationError && restorationError) {
+    throw combineReleaseErrors(operationError, restorationError);
+  }
+  if (operationError) throw operationError;
+  if (restorationError) throw restorationError;
+  return metadata;
+}
+
+export function combineReleaseErrors(operationError, restorationError) {
+  return new AggregateError(
+    [operationError, restorationError],
+    `Release operation failed: ${errorMessage(operationError)}\n` +
+      `Source restoration verification also failed: ${errorMessage(restorationError)}`
+  );
 }
 
 export async function compareArtifactDirectories(firstDirectory, secondDirectory) {
@@ -560,6 +582,10 @@ function addRepositoryMetadata(manifest, directory) {
 
 function npmTarballName(name, version) {
   return `${name.replace(/^@/, "").replaceAll("/", "-")}-${version}.tgz`;
+}
+
+function errorMessage(value) {
+  return value instanceof Error ? value.message : String(value);
 }
 
 function assertSemver(version) {
