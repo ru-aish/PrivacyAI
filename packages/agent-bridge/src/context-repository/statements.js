@@ -196,6 +196,7 @@ export function prepareStatements(database) {
       SELECT plan_hash, content_hash, policy_fingerprint, last_used_at
       FROM ledger_privacy_plans WHERE content_hash = ? AND policy_fingerprint = ?
     `),
+    deletePrivacyPlan: prepare(database, "DELETE FROM ledger_privacy_plans WHERE plan_hash = ?"),
     getPrivacyPlanSpans: prepare(database, `
       SELECT start_offset, end_offset, classification, opaque_reference
       FROM ledger_privacy_plan_spans

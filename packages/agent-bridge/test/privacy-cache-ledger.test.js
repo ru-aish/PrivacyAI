@@ -130,6 +130,43 @@ test("privacy ranges are relational and accept opaque references only", async t 
   assert.deepEqual(value.getPrivacyPlan(id("content"), id("policy")).spans, [{ start: 0, end: 1, classification: "token", reference: id("span-ref") }]);
 });
 
+test("privacy plans atomically replace stale rows for the same content and policy", async t => {
+  const value = await store(t); seed(value);
+  const first = value.putPrivacyPlan({
+    contentHash: id("content"),
+    policyFingerprint: id("policy"),
+    spans: [{ start: 0, end: 1, classification: "token", reference: id("span-v1") }],
+    editPlan: [{ start: 0, end: 1, classification: "replace", reference: id("edit-v1") }]
+  });
+  const replacement = {
+    contentHash: id("content"),
+    policyFingerprint: id("policy"),
+    spans: [{ start: 0, end: 2, classification: "email", reference: id("span-v2") }],
+    editPlan: [{ start: 0, end: 2, classification: "replace", reference: id("edit-v2") }]
+  };
+
+  const originalSpanStatement = value.statements.putPrivacyPlanSpan;
+  value.statements.putPrivacyPlanSpan = { run() { throw new Error("replacement failure"); } };
+  assert.throws(
+    () => value.putPrivacyPlan(replacement),
+    error => error?.code === "PRIVACYAI_CONTEXT_DB_WRITE_FAILED"
+  );
+  value.statements.putPrivacyPlanSpan = originalSpanStatement;
+  assert.equal(value.getPrivacyPlan(id("content"), id("policy")).planHash, first.planHash);
+
+  const second = value.putPrivacyPlan(replacement);
+  assert.notEqual(second.planHash, first.planHash);
+  assert.deepEqual(value.getPrivacyPlan(id("content"), id("policy")).spans, replacement.spans);
+  assert.equal(
+    value.database.prepare("SELECT COUNT(*) AS count FROM ledger_privacy_plans WHERE content_hash = ? AND policy_fingerprint = ?").get(id("content"), id("policy")).count,
+    1
+  );
+  assert.equal(
+    value.database.prepare("SELECT COUNT(*) AS count FROM ledger_privacy_plan_spans WHERE plan_hash = ?").get(first.planHash).count,
+    0
+  );
+});
+
 test("ledger pruning, failures, WAL opens, and memory fallback are bounded", async t => {
   const value = await store(t, { maxLedgerItems: 1, verificationMaxAgeMs: 5 }); seed(value);
   value.putContentIdentity({ contentHash: id("content-2"), kind: "text" });
