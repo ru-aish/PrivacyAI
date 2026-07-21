@@ -114,6 +114,20 @@ test("preflight is read-only and reports uninitialized state with actionable onb
   assert.deepEqual(after, before);
 });
 
+test("state inspection accepts trusted macOS system symlink ancestors", {
+  skip: process.platform !== "darwin"
+}, async t => {
+  const { paths: statePaths } = await fixture(t, "privacyai-state-macos-");
+  await createCurrentState(statePaths);
+  const report = await inspectOperationalState(statePaths);
+
+  assert.equal(report.components.some(component => component.status === "unsafe"), false);
+  assert.equal(byName(report, "configuration").status, "ready");
+  assert.equal(byName(report, "identity").status, "ready");
+  assert.equal(byName(report, "vault").status, "ready");
+  assert.equal(byName(report, "context").status, "ready");
+});
+
 test("preflight identifies only supported explicit migrations and never exposes protected values", async t => {
   const { root, paths: statePaths } = await fixture(t, "privacyai-state-legacy-");
   await createLegacyState(statePaths);
