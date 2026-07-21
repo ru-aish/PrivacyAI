@@ -640,11 +640,13 @@ async function inspectVault(path, identityRoot = null) {
       const expectedLegacy = createHash("sha256").update(target.sessionId).digest("hex") + ".json";
       if (legacyFile !== expectedLegacy) throw new TypeError("vault locator session mismatch");
     }
-    for (const [file, record] of recordsByFile) {
-      if (record.version !== VAULT_VERSION) continue;
-      const currentFile = vault ? basename(vault.pathForSession(record.sessionId)) : null;
-      if (file !== currentFile && !locatedTargets.has(file)) {
-        throw new TypeError("orphaned v2 vault record");
+    if (vault) {
+      for (const [file, record] of recordsByFile) {
+        if (record.version !== VAULT_VERSION) continue;
+        const currentFile = basename(vault.pathForSession(record.sessionId));
+        if (file !== currentFile && !locatedTargets.has(file)) {
+          throw new TypeError("orphaned v2 vault record");
+        }
       }
     }
   } catch (error) {
@@ -1038,14 +1040,37 @@ async function backupSqlite(source, destination, signal) {
     return { file: basename(destination), ...fileDigest(bytes) };
   } catch (error) {
     if (error?.name === "AbortError" || isStateError(error)) throw error;
+    if (isSqliteBusyError(error)) {
+      throw stateError(
+        "PRIVACYAI_STATE_BUSY",
+        "PrivacyAI could not capture a consistent SQLite backup. Stop running agents and retry.",
+        error
+      );
+    }
+    if (error?.kind === "unsafe") {
+      throw stateError(
+        "PRIVACYAI_STATE_BACKUP_BLOCKED",
+        "PrivacyAI SQLite state changed to an unsafe path during backup. Stop using the state path and run preflight again.",
+        error
+      );
+    }
     throw stateError(
-      "PRIVACYAI_STATE_BUSY",
-      "PrivacyAI could not capture a consistent SQLite backup. Stop running agents and retry.",
-      error
+      "PRIVACYAI_STATE_BACKUP_FAILED",
+      "PrivacyAI could not create a complete SQLite backup.",
+      error,
+      "storage_write"
     );
   } finally {
     try { database?.close(); } catch {}
   }
+}
+
+function isSqliteBusyError(error) {
+  if (error?.kind === "busy") return true;
+  const code = String(error?.code || "").toUpperCase();
+  if (code.includes("SQLITE_BUSY") || code.includes("SQLITE_LOCKED")) return true;
+  const message = String(error?.message || "").toLowerCase();
+  return message.includes("database is busy") || message.includes("database is locked");
 }
 
 function fileManifestEntry(file, bytes) {

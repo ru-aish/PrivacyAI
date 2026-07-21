@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import {
   access,
   chmod,
@@ -212,6 +212,36 @@ test("backup is consistent, private, cancellable, and does not create a partial 
   );
 });
 
+test("SQLite backup write failures are not misreported as active-database contention", async t => {
+  const { root, paths: statePaths } = await fixture(t, "privacyai-state-sqlite-backup-failure-");
+  await createCurrentState(statePaths, { vault: false });
+  const backupParent = join(root, "backups");
+  const backupDir = join(backupParent, "snapshot");
+  let injected = false;
+  const signal = {
+    get aborted() {
+      if (!injected && existsSync(backupParent)) {
+        const stage = readdirSync(backupParent)
+          .find(name => name.startsWith(".snapshot.") && name.endsWith(".tmp"));
+        if (stage) {
+          mkdirSync(join(backupParent, stage, "context.sqlite3"));
+          injected = true;
+        }
+      }
+      return false;
+    },
+    reason: null
+  };
+
+  await assert.rejects(
+    createOperationalStateBackup({ ...statePaths, backupDir, signal }),
+    error => error?.code === "PRIVACYAI_STATE_BACKUP_FAILED" &&
+      !error.publicMessage.includes(statePaths.contextDbPath)
+  );
+  assert.equal(injected, true);
+  await assert.rejects(access(backupDir), error => error?.code === "ENOENT");
+});
+
 test("repair is backup-first and only fixes bounded permissions and interrupted vault artifacts", async t => {
   const { root, paths: statePaths } = await fixture(t, "privacyai-state-repair-");
   await createCurrentState(statePaths);
@@ -335,6 +365,20 @@ test("backup validation rejects unlisted vault files even when their JSON shape 
     error => error?.code === "PRIVACYAI_STATE_BACKUP_INVALID"
   );
   await assert.rejects(access(emptyPaths.identityKeyPath), error => error?.code === "ENOENT");
+});
+
+test("missing installation identity blocks existing v2 state without misclassifying its unbound filename as corruption", async t => {
+  const { paths: statePaths } = await fixture(t, "privacyai-state-missing-identity-v2-");
+  await createCurrentState(statePaths, { context: false });
+  const legacyFile = createHash("sha256").update("session-a").digest("hex") + ".json";
+  await rm(join(statePaths.vaultDir, legacyFile));
+  await rm(statePaths.identityKeyPath);
+
+  const report = await inspectOperationalState(statePaths);
+  assert.equal(byName(report, "identity").status, "blocked");
+  assert.equal(byName(report, "vault").status, "ready");
+  assert.equal(byName(report, "vault").recordCount, 1);
+  assert.equal(report.canBackup, false);
 });
 
 test("preflight rejects orphaned v2 vault records that are not identity-bound or locator-bound", async t => {
