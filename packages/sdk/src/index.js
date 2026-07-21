@@ -76,6 +76,23 @@ export {
   parseAndApplyTextEdits
 } from "./text-edits.js";
 export { StreamingPlaceholderRestorer } from "./streaming-restorer.js";
+export {
+  CANONICAL_PRIVACY_PLACEHOLDER_PATTERN_SOURCE,
+  PRIVACY_PLACEHOLDER_CONTRACT_VERSION,
+  formatPrivacyPlaceholder,
+  isCanonicalPrivacyPlaceholder,
+  normalizePrivacyCategory,
+  parsePrivacyPlaceholder,
+  privacyCategoryFromAlias,
+  validatePrivacyPlaceholder
+} from "./placeholder-identity.js";
+export {
+  PRIVACY_IDENTITY_CONTRACT_VERSION,
+  PRIVACY_IDENTITY_SCOPE_KINDS,
+  canonicalizeProtectedValue,
+  normalizePrivacyIdentityScope,
+  stableIdentitySerialize
+} from "./identity-contract.js";
 
 import { PrivateAI } from "./client.js";
 

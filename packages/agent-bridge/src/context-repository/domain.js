@@ -23,7 +23,13 @@ export function verificationFingerprint(value) {
 }
 
 export function emptyThread(sessionKey) {
-  return { sessionKey, parentSessionKeys: [], sessionMap: {}, policyFingerprint: "", updatedAt: 0 };
+  return {
+    sessionKey,
+    parentSessionKeys: [],
+    sessionMap: {},
+    policyFingerprint: "",
+    updatedAt: 0
+  };
 }
 
 export function parseJson(value, label) {
@@ -43,6 +49,21 @@ export const parseStringArray = (value, label) => normalizeStringArray(parseJson
 
 export function normalizeStringArray(value) {
   return Array.isArray(value) ? [...new Set(value.filter(item => typeof item === "string" && item))] : [];
+}
+
+export function normalizeIdentityObject(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return structuredClone(value);
+}
+
+export function threadIdentityFields(record = {}, fallback = {}) {
+  const identityKeyId = String(record.identityKeyId || fallback.identityKeyId || "");
+  const identityScope = normalizeIdentityObject(record.identityScope ?? fallback.identityScope);
+  const identityMap = normalizeIdentityObject(record.identityMap ?? fallback.identityMap);
+  if (!identityKeyId && Object.keys(identityScope).length === 0 && Object.keys(identityMap).length === 0) {
+    return {};
+  }
+  return { identityKeyId, identityScope, identityMap };
 }
 
 export function mergeThreadSessionMaps(current = {}, incoming = {}, base) {
@@ -114,6 +135,7 @@ export function resolveSavedThread(sessionKey, current, record = {}, updatedAt =
       ? mergeThreadSessionMaps(current?.sessionMap || {}, record.sessionMap)
       : normalizeSessionMap(current?.sessionMap),
     policyFingerprint: String(record.policyFingerprint || current?.policyFingerprint || ""),
+    ...threadIdentityFields(record, current),
     updatedAt
   };
 }
@@ -140,6 +162,7 @@ export function resolveUpdatedThread(sessionKey, current, updater, updatedAt = D
     ]),
     sessionMap,
     policyFingerprint: String(candidate.policyFingerprint || current?.policyFingerprint || ""),
+    ...threadIdentityFields(candidate, current),
     updatedAt
   };
 }
@@ -150,8 +173,12 @@ export function requiredHash(value, name) {
 }
 
 export function requiredOpaqueReference(value, name) {
-  if (typeof value !== "string" || !/^sha(?:256|512):[^\s]{1,256}$/.test(value)) {
-    throw new TypeError(`${name} must be an opaque hash reference.`);
+  const valid = typeof value === "string" && (
+    /^sha(?:256|512):[^\s]{1,256}$/.test(value) ||
+    /^hmac-sha256:kid1:[a-f0-9]{32}:[a-f0-9]{64}$/.test(value)
+  );
+  if (!valid) {
+    throw new TypeError(name + " must be an opaque hash reference.");
   }
   return value;
 }

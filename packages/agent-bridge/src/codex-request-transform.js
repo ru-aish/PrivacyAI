@@ -14,6 +14,7 @@ import {
   finalizeCodexJsonSchemaTrace
 } from "./codex-json-schema-policy.js";
 import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
+import { deterministicProviderIdentifier } from "./privacy-identity.js";
 import { assertImmutableToolString } from "./immutable-tool-structure.js";
 
 const ALLOWED_TOP_LEVEL_FIELDS = new Set([
@@ -107,7 +108,10 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   const transformed = deepClone(body);
   transformed.client_metadata = sanitizeClientMetadata(transformed.client_metadata);
   if (typeof transformed.prompt_cache_key === "string" && transformed.prompt_cache_key) {
-    transformed.prompt_cache_key = hashCacheKey(transformed.prompt_cache_key);
+    transformed.prompt_cache_key = hashCacheKey(
+      transformed.prompt_cache_key,
+      options.identityRoot
+    );
   }
 
   const initialSessionMap = pruneCodexArgumentKeyMappings(
@@ -146,6 +150,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
       const entry = imageSlots[imageIndex];
       const result = await sanitizeImage(entry.value, {
         sanitizer: options.sanitizer,
+        identity: options.identity,
         sessionMap: imageSessionMap,
         maxContextChars: options.maxContextChars,
         maxContextTokens: options.maxContextTokens,
@@ -184,6 +189,8 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     label: entry.label
   })), {
     sanitizer: options.sanitizer,
+    identity: options.identity,
+    identityRoot: options.identityRoot,
     sessionMap: imageSessionMap,
     cache: createProtocolKeyVerificationCache(options.cache, transformed),
     policyFingerprint,
@@ -211,7 +218,8 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     slots,
     completeMap,
     sessionMapAdditions,
-    initialSessionMap
+    initialSessionMap,
+    options.identity
   );
 
   slots.forEach((entry, index) => {
@@ -291,7 +299,8 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
       artifactType,
       policyFingerprint,
       entry.objectKeyPolicyKey ||
-        (entry.sanitizeObjectKeys === false ? "values-only" : "keys-and-values")
+        (entry.sanitizeObjectKeys === false ? "values-only" : "keys-and-values"),
+      options.identityRoot
     );
     cacheWrites.push([cacheKey, {
       cacheKey,
@@ -305,7 +314,8 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
           entry.sanitizeObjectKeys
         ),
         recoverableProtocolKeys
-      )
+      ),
+      identityKeyId: options.identityRoot?.keyId || ""
     }]);
     itemRecords.push({
       slotKey: slotIdentity(entry),
@@ -1807,8 +1817,19 @@ function modelVisibleCacheKey(
   value,
   artifactType,
   policyFingerprint,
-  objectKeyPolicyKey = "keys-and-values"
+  objectKeyPolicyKey = "keys-and-values",
+  identityRoot
 ) {
+  const material = {
+    version: 1,
+    policyFingerprint: String(policyFingerprint),
+    artifactType: String(artifactType),
+    objectKeyPolicyKey: String(objectKeyPolicyKey),
+    value
+  };
+  if (identityRoot?.digest) {
+    return identityRoot.digest("cache:codex-model-visible", material);
+  }
   return createHash("sha256")
     .update(String(policyFingerprint))
     .update("\0")
@@ -1849,7 +1870,13 @@ function slotIdentity(entry) {
   return path.map(value => String(value).replaceAll("/", "~1")).join("/");
 }
 
-function buildProviderIdentifierMappings(slots, completeMap, additions, initialSessionMap) {
+function buildProviderIdentifierMappings(
+  slots,
+  completeMap,
+  additions,
+  initialSessionMap,
+  identity
+) {
   const identifiers = slots
     .filter(entry => entry.providerIdentifier === true)
     .map(entry => entry.value);
@@ -1883,11 +1910,11 @@ function buildProviderIdentifierMappings(slots, completeMap, additions, initialS
     );
     if (!alias) {
       alias = allocateProviderIdentifierAlias(
-        group.placeholders,
         group.original,
         reservedIdentifiers,
         completeMap,
-        assignedAliases
+        assignedAliases,
+        identity
       );
     }
 
@@ -1923,58 +1950,42 @@ function sanitizeProviderIdentifier(value, mappings) {
 }
 
 function allocateProviderIdentifierAlias(
-  placeholders,
   original,
   reservedIdentifiers,
   completeMap,
-  assignedAliases
+  assignedAliases,
+  identity
 ) {
-  for (const placeholder of placeholders) {
-    const normalized = placeholder
-      .replace(/^\[+|\]+$/g, "")
-      .replace(/[^A-Za-z0-9_-]+/g, "_")
-      .replace(/^_+|_+$/g, "");
-    if (
-      normalized &&
-      normalized.length <= PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH &&
-      providerIdentifierAliasAvailable(
-        normalized,
-        original,
-        reservedIdentifiers,
-        completeMap,
-        assignedAliases
-      )
-    ) {
-      return normalized;
+  const occupied = new Set(reservedIdentifiers);
+  for (const [placeholder, mappedOriginal] of Object.entries(completeMap)) {
+    if (mappedOriginal !== original) {
+      occupied.add(placeholder.toLocaleLowerCase("en-US"));
     }
   }
+  for (const [alias, mappedOriginal] of assignedAliases) {
+    if (mappedOriginal !== original) occupied.add(alias);
+  }
 
-  const seed = `${placeholders.join("\0")}\0${original}`;
-  const digest = createHash("sha256").update(seed).digest("hex").slice(0, 24);
-  const base = `privacyai_${digest}`;
+  let candidate;
+  try {
+    candidate = deterministicProviderIdentifier(identity, "codex", original, occupied);
+  } catch (error) {
+    if (error?.code !== "PRIVACYAI_IDENTITY_COLLISION") throw error;
+    throw gatewayError(
+      "PRIVACYAI_CODEX_IDENTIFIER_ALIAS_EXHAUSTED",
+      "PrivacyAI could not allocate a safe provider identifier alias.",
+      error
+    );
+  }
   if (providerIdentifierAliasAvailable(
-    base,
+    candidate,
     original,
     reservedIdentifiers,
     completeMap,
     assignedAliases
   )) {
-    return base;
+    return candidate;
   }
-
-  for (let index = 2; index < 10000; index += 1) {
-    const candidate = `${base}_${index}`;
-    if (providerIdentifierAliasAvailable(
-      candidate,
-      original,
-      reservedIdentifiers,
-      completeMap,
-      assignedAliases
-    )) {
-      return candidate;
-    }
-  }
-
   throw gatewayError(
     "PRIVACYAI_CODEX_IDENTIFIER_ALIAS_EXHAUSTED",
     "PrivacyAI could not allocate a safe provider identifier alias."
@@ -2070,8 +2081,11 @@ function collectStrings(value, output, includeObjectKeys = true, path = []) {
   }
 }
 
-function hashCacheKey(value) {
-  return `privacyai:${createHash("sha256").update(value).digest("hex")}`;
+function hashCacheKey(value, identityRoot) {
+  const digest = identityRoot?.digest
+    ? identityRoot.digest("provider-cache-key:codex", String(value))
+    : createHash("sha256").update(value).digest("hex");
+  return `privacyai:${digest}`;
 }
 
 function deepClone(value) {

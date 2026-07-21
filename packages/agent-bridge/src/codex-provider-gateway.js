@@ -51,6 +51,11 @@ import { trackServerSockets } from "./runtime/http-server.js";
 import { writeWithBackpressure as writeRuntimeWithBackpressure } from "./runtime/stream-io.js";
 import { SessionVault } from "./session-vault.js";
 import { recordFailedProviderResponse, recordLineage } from "./lineage/recorder.js";
+import {
+  openInstallationPrivacyIdentity,
+  privacyIdentityMetadata,
+  sessionPrivacyIdentity
+} from "./privacy-identity.js";
 
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
@@ -90,7 +95,8 @@ export async function startCodexProviderGateway(options = {}) {
 
   const timeouts = resolveCodexGatewayTimeouts(options);
   const nonce = options.nonce || randomBytes(24).toString("hex");
-  const vault = options.vault || new SessionVault(options);
+  const identityRoot = await openInstallationPrivacyIdentity(options);
+  const vault = options.vault || new SessionVault({ ...options, identityRoot });
   const imageSanitizer = options.imageSanitizer || createCodexImageSanitizer(options.imageSanitizerOptions);
   const ownsImageSanitizer = !options.imageSanitizer;
   let verificationStore;
@@ -130,6 +136,7 @@ export async function startCodexProviderGateway(options = {}) {
   const sharedContext = {
     ...options,
     nonce,
+    identityRoot,
     vault,
     imageSanitizer,
     verificationStore,
@@ -279,6 +286,7 @@ async function handleRequestCore(request, response, context) {
   validateRouteRequestBody(suffix, body);
 
   const identity = codexSessionContext(body, undefined, request.headers);
+  const privacyIdentity = sessionPrivacyIdentity(context.identityRoot, identity.sessionKey);
   const transformed = await context.serial.run(identity.sessionKey, async () => {
     throwIfAborted(context.requestSignal);
     const currentVault = await context.vault.load(identity.sessionKey);
@@ -312,6 +320,8 @@ async function handleRequestCore(request, response, context) {
     const result = await sanitizeCodexRequestBody(body, {
       sanitizer: context.sanitizer,
       imageSanitizer: context.imageSanitizer,
+      identity: privacyIdentity,
+      identityRoot: context.identityRoot,
       sessionMap,
       cache,
       policyFingerprint: context.policyFingerprint,
@@ -339,7 +349,8 @@ async function handleRequestCore(request, response, context) {
         baseSessionMap: currentThread.sessionMap || {},
         parentSessionKeys: identity.parentSessionKeys,
         sessionMap: completeMap,
-        policyFingerprint: context.policyFingerprint
+        policyFingerprint: context.policyFingerprint,
+        ...privacyIdentityMetadata(privacyIdentity, completeMap)
       }))
     );
     if (typeof context.onSanitizedRequest === "function") {

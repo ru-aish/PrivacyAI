@@ -62,7 +62,11 @@ export class AiSanitizer {
   }
 
   async sanitize(text, options = {}) {
-    return this.classifierLimiter.run(() => this.#sanitize(text, options), options.signal);
+    return this.classifierLimiter.run(async () =>
+      attachIdentityMetadata(await this.#sanitize(text, options), options.identity, {
+        domain: options.artifactType || "text"
+      }), options.signal
+    );
   }
 
   async #sanitize(text, options = {}) {
@@ -185,7 +189,10 @@ export class AiSanitizer {
           buildStrictRedactionPlan(text, detections, options),
           "strict-regex-fallback"
         )
-      : redact(text, detections);
+      : redact(text, detections, {
+          identity: options.identity,
+          identityDomain: options.artifactType || "text"
+        });
     return {
       ...fallback,
       privacyModelText: response.text,
@@ -379,7 +386,10 @@ async function enforceStrictSafeResult(originalText, parsed, detector, options =
 }
 
 function buildStrictRedactionPlan(originalText, detections, options = {}) {
-  const plan = new RedactionPlan(originalText);
+  const plan = new RedactionPlan(originalText, {
+    identity: options.identity,
+    identityDomain: options.artifactType || "text"
+  });
   const typeCounts = {};
   const reusableDummies = new Map();
 
@@ -718,6 +728,57 @@ function normalizeSanitizerResult(originalText, parsed, privacyResponse, source)
     detections,
     privacyModelText: privacyResponse.text,
     privacySource: source
+  };
+}
+
+function attachIdentityMetadata(result, identity, options = {}) {
+  if (!identity?.describeSessionMap || !result || typeof result !== "object") return result;
+  const domain = options.domain || "text";
+  const sessionMap = result.sessionMap ?? result.session_map ?? {};
+  const sanitizedText = result.sanitizedText ?? result.safe_prompt;
+  const categoryByAlias = new Map();
+  for (const detection of result.detections || []) {
+    if (typeof detection?.replacement === "string" && detection?.type) {
+      categoryByAlias.set(detection.replacement, detection.type);
+    }
+  }
+  const canonical = typeof sanitizedText === "string" && identity.canonicalizeAliases
+    ? identity.canonicalizeAliases(sanitizedText, sessionMap, {
+        domain,
+        categoryForAlias: alias => categoryByAlias.get(alias)
+      })
+    : null;
+  const normalizedMap = canonical?.sessionMap || sessionMap;
+  const normalizedText = canonical?.sanitizedText ?? sanitizedText;
+  const detections = Array.isArray(result.detections)
+    ? result.detections.map(detection => {
+        if (typeof detection?.value !== "string" || !detection.type || !identity.canonicalPlaceholder) {
+          return detection;
+        }
+        const placeholder = identity.canonicalPlaceholder(detection.value, {
+          category: detection.type,
+          domain
+        });
+        return {
+          ...detection,
+          replacement: placeholder.alias,
+          identity: placeholder
+        };
+      })
+    : result.detections;
+  return {
+    ...result,
+    ...(Object.hasOwn(result, "sanitizedText") ? { sanitizedText: normalizedText } : {}),
+    ...(Object.hasOwn(result, "safe_prompt") ? { safe_prompt: normalizedText } : {}),
+    ...(Object.hasOwn(result, "sessionMap") ? { sessionMap: normalizedMap } : {}),
+    ...(Object.hasOwn(result, "session_map") ? { session_map: normalizedMap } : {}),
+    ...(detections ? { detections } : {}),
+    identity: {
+      version: identity.version,
+      keyId: identity.keyId,
+      scope: identity.scope
+    },
+    identityMap: canonical?.identityMap || identity.describeSessionMap(normalizedMap, { domain })
   };
 }
 
