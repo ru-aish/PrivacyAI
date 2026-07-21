@@ -152,17 +152,28 @@ test("privacy plans atomically replace stale rows for the same content and polic
     error => error?.code === "PRIVACYAI_CONTEXT_DB_WRITE_FAILED"
   );
   value.statements.putPrivacyPlanSpan = originalSpanStatement;
-  assert.equal(value.getPrivacyPlan(id("content"), id("policy")).planHash, first.planHash);
+  assert.deepEqual(value.getPrivacyPlan(id("content"), id("policy")), {
+    planHash: first.planHash,
+    contentHash: id("content"),
+    policyFingerprint: id("policy"),
+    spans: [{ start: 0, end: 1, classification: "token", reference: id("span-v1") }],
+    editPlan: [{ start: 0, end: 1, classification: "replace", reference: id("edit-v1") }]
+  });
 
   const second = value.putPrivacyPlan(replacement);
   assert.notEqual(second.planHash, first.planHash);
   assert.deepEqual(value.getPrivacyPlan(id("content"), id("policy")).spans, replacement.spans);
+  assert.deepEqual(value.getPrivacyPlan(id("content"), id("policy")).editPlan, replacement.editPlan);
   assert.equal(
     value.database.prepare("SELECT COUNT(*) AS count FROM ledger_privacy_plans WHERE content_hash = ? AND policy_fingerprint = ?").get(id("content"), id("policy")).count,
     1
   );
   assert.equal(
     value.database.prepare("SELECT COUNT(*) AS count FROM ledger_privacy_plan_spans WHERE plan_hash = ?").get(first.planHash).count,
+    0
+  );
+  assert.equal(
+    value.database.prepare("SELECT COUNT(*) AS count FROM ledger_privacy_plan_edits WHERE plan_hash = ?").get(first.planHash).count,
     0
   );
 });
