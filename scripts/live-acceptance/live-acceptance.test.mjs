@@ -218,6 +218,7 @@ test("workflow pins agent versions and validates the candidate before repository
   assert.match(workflow, /CODEX_VERSION: "0\.144\.5"/);
   assert.match(workflow, /AGY_VERSION: "1\.1\.5"/);
   assert.match(workflow, /test -f "\$RUNNER_TEMP\/agy-extract\/antigravity"/);
+  assert.match(workflow, /test -x "\$RUNNER_TEMP\/agy-extract\/antigravity"/);
   assert.match(workflow, /install -m 0755 "\$RUNNER_TEMP\/agy-extract\/antigravity" "\$HOME\/\.local\/bin\/agy"/);
   assert.doesNotMatch(workflow, /find "\$RUNNER_TEMP\/agy-extract" -type f -name agy/);
   const jobPreamble = workflow.slice(0, workflow.indexOf("    steps:"));
