@@ -267,7 +267,10 @@ export function parseReviewResponse(text, context) {
 }
 
 function responseField(text, label) {
-  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = label
+    .split(/\s+/)
+    .map(part => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("[ _]+");
   return String(text).match(new RegExp(`^${escaped}:\\s*(.+)$`, "im"))?.[1]?.trim() || null;
 }
 

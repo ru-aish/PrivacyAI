@@ -195,6 +195,13 @@ test("structured review validation rejects findings and inexact PR references", 
 
   assert.equal(parseReviewResponse(valid, context).ok, true);
   assert.equal(
+    parseReviewResponse(
+      valid.replace("LIVE FLOW:", "LIVE_FLOW:").replace("RELEASE ELIGIBLE:", "RELEASE_ELIGIBLE:"),
+      context
+    ).ok,
+    true
+  );
+  assert.equal(
     parseReviewResponse(valid.replace("PRS: #1, #2, #3", "PRS: #10, #2, #3"), context).ok,
     false
   );
