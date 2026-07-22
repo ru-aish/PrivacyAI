@@ -3,12 +3,19 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { absolute, one, parseRepeatedArgs, run } from "./common.mjs";
+import {
+  absolute,
+  one,
+  parseRepeatedArgs,
+  restoreIgnoredReviewScope,
+  run
+} from "./common.mjs";
 
 export async function cleanupLiveReview(options) {
   const home = absolute(options.home);
   const workspace = absolute(options.workspace);
   await rm(join(workspace, "LIVE_REVIEW_SCOPE.md"), { force: true });
+  await restoreIgnoredReviewScope(home);
   await rm(home, { recursive: true, force: true });
 
   const status = await run("git", ["status", "--porcelain=v1", "--untracked-files=all"], {

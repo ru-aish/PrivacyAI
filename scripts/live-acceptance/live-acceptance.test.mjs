@@ -8,7 +8,7 @@ import test from "node:test";
 import { assertPrNumbers, run, runChecked, writeJson } from "./common.mjs";
 import { generateReviewScope } from "./generate-scope.mjs";
 import { prepareCiHome } from "./prepare-ci-home.mjs";
-import { runLiveReview } from "./run-live-review.mjs";
+import { parseReviewResponse, runLiveReview } from "./run-live-review.mjs";
 import { renderSummary } from "./write-summary.mjs";
 
 const ASSET = new URL("./assets/review-instructions.png", import.meta.url).pathname;
@@ -149,6 +149,10 @@ test("live-review orchestrator accepts independently verified mock provider runs
   await writeFile(mock, mockPrivacyAiSource());
   await chmod(mock, 0o755);
   const output = join(root, "evidence");
+  const excludePath = (await runChecked("git", ["rev-parse", "--git-path", "info/exclude"], {
+    cwd: fixture.repo
+  })).stdout.trim();
+  const originalExclude = await readFile(join(fixture.repo, excludePath));
 
   const result = await runLiveReview({
     workspace: fixture.repo,
@@ -167,7 +171,37 @@ test("live-review orchestrator accepts independently verified mock provider runs
   assert.equal((await runChecked("git", ["status", "--porcelain"], { cwd: fixture.repo })).stdout, "");
   assert.equal(JSON.parse(await readFile(join(output, "harness-result.json"), "utf8")).eligible, true);
   assert.equal((await readdir(output)).includes("codex-final.txt"), false);
+  assert.deepEqual(await readFile(join(fixture.repo, excludePath)), originalExclude);
   assert.ok(paths.configPath);
+});
+
+test("structured review validation rejects findings and inexact PR references", () => {
+  const context = {
+    expectedHead: "a".repeat(40),
+    selectedPrNumbers: [1, 2, 3]
+  };
+  const valid = [
+    "RESULT: PASS",
+    `HEAD: ${context.expectedHead}`,
+    "PRS: #1, #2, #3",
+    "FINDINGS: none",
+    "CHANGES: none",
+    "TESTS: passed",
+    "LIVE FLOW: passed",
+    "PRIVACY: PASS",
+    "CLEANUP: PASS",
+    "RELEASE ELIGIBLE: YES"
+  ].join("\n");
+
+  assert.equal(parseReviewResponse(valid, context).ok, true);
+  assert.equal(
+    parseReviewResponse(valid.replace("PRS: #1, #2, #3", "PRS: #10, #2, #3"), context).ok,
+    false
+  );
+  assert.equal(
+    parseReviewResponse(valid.replace("FINDINGS: none", "FINDINGS: P1 cache corruption"), context).ok,
+    false
+  );
 });
 
 test("workflow pins agent versions and validates the candidate before repository code runs", async () => {
@@ -236,6 +270,7 @@ async function waitUntil(predicate, timeoutMs = 5000) {
 
 function mockPrivacyAiSource() {
   return `#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 if (args[0] === "state") {
@@ -261,10 +296,17 @@ if (args[0] === "agent") {
     if (args.includes("--dangerously-skip-permissions")) process.exit(22);
     if (!args.includes("--sandbox")) process.exit(23);
   }
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const status = execFileSync("git", ["status", "--porcelain=v1", "--untracked-files=all"], { encoding: "utf8" }).trim();
+  if (status) process.exit(24);
   const result = [
     "RESULT: PASS",
-    "HEAD: fixture",
+    "HEAD: " + head,
+    "PRS: #1, #2, #3",
     "FINDINGS: none",
+    "CHANGES: none",
+    "TESTS: fixture diagnostics and repository inspection passed",
+    "LIVE FLOW: protected fixture provider process completed",
     "PRIVACY: PASS",
     "CLEANUP: PASS",
     "RELEASE ELIGIBLE: YES",

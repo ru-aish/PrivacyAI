@@ -9,8 +9,10 @@ import {
   absolute,
   one,
   parseRepeatedArgs,
+  prepareIgnoredReviewScope,
   readJson,
   redactText,
+  restoreIgnoredReviewScope,
   run,
   runChecked,
   writeJson
@@ -37,6 +39,7 @@ export async function runLiveReview(options) {
   const providers = normalizeProviders(options.providers);
   const scope = await readJson(scopeJsonPath);
   const expectedHead = String(scope.releaseSha || "").toLowerCase();
+  const selectedPrNumbers = (scope.selectedPullRequests || []).map(item => Number(item.number));
   const reviewScopePath = join(workspace, "LIVE_REVIEW_SCOPE.md");
   const prompt = await readFile(new URL("./prompts/launch.txt", import.meta.url), "utf8");
   const paths = await readJson(join(home, "ci-paths.json"));
@@ -48,7 +51,6 @@ export async function runLiveReview(options) {
   const beforeProcesses = await agentProcessSnapshot();
   const beforeRuntimeDirs = new Set(await privacyRuntimeDirectories());
   await assertTrackedClean(workspace, expectedHead);
-  await cp(scopePath, reviewScopePath);
 
   const env = buildRuntimeEnvironment(home, paths);
   const evidence = {
@@ -63,6 +65,8 @@ export async function runLiveReview(options) {
   };
 
   try {
+    await prepareIgnoredReviewScope(workspace, home);
+    await cp(scopePath, reviewScopePath);
     evidence.statePreflight = await captureDiagnostic(
       privacyai,
       ["state", "preflight", "--json"],
@@ -85,17 +89,18 @@ export async function runLiveReview(options) {
     if (providers.includes("codex")) {
       evidence.providers.codex = await runCodex({
         privacyai, workspace, imagePath, prompt, outputDir, env, home, secretValues,
-        model: options.codexModel
+        expectedHead, selectedPrNumbers, model: options.codexModel
       });
     }
     if (providers.includes("agy")) {
       evidence.providers.agy = await runAgy({
         privacyai, workspace, imagePath, prompt, outputDir, env, home, secretValues,
-        model: options.agyModel
+        expectedHead, selectedPrNumbers, model: options.agyModel
       });
     }
   } finally {
     await rm(reviewScopePath, { force: true });
+    await restoreIgnoredReviewScope(home);
     evidence.trackedCheckoutClean = await isTrackedClean(workspace, expectedHead);
     evidence.cleanup = await inspectCleanup(beforeProcesses, beforeRuntimeDirs);
     evidence.eligible =
@@ -198,14 +203,14 @@ async function runProvider(name, command, args, context) {
   const safeFinal = redactText(final, context.secretValues);
   await writeFile(join(context.outputDir, `${name}-result.txt`), safeFinal);
   const failures = FAILURE_PATTERNS.filter(pattern => pattern.test(combined)).map(pattern => pattern.source);
-  const resultLine = safeFinal.match(/^RESULT:\s*(PASS|FAIL)\s*$/im)?.[1] || null;
+  const structured = parseReviewResponse(safeFinal, context);
   const ok =
     result.code === 0 &&
     !result.timedOut &&
     result.survivingProcessGroup.length === 0 &&
     failures.length === 0 &&
     safeFinal.includes(COMPLETION_MARKER) &&
-    resultLine === "PASS" &&
+    structured.ok &&
     !safeOutput.includes(SYNTHETIC_PRIVATE_VALUE) &&
     !safeFinal.includes(SYNTHETIC_PRIVATE_VALUE);
   return {
@@ -218,9 +223,52 @@ async function runProvider(name, command, args, context) {
       command: redactText(item.command, context.secretValues)
     })),
     completionMarker: safeFinal.includes(COMPLETION_MARKER),
-    result: resultLine,
+    result: structured.fields.RESULT || null,
+    missingFields: structured.missingFields,
+    structuredResponseValid: structured.ok,
     failurePatterns: failures
   };
+}
+
+export function parseReviewResponse(text, context) {
+  const labels = [
+    "RESULT",
+    "HEAD",
+    "PRS",
+    "FINDINGS",
+    "CHANGES",
+    "TESTS",
+    "LIVE FLOW",
+    "PRIVACY",
+    "CLEANUP",
+    "RELEASE ELIGIBLE"
+  ];
+  const fields = Object.fromEntries(labels.map(label => [label, responseField(text, label)]));
+  const missingFields = labels.filter(label => !fields[label]);
+  const reportedHead = fields.HEAD?.match(/[0-9a-f]{40}/i)?.[0]?.toLowerCase() || null;
+  const reportedPrNumbers = [...String(fields.PRS || "").matchAll(/#([1-9][0-9]*)\b/g)]
+    .map(match => Number(match[1]));
+  const prsValid =
+    context.selectedPrNumbers.length === 3 &&
+    reportedPrNumbers.length === 3 &&
+    new Set(reportedPrNumbers).size === 3 &&
+    context.selectedPrNumbers.every(number => reportedPrNumbers.includes(number));
+  const ok =
+    missingFields.length === 0 &&
+    /^PASS\b/i.test(fields.RESULT) &&
+    reportedHead === context.expectedHead &&
+    prsValid &&
+    /^none\b/i.test(fields.FINDINGS) &&
+    /^none\b/i.test(fields.CHANGES) &&
+    /^PASS\b/i.test(fields.PRIVACY) &&
+    /^PASS\b/i.test(fields.CLEANUP) &&
+    /^YES\b/i.test(fields["RELEASE ELIGIBLE"]);
+  return { ok, fields, missingFields };
+}
+
+function responseField(text, label) {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return String(text).match(new RegExp(`^${escaped}:\\s*(.+)$`, "im"))?.[1]?.trim() || null;
 }
 
 async function captureDiagnostic(command, args, cwd, env, outputPath, secrets, options = {}) {

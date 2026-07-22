@@ -4,5 +4,5 @@ The exact immutable release scope is in LIVE_REVIEW_SCOPE.md in the current repo
 
 Do not modify or commit tracked release source files. You may create review evidence only in the harness-provided output directory.
 
-End the final response with:
+Your final response is invalid unless it includes every labeled line shown in section 5 of the image: RESULT, HEAD, PRS, FINDINGS, CHANGES, TESTS, LIVE FLOW, PRIVACY, CLEANUP, and RELEASE ELIGIBLE. Use CHANGES: none when the checkout was not modified. End the response with:
 PRIVACYAI_LIVE_REVIEW_COMPLETE

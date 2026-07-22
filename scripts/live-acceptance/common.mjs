@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 
 export const COMPLETION_MARKER = "PRIVACYAI_LIVE_REVIEW_COMPLETE";
 export const SYNTHETIC_PRIVATE_VALUE = "qa-review-7f8a@example.test";
@@ -57,6 +57,67 @@ export async function writeJson(path, value, options = {}) {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, text);
   }
+}
+
+export async function prepareIgnoredReviewScope(workspace, home) {
+  const gitPath = (await runChecked("git", ["rev-parse", "--git-path", "info/exclude"], {
+    cwd: workspace,
+    timeoutMs: 30_000
+  })).stdout.trim();
+  const excludePath = resolve(workspace, gitPath);
+  let existed = true;
+  let original;
+  try {
+    original = await readFile(excludePath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    existed = false;
+    original = Buffer.alloc(0);
+  }
+  const backupPath = reviewScopeBackupPath(home);
+  await writeJson(backupPath, {
+    version: 1,
+    excludePath,
+    existed,
+    contentBase64: original.toString("base64")
+  }, { private: true });
+
+  const marker = "/LIVE_REVIEW_SCOPE.md";
+  const lines = original.toString("utf8").split(/\r?\n/);
+  if (!lines.includes(marker)) {
+    const source = original.toString("utf8");
+    const prefix = original.length > 0 && !source.endsWith("\n") ? "\n" : "";
+    await mkdir(dirname(excludePath), { recursive: true });
+    await writeFile(excludePath, Buffer.concat([
+      original,
+      Buffer.from(prefix + marker + "\n")
+    ]));
+  }
+  return backupPath;
+}
+
+export async function restoreIgnoredReviewScope(home) {
+  const backupPath = reviewScopeBackupPath(home);
+  let backup;
+  try {
+    backup = await readJson(backupPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+  const bytes = Buffer.from(String(backup.contentBase64 || ""), "base64");
+  if (backup.existed) {
+    await mkdir(dirname(backup.excludePath), { recursive: true });
+    await writeFile(backup.excludePath, bytes);
+  } else {
+    await rm(backup.excludePath, { force: true });
+  }
+  await rm(backupPath, { force: true });
+  return true;
+}
+
+function reviewScopeBackupPath(home) {
+  return join(home, ".privacyai-live-private", "git-info-exclude-backup.json");
 }
 
 export function safeMetadataText(value, maximum = 240) {
