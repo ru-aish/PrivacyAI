@@ -1,0 +1,209 @@
+name: Live release review
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: "Exact 40-character main commit SHA to review"
+        required: true
+        type: string
+      pr_1:
+        description: "First merged PR number"
+        required: true
+        type: string
+      pr_2:
+        description: "Second merged PR number"
+        required: true
+        type: string
+      pr_3:
+        description: "Third merged PR number"
+        required: true
+        type: string
+      providers:
+        description: "Authenticated agents to exercise"
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - codex
+          - agy
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: privacyai-live-release-review
+  cancel-in-progress: false
+
+jobs:
+  review:
+    name: Authenticated Codex and Antigravity review
+    environment: privacyai-live-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      LIVE_HOME: ${{ runner.temp }}/privacyai-live-home
+      LIVE_SCOPE: ${{ runner.temp }}/privacyai-live-scope
+      LIVE_ARTIFACTS: ${{ runner.temp }}/privacyai-release-artifacts
+      LIVE_INSTALL: ${{ runner.temp }}/privacyai-release-install
+      LIVE_EVIDENCE: ${{ runner.temp }}/privacyai-live-evidence
+      CODEX_VERSION: "0.144.5"
+      AGY_VERSION: "1.1.5"
+      PRIVACYAI_CI_SANITIZER_BASE_URL: https://api.mistral.ai/v1
+      PRIVACYAI_CI_SANITIZER_MODEL: ${{ vars.PRIVACYAI_CI_SANITIZER_MODEL }}
+      PRIVACYAI_LIVE_CODEX_MODEL: ${{ vars.PRIVACYAI_LIVE_CODEX_MODEL }}
+      PRIVACYAI_LIVE_AGY_MODEL: ${{ vars.PRIVACYAI_LIVE_AGY_MODEL }}
+
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate candidate identity before executing repository code
+        id: candidate
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          PR_1: ${{ inputs.pr_1 }}
+          PR_2: ${{ inputs.pr_2 }}
+          PR_3: ${{ inputs.pr_3 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+          [[ "$PR_1" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PR_2" =~ ^[1-9][0-9]*$ ]]
+          [[ "$PR_3" =~ ^[1-9][0-9]*$ ]]
+          test "$PR_1" != "$PR_2"
+          test "$PR_1" != "$PR_3"
+          test "$PR_2" != "$PR_3"
+          test "$(git rev-parse HEAD)" = "$(printf '%s' "$RELEASE_SHA" | tr 'A-F' 'a-f')"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          echo "validated=true" >> "$GITHUB_OUTPUT"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install deterministic workspace dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install image and process prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends tesseract-ocr
+
+      - name: Install pinned Codex CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$CODEX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          npm install --global "@openai/codex@$CODEX_VERSION"
+          codex --version
+
+      - name: Install and verify pinned Antigravity CLI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="agy_cli_linux_x64.tar.gz"
+          metadata="$(gh api "repos/google-antigravity/antigravity-cli/releases/tags/$AGY_VERSION")"
+          url="$(jq -r --arg asset "$asset" '.assets[] | select(.name == $asset) | .browser_download_url' <<<"$metadata")"
+          digest="$(jq -r --arg asset "$asset" '.assets[] | select(.name == $asset) | .digest' <<<"$metadata")"
+          test -n "$url" && test "$url" != null
+          test "${digest%%:*}" = sha256
+          curl --fail --location --silent --show-error "$url" --output "$RUNNER_TEMP/$asset"
+          echo "${digest#sha256:}  $RUNNER_TEMP/$asset" | sha256sum --check --strict
+          mkdir -p "$HOME/.local/bin" "$RUNNER_TEMP/agy-extract"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/agy-extract"
+          install -m 0755 "$(find "$RUNNER_TEMP/agy-extract" -type f -name agy -print -quit)" "$HOME/.local/bin/agy"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/agy" --version
+
+      - name: Validate the exact three-PR release scope
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          PR_1: ${{ inputs.pr_1 }}
+          PR_2: ${{ inputs.pr_2 }}
+          PR_3: ${{ inputs.pr_3 }}
+        run: |
+          node scripts/live-acceptance/generate-scope.mjs \
+            --repository "$GITHUB_REPOSITORY" \
+            --release-sha "$RELEASE_SHA" \
+            --pr "$PR_1" \
+            --pr "$PR_2" \
+            --pr "$PR_3" \
+            --output "$LIVE_SCOPE"
+
+      - name: Test the non-authenticated harness contracts
+        run: node --test scripts/live-acceptance/live-acceptance.test.mjs
+
+      - name: Build and install the packed release candidate
+        run: |
+          node scripts/live-acceptance/install-release.mjs \
+            --cwd "$GITHUB_WORKSPACE" \
+            --artifacts "$LIVE_ARTIFACTS" \
+            --prefix "$LIVE_INSTALL"
+
+      - name: Prepare isolated approved credentials and CI-only sanitizer override
+        env:
+          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          AGY_AUTH_JSON: ${{ secrets.AGY_AUTH_JSON }}
+        run: |
+          node scripts/live-acceptance/prepare-ci-home.mjs \
+            --home "$LIVE_HOME" \
+            --providers "${{ inputs.providers }}"
+
+      - name: Run both authenticated release reviews
+        id: live-review
+        run: |
+          node scripts/live-acceptance/run-live-review.mjs \
+            --workspace "$GITHUB_WORKSPACE" \
+            --scope "$LIVE_SCOPE/LIVE_REVIEW_SCOPE.md" \
+            --scope-json "$LIVE_SCOPE/scope.json" \
+            --image "$GITHUB_WORKSPACE/scripts/live-acceptance/assets/review-instructions.png" \
+            --home "$LIVE_HOME" \
+            --privacyai "$LIVE_INSTALL/bin/privacyai" \
+            --output "$LIVE_EVIDENCE" \
+            --providers "${{ inputs.providers }}"
+
+      - name: Publish sanitized release evidence
+        if: always() && steps.candidate.outputs.validated == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: privacyai-live-review-${{ inputs.release_sha }}
+          path: ${{ runner.temp }}/privacyai-live-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Write public-safe job summary
+        if: always() && steps.candidate.outputs.validated == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/live-acceptance/write-summary.mjs \
+            --scope "$LIVE_SCOPE/scope.json" \
+            --result "$LIVE_EVIDENCE/harness-result.json" \
+            --output "$GITHUB_STEP_SUMMARY"
+
+      - name: Destroy credentials and verify checkout cleanup
+        if: always() && steps.candidate.outputs.validated == 'true'
+        run: |
+          node scripts/live-acceptance/cleanup.mjs \
+            --home "$LIVE_HOME" \
+            --workspace "$GITHUB_WORKSPACE"
