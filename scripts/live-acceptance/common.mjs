@@ -14,15 +14,12 @@ export function assertExactSha(value, name = "SHA") {
 }
 
 export function assertPrNumbers(values) {
-  if (!Array.isArray(values) || values.length !== 3) {
-    throw new TypeError("Exactly three pull request numbers are required.");
+  if (!Array.isArray(values) || values.length !== 1) {
+    throw new TypeError("Exactly one pull request number is required.");
   }
   const normalized = values.map(value => Number(value));
   if (normalized.some(value => !Number.isSafeInteger(value) || value <= 0)) {
     throw new TypeError("Pull request numbers must be positive integers.");
-  }
-  if (new Set(normalized).size !== normalized.length) {
-    throw new TypeError("Pull request numbers must be unique.");
   }
   return normalized;
 }

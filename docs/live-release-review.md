@@ -14,14 +14,14 @@ Inside the approved job only, the harness writes an isolated configuration using
 PRIVACYAI_ALLOW_REMOTE_SANITIZER=1
 ```
 
-The override and API key exist only under `RUNNER_TEMP` and are deleted in the final cleanup step.
+The override and API key exist only under the isolated temporary live-review home and are deleted in the final cleanup step.
 
 ## Manual workflow
 
 The workflow is `.github/workflows/live-release-review.yml`. It accepts:
 
 - an exact 40-character release SHA reachable from `origin/main`;
-- exactly three merged pull-request numbers whose merge commits are ancestors of that SHA;
+- exactly one merged pull-request number whose merge commit is an ancestor of that SHA;
 - the provider selection (`both`, `codex`, or `agy`);
 - pinned Codex and Antigravity CLI versions.
 
@@ -73,7 +73,7 @@ Both agents receive `scripts/live-acceptance/assets/review-instructions.png`.
 - Codex receives it through its native `--image` argument.
 - Antigravity receives the same bytes from a fixed local MCP tool named `read_privacyai_review_instructions`.
 
-The dynamic PR numbers and commit identities are not embedded in the image. The harness generates `LIVE_REVIEW_SCOPE.md` from GitHub and Git evidence for each run.
+The dynamic PR number and commit identities are not embedded in the image. The harness generates `LIVE_REVIEW_SCOPE.md` from GitHub and Git evidence for each run. It reviews the exact selected PR range (`PR base..PR merge commit`) while exercising the requested current release SHA.
 
 ## Release candidate isolation
 
@@ -89,6 +89,19 @@ The workflow:
 8. checks for newly surviving Codex, Antigravity, PrivacyAI, gateway, and runtime-directory resources;
 9. uploads only sanitized bounded evidence;
 10. destroys the temporary home and credentials even after failure.
+
+## Failure evidence
+
+A failed provider does not prevent the other selected provider from running. The job summary reports the failed phase, provider, exit code, timeout state, PrivacyAI diagnostic codes, and a bounded safe message.
+
+The uploaded sanitized artifact contains:
+
+- `codex-output.txt` and `agy-output.txt`: bounded redacted terminal output;
+- `codex-result.txt` and `agy-result.txt`: bounded redacted final responses;
+- `harness-result.json`: provider status, failure code, timeout/signal information, completion-marker status, cleanup results, and a short log tail;
+- `database-diagnostics.json`: read-only context-ledger counts/statuses and recent lineage event fields including provider, operation, phase, reason code, and diagnostic code.
+
+The database snapshot deliberately excludes request/response payloads, `metadata_json`, session maps, hashes, vault values, credentials, and private originals.
 
 ## Expected current behavior
 
