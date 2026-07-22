@@ -88,8 +88,15 @@ Release preparation follows the normal pull-request process. The release
 workflow validates pull requests without npm credentials and uploads validated
 artifacts for inspection. Do not publish from an unmerged feature branch.
 
-After the release preparation PR is merged, create an annotated tag on the
-exact merge commit and push it:
+After merging the release preparation PR, run the manually approved
+**Live release review** workflow against the exact candidate SHA and the three
+selected merged PRs. This GitHub-hosted job exercises the packed CLI through
+real Codex and Antigravity sessions using isolated CI credentials. It must pass
+before tagging, and its reviewed SHA must equal the commit that will be tagged.
+See `docs/live-release-review.md` for setup, evidence, and failure semantics.
+
+After the live review passes and a human approves its findings, create an
+annotated tag on the exact reviewed commit and push it:
 
 ```bash
 git switch main
