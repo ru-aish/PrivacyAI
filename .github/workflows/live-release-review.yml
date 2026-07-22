@@ -43,11 +43,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      LIVE_HOME: ${{ runner.temp }}/privacyai-live-home
-      LIVE_SCOPE: ${{ runner.temp }}/privacyai-live-scope
-      LIVE_ARTIFACTS: ${{ runner.temp }}/privacyai-release-artifacts
-      LIVE_INSTALL: ${{ runner.temp }}/privacyai-release-install
-      LIVE_EVIDENCE: ${{ runner.temp }}/privacyai-live-evidence
+      LIVE_HOME: /tmp/privacyai-live-home
+      LIVE_SCOPE: /tmp/privacyai-live-scope
+      LIVE_ARTIFACTS: /tmp/privacyai-release-artifacts
+      LIVE_INSTALL: /tmp/privacyai-release-install
+      LIVE_EVIDENCE: /tmp/privacyai-live-evidence
       CODEX_VERSION: "0.144.5"
       AGY_VERSION: "1.1.5"
       PRIVACYAI_CI_SANITIZER_BASE_URL: https://api.mistral.ai/v1
