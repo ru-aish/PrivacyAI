@@ -129,7 +129,9 @@ jobs:
           echo "${digest#sha256:}  $RUNNER_TEMP/$asset" | sha256sum --check --strict
           mkdir -p "$HOME/.local/bin" "$RUNNER_TEMP/agy-extract"
           tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/agy-extract"
-          install -m 0755 "$(find "$RUNNER_TEMP/agy-extract" -type f -name agy -print -quit)" "$HOME/.local/bin/agy"
+          test -f "$RUNNER_TEMP/agy-extract/antigravity"
+          test -x "$RUNNER_TEMP/agy-extract/antigravity"
+          install -m 0755 "$RUNNER_TEMP/agy-extract/antigravity" "$HOME/.local/bin/agy"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/agy" --version
 
