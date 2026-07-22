@@ -89,8 +89,8 @@ workflow validates pull requests without npm credentials and uploads validated
 artifacts for inspection. Do not publish from an unmerged feature branch.
 
 After merging the release preparation PR, run the manually approved
-**Live release review** workflow against the exact candidate SHA and the three
-selected merged PRs. This GitHub-hosted job exercises the packed CLI through
+**Live release review** workflow against the exact candidate SHA and one
+selected merged PR. This GitHub-hosted job exercises the packed CLI through
 real Codex and Antigravity sessions using isolated CI credentials. It must pass
 before tagging, and its reviewed SHA must equal the commit that will be tagged.
 See `docs/live-release-review.md` for setup, evidence, and failure semantics.

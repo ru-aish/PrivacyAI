@@ -17,15 +17,14 @@ import {
   runChecked,
   writeJson
 } from "./common.mjs";
+import { collectDatabaseDiagnostics } from "./database-diagnostics.mjs";
 
 const FAILURE_PATTERNS = Object.freeze([
-  /422 Unprocessable Entity/i,
-  /privacy boundary could not be verified/i,
-  /PrivacyAI encountered an internal failure/i,
-  /authentication required/i,
-  /not signed in/i,
-  /rate limit(?:ed)?/i,
-  /timed out/i
+  { code: "PRIVACY_BOUNDARY_UNVERIFIED", pattern: /422 Unprocessable Entity|privacy boundary could not be verified/i },
+  { code: "PRIVACYAI_INTERNAL_FAILURE", pattern: /PrivacyAI encountered an internal failure/i },
+  { code: "PROVIDER_AUTH_REQUIRED", pattern: /authentication required|not signed in/i },
+  { code: "PROVIDER_RATE_LIMITED", pattern: /rate limit(?:ed)?/i },
+  { code: "PROVIDER_REPORTED_TIMEOUT", pattern: /timed out/i }
 ]);
 
 export async function runLiveReview(options) {
@@ -37,34 +36,52 @@ export async function runLiveReview(options) {
   const privacyai = absolute(options.privacyai);
   const outputDir = absolute(options.outputDir);
   const providers = normalizeProviders(options.providers);
-  const scope = await readJson(scopeJsonPath);
-  const expectedHead = String(scope.releaseSha || "").toLowerCase();
-  const selectedPrNumbers = (scope.selectedPullRequests || []).map(item => Number(item.number));
-  const reviewScopePath = join(workspace, "LIVE_REVIEW_SCOPE.md");
-  const prompt = await readFile(new URL("./prompts/launch.txt", import.meta.url), "utf8");
-  const paths = await readJson(join(home, "ci-paths.json"));
-  const secretValues = await collectSecretValuesFromHome(home, paths);
 
   await mkdir(outputDir, { recursive: true });
-  await cp(scopePath, join(outputDir, "LIVE_REVIEW_SCOPE.md"));
-  await cp(scopeJsonPath, join(outputDir, "scope.json"));
-  const beforeProcesses = await agentProcessSnapshot();
-  const beforeRuntimeDirs = new Set(await privacyRuntimeDirectories());
-  await assertTrackedClean(workspace, expectedHead);
-
-  const env = buildRuntimeEnvironment(home, paths);
   const evidence = {
-    schemaVersion: 1,
-    releaseSha: expectedHead,
+    schemaVersion: 2,
+    phase: "initialization",
+    releaseSha: null,
+    selectedPullRequests: [],
     providers: {},
+    failure: null,
     doctor: null,
     statePreflight: null,
+    databaseDiagnostics: null,
     trackedCheckoutClean: false,
     cleanup: null,
     eligible: false
   };
 
+  let scope;
+  let expectedHead = "";
+  let selectedPrNumbers = [];
+  let paths;
+  let secretValues = [];
+  let beforeProcesses = new Map();
+  let beforeRuntimeDirs = new Set();
+  let runtimeSnapshotReady = false;
+  const reviewScopePath = join(workspace, "LIVE_REVIEW_SCOPE.md");
+
   try {
+    scope = await readJson(scopeJsonPath);
+    expectedHead = String(scope.releaseSha || "").toLowerCase();
+    selectedPrNumbers = (scope.selectedPullRequests || []).map(item => Number(item.number));
+    evidence.releaseSha = expectedHead || null;
+    evidence.selectedPullRequests = selectedPrNumbers;
+    const prompt = await readFile(new URL("./prompts/launch.txt", import.meta.url), "utf8");
+    paths = await readJson(join(home, "ci-paths.json"));
+    secretValues = await collectSecretValuesFromHome(home, paths);
+
+    await cp(scopePath, join(outputDir, "LIVE_REVIEW_SCOPE.md"));
+    await cp(scopeJsonPath, join(outputDir, "scope.json"));
+    beforeProcesses = await agentProcessSnapshot();
+    beforeRuntimeDirs = new Set(await privacyRuntimeDirectories());
+    runtimeSnapshotReady = true;
+    await assertTrackedClean(workspace, expectedHead);
+
+    const env = buildRuntimeEnvironment(home, paths);
+    evidence.phase = "preflight";
     await prepareIgnoredReviewScope(workspace, home);
     await cp(scopePath, reviewScopePath);
     evidence.statePreflight = await captureDiagnostic(
@@ -86,34 +103,80 @@ export async function runLiveReview(options) {
     );
     assertSafeDiagnostics(evidence.doctor, evidence.statePreflight);
 
-    if (providers.includes("codex")) {
-      evidence.providers.codex = await runCodex({
-        privacyai, workspace, imagePath, prompt, outputDir, env, home, secretValues,
-        expectedHead, selectedPrNumbers, model: options.codexModel
-      });
+    const context = {
+      privacyai, workspace, imagePath, prompt, outputDir, env, home, secretValues,
+      expectedHead, selectedPrNumbers
+    };
+    for (const provider of providers) {
+      evidence.phase = "provider:" + provider;
+      try {
+        evidence.providers[provider] = provider === "codex"
+          ? await runCodex({ ...context, model: options.codexModel })
+          : await runAgy({ ...context, model: options.agyModel });
+      } catch (error) {
+        evidence.providers[provider] = await providerSetupFailure(
+          provider,
+          error,
+          outputDir,
+          secretValues
+        );
+      }
     }
-    if (providers.includes("agy")) {
-      evidence.providers.agy = await runAgy({
-        privacyai, workspace, imagePath, prompt, outputDir, env, home, secretValues,
-        expectedHead, selectedPrNumbers, model: options.agyModel
-      });
-    }
+    evidence.phase = "finalization";
+  } catch (error) {
+    evidence.failure = failureRecord(evidence.phase, error, secretValues);
   } finally {
-    await rm(reviewScopePath, { force: true });
-    await restoreIgnoredReviewScope(home);
-    evidence.trackedCheckoutClean = await isTrackedClean(workspace, expectedHead);
-    evidence.cleanup = await inspectCleanup(beforeProcesses, beforeRuntimeDirs);
+    try {
+      await rm(reviewScopePath, { force: true });
+      await restoreIgnoredReviewScope(home);
+    } catch (error) {
+      evidence.failure ||= failureRecord("scope-cleanup", error, secretValues);
+    }
+    evidence.trackedCheckoutClean = expectedHead
+      ? await isTrackedClean(workspace, expectedHead)
+      : false;
+    evidence.cleanup = runtimeSnapshotReady
+      ? await inspectCleanup(beforeProcesses, beforeRuntimeDirs)
+      : { ok: false, reason: "runtime_snapshot_not_created", survivingProcesses: [], leftoverRuntimeDirs: [] };
+    evidence.databaseDiagnostics = paths
+      ? await collectDatabaseDiagnostics(paths, secretValues)
+      : { schemaVersion: 1, context: { status: "missing" }, lineage: { status: "missing" } };
+    await writeJson(join(outputDir, "database-diagnostics.json"), evidence.databaseDiagnostics);
+
+    const providerResultsComplete = Object.keys(evidence.providers).length === providers.length;
+    const providersPassed = providerResultsComplete && Object.values(evidence.providers).every(result => result.ok);
     evidence.eligible =
+      !evidence.failure &&
       evidence.trackedCheckoutClean &&
       evidence.cleanup.ok &&
-      Object.keys(evidence.providers).length === providers.length &&
-      Object.values(evidence.providers).every(result => result.ok);
+      providersPassed;
+    if (!evidence.eligible && !evidence.failure) {
+      const failed = providers.find(name => evidence.providers[name] && !evidence.providers[name].ok);
+      if (failed) {
+        evidence.failure = {
+          phase: "provider:" + failed,
+          code: evidence.providers[failed].failureCode || "PROVIDER_REVIEW_FAILED",
+          message: evidence.providers[failed].failureMessage || failed + " did not satisfy the release gate."
+        };
+      } else if (!providerResultsComplete) {
+        evidence.failure = {
+          phase: evidence.phase,
+          code: "PROVIDER_REVIEW_INCOMPLETE",
+          message: "One or more selected providers did not produce a result."
+        };
+      } else if (!evidence.trackedCheckoutClean) {
+        evidence.failure = { phase: "finalization", code: "RELEASE_CHECKOUT_DIRTY", message: "The release checkout changed during review." };
+      } else if (!evidence.cleanup.ok) {
+        evidence.failure = { phase: "cleanup", code: "RUNTIME_CLEANUP_FAILED", message: "Provider processes or runtime directories remained after review." };
+      }
+    }
+    evidence.phase = "complete";
     await writeJson(join(outputDir, "harness-result.json"), evidence);
     await writeChecksums(outputDir);
   }
 
   if (!evidence.eligible) {
-    throw new Error("PrivacyAI live release review did not satisfy the release gate. See sanitized evidence.");
+    throw new Error(gateFailureMessage(evidence));
   }
   return evidence;
 }
@@ -179,17 +242,63 @@ async function runAgy(context) {
   return runProvider("agy", context.privacyai, args, context);
 }
 
+async function providerSetupFailure(name, error, outputDir, secretValues) {
+  const message = redactText(error instanceof Error ? error.message : String(error), secretValues).slice(0, 4000);
+  await writeFile(join(outputDir, name + "-output.txt"), message + "\n");
+  await writeFile(join(outputDir, name + "-result.txt"), "");
+  return {
+    ok: false,
+    exitCode: null,
+    signal: null,
+    timedOut: false,
+    survivingProcessGroup: [],
+    completionMarker: false,
+    result: null,
+    missingFields: [],
+    structuredResponseValid: false,
+    failurePatterns: [],
+    diagnosticCodes: extractDiagnosticCodes(message),
+    failureCode: safeErrorCode(error, "PROVIDER_SETUP_FAILED"),
+    failureMessage: message || "Provider setup failed before launch.",
+    logTail: message
+  };
+}
+
 async function runProvider(name, command, args, context) {
-  const result = await run(command, args, {
-    cwd: context.workspace,
-    env: context.env,
-    timeoutMs: 20 * 60_000,
-    maximumBytes: 24 * 1024 * 1024,
-    processGroup: true
-  });
-  const combined = `${result.stdout}\n${result.stderr}`;
+  let result;
+  try {
+    result = await run(command, args, {
+      cwd: context.workspace,
+      env: context.env,
+      timeoutMs: 20 * 60_000,
+      maximumBytes: 24 * 1024 * 1024,
+      processGroup: true
+    });
+  } catch (error) {
+    const safeMessage = redactText(error instanceof Error ? error.message : String(error), context.secretValues).slice(0, 4000);
+    await writeFile(join(context.outputDir, name + "-output.txt"), safeMessage + "\n");
+    await writeFile(join(context.outputDir, name + "-result.txt"), "");
+    return {
+      ok: false,
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      survivingProcessGroup: [],
+      completionMarker: false,
+      result: null,
+      missingFields: [],
+      structuredResponseValid: false,
+      failurePatterns: [],
+      diagnosticCodes: extractDiagnosticCodes(safeMessage),
+      failureCode: safeErrorCode(error, "PROVIDER_LAUNCH_FAILED"),
+      failureMessage: safeMessage || "Provider process could not be started.",
+      logTail: safeMessage
+    };
+  }
+
+  const combined = String(result.stdout || "") + "\n" + String(result.stderr || "");
   const safeOutput = redactText(combined, context.secretValues);
-  await writeFile(join(context.outputDir, `${name}-output.txt`), safeOutput);
+  await writeFile(join(context.outputDir, name + "-output.txt"), safeOutput);
   let final = "";
   try {
     final = context.finalPath
@@ -201,20 +310,27 @@ async function runProvider(name, command, args, context) {
     if (context.finalPath) await rm(context.finalPath, { force: true });
   }
   const safeFinal = redactText(final, context.secretValues);
-  await writeFile(join(context.outputDir, `${name}-result.txt`), safeFinal);
-  const failures = FAILURE_PATTERNS.filter(pattern => pattern.test(combined)).map(pattern => pattern.source);
+  await writeFile(join(context.outputDir, name + "-result.txt"), safeFinal);
+
+  const matchedFailures = FAILURE_PATTERNS
+    .filter(item => item.pattern.test(combined))
+    .map(item => item.code);
+  const diagnosticCodes = extractDiagnosticCodes(combined);
   const structured = parseReviewResponse(safeFinal, context);
-  const ok =
-    result.code === 0 &&
-    !result.timedOut &&
-    result.survivingProcessGroup.length === 0 &&
-    failures.length === 0 &&
-    safeFinal.includes(COMPLETION_MARKER) &&
-    structured.ok &&
-    !safeOutput.includes(SYNTHETIC_PRIVATE_VALUE) &&
-    !safeFinal.includes(SYNTHETIC_PRIVATE_VALUE);
+  const syntheticValueExposed =
+    safeOutput.includes(SYNTHETIC_PRIVATE_VALUE) ||
+    safeFinal.includes(SYNTHETIC_PRIVATE_VALUE);
+  const failure = classifyProviderFailure({
+    result,
+    matchedFailures,
+    diagnosticCodes,
+    structured,
+    completionMarker: safeFinal.includes(COMPLETION_MARKER),
+    syntheticValueExposed
+  });
+
   return {
-    ok,
+    ok: failure == null,
     exitCode: result.code,
     signal: result.signal,
     timedOut: result.timedOut,
@@ -226,15 +342,78 @@ async function runProvider(name, command, args, context) {
     result: structured.fields.RESULT || null,
     missingFields: structured.missingFields,
     structuredResponseValid: structured.ok,
-    failurePatterns: failures
+    failurePatterns: matchedFailures,
+    diagnosticCodes,
+    failureCode: failure?.code || null,
+    failureMessage: failure?.message || null,
+    logTail: safeOutput.slice(-4000)
   };
+}
+
+function classifyProviderFailure(context) {
+  if (context.result.timedOut) {
+    return { code: "PROVIDER_TIMEOUT", message: "Provider exceeded the 20-minute live-review timeout." };
+  }
+  if (context.result.survivingProcessGroup.length > 0) {
+    return { code: "PROVIDER_PROCESS_LEAK", message: "Provider left processes running after termination." };
+  }
+  if (context.syntheticValueExposed) {
+    return { code: "SYNTHETIC_PRIVATE_VALUE_EXPOSED", message: "The synthetic privacy test value appeared in captured provider output." };
+  }
+  if (context.matchedFailures.length > 0) {
+    return {
+      code: context.diagnosticCodes[0] || context.matchedFailures[0],
+      message: "Provider output matched a fail-closed PrivacyAI or provider error class."
+    };
+  }
+  if (context.result.code !== 0) {
+    return {
+      code: context.diagnosticCodes[0] || "PROVIDER_EXIT_NONZERO",
+      message: "Provider process exited with code " + context.result.code + "."
+    };
+  }
+  if (!context.completionMarker) {
+    return { code: "COMPLETION_MARKER_MISSING", message: "Provider did not emit the required completion marker." };
+  }
+  if (!context.structured.ok) {
+    return { code: "STRUCTURED_RESPONSE_INVALID", message: "Provider response did not satisfy the required structured review contract." };
+  }
+  return null;
+}
+
+function failureRecord(phase, error, secrets) {
+  const message = redactText(error instanceof Error ? error.message : String(error), secrets).slice(0, 1000);
+  return {
+    phase,
+    code: safeErrorCode(error, "LIVE_REVIEW_INTERNAL_ERROR"),
+    message
+  };
+}
+
+function gateFailureMessage(evidence) {
+  const failure = evidence.failure || { phase: evidence.phase, code: "LIVE_REVIEW_NOT_ELIGIBLE", message: "Release gate requirements were not satisfied." };
+  const providerDetails = Object.entries(evidence.providers)
+    .filter(([, result]) => !result.ok)
+    .map(([name, result]) => name + "=" + (result.failureCode || "FAILED"))
+    .join(", ");
+  const suffix = providerDetails ? " Providers: " + providerDetails + "." : "";
+  return "PrivacyAI live release review failed at " + failure.phase + " with " + failure.code + ": " + failure.message + suffix + " See sanitized evidence.";
+}
+
+function extractDiagnosticCodes(value) {
+  return [...new Set(String(value || "").match(/\bPRIVACYAI_[A-Z0-9_]+\b/g) || [])].slice(0, 50);
+}
+
+function safeErrorCode(error, fallback) {
+  const value = String(error?.code || fallback);
+  return /^[A-Z0-9_.-]{1,100}$/i.test(value) ? value : fallback;
 }
 
 export function parseReviewResponse(text, context) {
   const labels = [
     "RESULT",
     "HEAD",
-    "PRS",
+    "PR",
     "FINDINGS",
     "CHANGES",
     "TESTS",
@@ -244,20 +423,20 @@ export function parseReviewResponse(text, context) {
     "RELEASE ELIGIBLE"
   ];
   const fields = Object.fromEntries(labels.map(label => [label, responseField(text, label)]));
+  fields.PR ||= responseField(text, "PRS");
   const missingFields = labels.filter(label => !fields[label]);
   const reportedHead = fields.HEAD?.match(/[0-9a-f]{40}/i)?.[0]?.toLowerCase() || null;
-  const reportedPrNumbers = [...String(fields.PRS || "").matchAll(/#([1-9][0-9]*)\b/g)]
+  const reportedPrNumbers = [...String(fields.PR || "").matchAll(/#([1-9][0-9]*)\b/g)]
     .map(match => Number(match[1]));
-  const prsValid =
-    context.selectedPrNumbers.length === 3 &&
-    reportedPrNumbers.length === 3 &&
-    new Set(reportedPrNumbers).size === 3 &&
-    context.selectedPrNumbers.every(number => reportedPrNumbers.includes(number));
+  const prValid =
+    context.selectedPrNumbers.length === 1 &&
+    reportedPrNumbers.length === 1 &&
+    reportedPrNumbers[0] === context.selectedPrNumbers[0];
   const ok =
     missingFields.length === 0 &&
     /^PASS\b/i.test(fields.RESULT) &&
     reportedHead === context.expectedHead &&
-    prsValid &&
+    prValid &&
     /^none\b/i.test(fields.FINDINGS) &&
     /^none\b/i.test(fields.CHANGES) &&
     /^PASS\b/i.test(fields.PRIVACY) &&

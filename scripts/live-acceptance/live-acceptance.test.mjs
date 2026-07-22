@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 
 import { assertPrNumbers, run, runChecked, writeJson } from "./common.mjs";
 import { generateReviewScope } from "./generate-scope.mjs";
@@ -13,19 +14,19 @@ import { renderSummary } from "./write-summary.mjs";
 
 const ASSET = new URL("./assets/review-instructions.png", import.meta.url).pathname;
 
-test("scope generation validates an exact clean release and three merged PRs", async t => {
+test("scope generation validates an exact clean release and one merged PR", async t => {
   const fixture = await gitFixture(t);
   const output = join(fixture.root, "scope-output");
-  const pulls = new Map(fixture.commits.slice(1).map((commit, index) => [index + 11, {
-    number: index + 11,
-    title: `PR ${index + 1}\nmetadata`,
-    html_url: `https://example.test/pr/${index + 11}`,
+  const pulls = new Map([[11, {
+    number: 11,
+    title: "PR 1\nmetadata",
+    html_url: "https://example.test/pr/11",
     state: "closed",
-    merged_at: `2026-07-2${index + 1}T00:00:00Z`,
-    merge_commit_sha: commit,
-    base: { sha: fixture.commits[index] },
-    head: { sha: commit }
-  }]));
+    merged_at: "2026-07-21T00:00:00Z",
+    merge_commit_sha: fixture.commits[1],
+    base: { sha: fixture.commits[0] },
+    head: { sha: fixture.commits[1] }
+  }]]);
   const fetch = async url => {
     const parsed = new URL(url);
     const prMatch = parsed.pathname.match(/\/pulls\/(\d+)$/);
@@ -38,7 +39,7 @@ test("scope generation validates an exact clean release and three merged PRs", a
   const scope = await generateReviewScope({
     repository: "ru-aish/PrivacyAI",
     releaseSha: fixture.commits.at(-1),
-    prNumbers: [11, 12, 13],
+    prNumbers: [11],
     outputDir: output,
     cwd: fixture.repo,
     token: "fixture-token",
@@ -47,14 +48,17 @@ test("scope generation validates an exact clean release and three merged PRs", a
 
   assert.equal(scope.releaseSha, fixture.commits.at(-1));
   assert.equal(scope.baseSha, fixture.commits[0]);
-  assert.deepEqual(scope.selectedPullRequests.map(item => item.number), [11, 12, 13]);
+  assert.deepEqual(scope.selectedPullRequests.map(item => item.number), [11]);
+  assert.equal(scope.reviewHeadSha, fixture.commits[1]);
+  assert.equal(scope.reviewRange, fixture.commits[0] + ".." + fixture.commits[1]);
   assert.match(await readFile(join(output, "LIVE_REVIEW_SCOPE.md"), "utf8"), /untrusted context/i);
-  assert.match(await readFile(join(output, "LIVE_REVIEW_SCOPE.md"), "utf8"), /PR #13/);
+  assert.match(await readFile(join(output, "LIVE_REVIEW_SCOPE.md"), "utf8"), /PR #11/);
 });
 
 test("scope and PR argument validation fail closed", () => {
-  assert.throws(() => assertPrNumbers([1, 1, 2]), /unique/);
-  assert.throws(() => assertPrNumbers([1, 2]), /Exactly three/);
+  assert.deepEqual(assertPrNumbers([1]), [1]);
+  assert.throws(() => assertPrNumbers([1, 2]), /Exactly one/);
+  assert.throws(() => assertPrNumbers([0]), /positive integers/);
 });
 
 test("provider process groups expose and terminate background descendants", async () => {
@@ -142,7 +146,7 @@ test("live-review orchestrator accepts independently verified mock provider runs
   const scopeDir = join(root, "scope");
   await writeJson(join(scopeDir, "scope.json"), {
     releaseSha: fixture.commits.at(-1),
-    selectedPullRequests: [{ number: 1 }, { number: 2 }, { number: 3 }]
+    selectedPullRequests: [{ number: 1 }]
   });
   await writeFile(join(scopeDir, "LIVE_REVIEW_SCOPE.md"), "# Fixture scope\n");
   const mock = join(root, "privacyai");
@@ -175,15 +179,117 @@ test("live-review orchestrator accepts independently verified mock provider runs
   assert.ok(paths.configPath);
 });
 
+test("failed provider evidence records provider cause and database diagnostics", async t => {
+  const fixture = await gitFixture(t);
+  const root = fixture.root;
+  const home = join(root, "home");
+  const paths = await prepareCiHome({
+    home,
+    model: "fixture-model",
+    apiKey: "mistral-fixture-key",
+    codexAuthJson: JSON.stringify({ token: "fixture" }),
+    agyAuthJson: JSON.stringify({
+      "antigravity-oauth-token": Buffer.from("fixture").toString("base64")
+    })
+  });
+  await mkdir(join(home, ".local", "share", "privacyai"), { recursive: true });
+
+  const contextDatabase = new DatabaseSync(paths.contextDb);
+  contextDatabase.exec(`
+    CREATE TABLE privacyai_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO privacyai_meta(key, value) VALUES('schema_version', '4');
+    CREATE TABLE ledger_file_mutations(
+      status TEXT NOT NULL,
+      operation_type TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_used_at INTEGER NOT NULL
+    );
+    INSERT INTO ledger_file_mutations(status, operation_type, created_at, last_used_at)
+    VALUES('rolled_back', 'write', 10, 20);
+  `);
+  contextDatabase.close();
+
+  const lineageDatabase = new DatabaseSync(paths.lineageDb);
+  lineageDatabase.exec(`
+    CREATE TABLE privacyai_lineage_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO privacyai_lineage_meta(key, value) VALUES('schema_version', '1');
+    CREATE TABLE lineage_events(
+      row_id INTEGER PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      occurred_at INTEGER NOT NULL,
+      recorded_at INTEGER NOT NULL,
+      provider TEXT,
+      operation TEXT,
+      model TEXT,
+      artifact_type TEXT,
+      phase TEXT,
+      reason_code TEXT NOT NULL,
+      diagnostic_code TEXT
+    );
+    INSERT INTO lineage_events(
+      event_type, occurred_at, recorded_at, provider, operation, model,
+      artifact_type, phase, reason_code, diagnostic_code
+    ) VALUES(
+      'request_blocked', 100, 101, 'codex', 'responses', 'fixture-model',
+      'prompt', 'request_validation', 'privacy_boundary', 'PRIVACYAI_CONTEXT_DB_WRITE_FAILED'
+    );
+  `);
+  lineageDatabase.close();
+
+  const scopeDir = join(root, "scope");
+  await writeJson(join(scopeDir, "scope.json"), {
+    releaseSha: fixture.commits.at(-1),
+    selectedPullRequests: [{ number: 1 }]
+  });
+  await writeFile(join(scopeDir, "LIVE_REVIEW_SCOPE.md"), "# Fixture scope\n");
+  const mock = join(root, "privacyai-failure");
+  await writeFile(mock, mockPrivacyAiFailureSource());
+  await chmod(mock, 0o755);
+  const output = join(root, "evidence");
+
+  await assert.rejects(
+    runLiveReview({
+      workspace: fixture.repo,
+      scopePath: join(scopeDir, "LIVE_REVIEW_SCOPE.md"),
+      scopeJsonPath: join(scopeDir, "scope.json"),
+      imagePath: ASSET,
+      home,
+      privacyai: mock,
+      outputDir: output,
+      providers: "both"
+    }),
+    /provider:codex.*PRIVACYAI_CONTEXT_DB_WRITE_FAILED/i
+  );
+
+  const evidence = JSON.parse(await readFile(join(output, "harness-result.json"), "utf8"));
+  assert.equal(evidence.eligible, false);
+  assert.equal(evidence.providers.codex.failureCode, "PRIVACYAI_CONTEXT_DB_WRITE_FAILED");
+  assert.equal(evidence.providers.agy.ok, true);
+  assert.equal(evidence.failure.phase, "provider:codex");
+  assert.equal(evidence.databaseDiagnostics.context.fileMutationStatuses[0].status, "rolled_back");
+  assert.equal(
+    evidence.databaseDiagnostics.lineage.recentEvents[0].diagnosticCode,
+    "PRIVACYAI_CONTEXT_DB_WRITE_FAILED"
+  );
+  assert.match(await readFile(join(output, "codex-output.txt"), "utf8"), /PRIVACYAI_CONTEXT_DB_WRITE_FAILED/);
+  const summary = renderSummary(
+    { releaseSha: fixture.commits.at(-1), selectedPullRequests: [{ number: 1 }] },
+    evidence
+  );
+  assert.match(summary, /PRIVACYAI_CONTEXT_DB_WRITE_FAILED/);
+  assert.match(summary, /bounded sanitized log tail/);
+  assert.match(summary, /request_blocked/);
+});
+
 test("structured review validation rejects findings and inexact PR references", () => {
   const context = {
     expectedHead: "a".repeat(40),
-    selectedPrNumbers: [1, 2, 3]
+    selectedPrNumbers: [1]
   };
   const valid = [
     "RESULT: PASS",
     `HEAD: ${context.expectedHead}`,
-    "PRS: #1, #2, #3",
+    "PR: #1",
     "FINDINGS: none",
     "CHANGES: none",
     "TESTS: passed",
@@ -202,7 +308,7 @@ test("structured review validation rejects findings and inexact PR references", 
     true
   );
   assert.equal(
-    parseReviewResponse(valid.replace("PRS: #1, #2, #3", "PRS: #10, #2, #3"), context).ok,
+    parseReviewResponse(valid.replace("PR: #1", "PR: #10"), context).ok,
     false
   );
   assert.equal(
@@ -224,6 +330,10 @@ test("workflow pins agent versions and validates the candidate before repository
   const jobPreamble = workflow.slice(0, workflow.indexOf("    steps:"));
   assert.doesNotMatch(jobPreamble, /runner\.temp/);
   assert.match(jobPreamble, /LIVE_HOME: \/tmp\/privacyai-live-home/);
+  assert.match(workflow, /pr_number:/);
+  assert.doesNotMatch(workflow, /pr_1:|pr_2:|pr_3:/);
+  assert.match(workflow, /path: \/tmp\/privacyai-live-evidence/);
+  assert.match(workflow, /if-no-files-found: error/);
   const validation = workflow.indexOf("Validate candidate identity before executing repository code");
   const dependencyInstall = workflow.indexOf("Install deterministic workspace dependencies");
   assert.ok(validation >= 0 && dependencyInstall > validation);
@@ -233,7 +343,7 @@ test("workflow pins agent versions and validates the candidate before repository
 
 test("job summary is public-safe and reports release eligibility", () => {
   const text = renderSummary(
-    { releaseSha: "a".repeat(40), selectedPullRequests: [{ number: 1 }, { number: 2 }, { number: 3 }] },
+    { releaseSha: "a".repeat(40), selectedPullRequests: [{ number: 1 }] },
     {
       eligible: true,
       trackedCheckoutClean: true,
@@ -282,6 +392,54 @@ async function waitUntil(predicate, timeoutMs = 5000) {
   }
 }
 
+function mockPrivacyAiFailureSource() {
+  return `#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args[0] === "state") {
+  console.log(JSON.stringify({ components: [
+    { name: "configuration", status: "ready" },
+    { name: "identity", status: "ready" },
+    { name: "vault", status: "ready" },
+    { name: "context", status: "ready" },
+    { name: "lineage", status: "ready" }
+  ] }));
+  process.exit(0);
+}
+if (args[0] === "doctor") {
+  console.log(JSON.stringify({ configuration: { configured: true }, localModel: { ok: true } }));
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "codex") {
+  process.stderr.write("PRIVACYAI_CONTEXT_DB_WRITE_FAILED: fixture database write failed\\n");
+  process.exit(7);
+}
+if (args[0] === "agent" && args[1] === "agy") {
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const result = [
+    "RESULT: PASS",
+    "HEAD: " + head,
+    "PR: #1",
+    "FINDINGS: none",
+    "CHANGES: none",
+    "TESTS: fixture diagnostics passed",
+    "LIVE FLOW: protected fixture provider process completed",
+    "PRIVACY: PASS",
+    "CLEANUP: PASS",
+    "RELEASE ELIGIBLE: YES",
+    "PRIVACYAI_LIVE_REVIEW_COMPLETE",
+    ""
+  ].join("\\n");
+  const outputIndex = args.indexOf("--output-last-message");
+  if (outputIndex >= 0) writeFileSync(args[outputIndex + 1], result);
+  process.stdout.write(result);
+  process.exit(0);
+}
+process.exit(2);
+`;
+}
+
 function mockPrivacyAiSource() {
   return `#!/usr/bin/env node
 import { execFileSync } from "node:child_process";
@@ -316,7 +474,7 @@ if (args[0] === "agent") {
   const result = [
     "RESULT: PASS",
     "HEAD: " + head,
-    "PRS: #1, #2, #3",
+    "PR: #1",
     "FINDINGS: none",
     "CHANGES: none",
     "TESTS: fixture diagnostics and repository inspection passed",

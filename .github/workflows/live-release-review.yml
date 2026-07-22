@@ -7,16 +7,8 @@ on:
         description: "Exact 40-character main commit SHA to review"
         required: true
         type: string
-      pr_1:
-        description: "First merged PR number"
-        required: true
-        type: string
-      pr_2:
-        description: "Second merged PR number"
-        required: true
-        type: string
-      pr_3:
-        description: "Third merged PR number"
+      pr_number:
+        description: "Merged PR number to review"
         required: true
         type: string
       providers:
@@ -67,19 +59,12 @@ jobs:
         id: candidate
         env:
           RELEASE_SHA: ${{ inputs.release_sha }}
-          PR_1: ${{ inputs.pr_1 }}
-          PR_2: ${{ inputs.pr_2 }}
-          PR_3: ${{ inputs.pr_3 }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         shell: bash
         run: |
           set -euo pipefail
           [[ "$RELEASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
-          [[ "$PR_1" =~ ^[1-9][0-9]*$ ]]
-          [[ "$PR_2" =~ ^[1-9][0-9]*$ ]]
-          [[ "$PR_3" =~ ^[1-9][0-9]*$ ]]
-          test "$PR_1" != "$PR_2"
-          test "$PR_1" != "$PR_3"
-          test "$PR_2" != "$PR_3"
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
           test "$(git rev-parse HEAD)" = "$(printf '%s' "$RELEASE_SHA" | tr 'A-F' 'a-f')"
           git fetch --no-tags origin main:refs/remotes/origin/main
           git merge-base --is-ancestor "$RELEASE_SHA" origin/main
@@ -135,20 +120,16 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/agy" --version
 
-      - name: Validate the exact three-PR release scope
+      - name: Validate the exact single-PR release scope
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ inputs.release_sha }}
-          PR_1: ${{ inputs.pr_1 }}
-          PR_2: ${{ inputs.pr_2 }}
-          PR_3: ${{ inputs.pr_3 }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         run: |
           node scripts/live-acceptance/generate-scope.mjs \
             --repository "$GITHUB_REPOSITORY" \
             --release-sha "$RELEASE_SHA" \
-            --pr "$PR_1" \
-            --pr "$PR_2" \
-            --pr "$PR_3" \
+            --pr "$PR_NUMBER" \
             --output "$LIVE_SCOPE"
 
       - name: Test the non-authenticated harness contracts
@@ -171,7 +152,7 @@ jobs:
             --home "$LIVE_HOME" \
             --providers "${{ inputs.providers }}"
 
-      - name: Run both authenticated release reviews
+      - name: Run authenticated release review providers
         id: live-review
         run: |
           node scripts/live-acceptance/run-live-review.mjs \
@@ -189,8 +170,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: privacyai-live-review-${{ inputs.release_sha }}
-          path: ${{ runner.temp }}/privacyai-live-evidence
-          if-no-files-found: warn
+          path: /tmp/privacyai-live-evidence
+          if-no-files-found: error
           retention-days: 14
 
       - name: Write public-safe job summary
