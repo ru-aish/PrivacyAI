@@ -190,7 +190,6 @@ async function runCodex(context) {
     "--ephemeral",
     "--ignore-user-config",
     "--ignore-rules",
-    "--ask-for-approval", "never",
     "--sandbox", "workspace-write",
     "--image", context.imagePath,
     "--output-last-message", finalPath,

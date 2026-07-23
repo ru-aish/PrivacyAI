@@ -73,6 +73,8 @@ Both agents receive `scripts/live-acceptance/assets/review-instructions.png`.
 - Codex receives it through its native `--image` argument.
 - Antigravity receives the same bytes from a fixed local MCP tool named `read_privacyai_review_instructions`.
 
+The image contains only public review instructions. The synthetic private email is supplied in the text launch prompt instead, so OCR drift cannot change the identity of the privacy probe. This keeps image transport/verification and text privacy-boundary verification independent while exercising both in the same authenticated run.
+
 The dynamic PR number and commit identities are not embedded in the image. The harness generates `LIVE_REVIEW_SCOPE.md` from GitHub and Git evidence for each run. It reviews the exact selected PR range (`PR base..PR merge commit`) while exercising the requested current release SHA.
 
 ## Release candidate isolation

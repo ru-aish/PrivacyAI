@@ -97,6 +97,15 @@ jobs:
           [[ "$CODEX_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
           npm install --global "@openai/codex@$CODEX_VERSION"
           codex --version
+          codex exec \
+            --ephemeral \
+            --ignore-user-config \
+            --ignore-rules \
+            --sandbox workspace-write \
+            --image "$GITHUB_WORKSPACE/scripts/live-acceptance/assets/review-instructions.png" \
+            --output-last-message "$RUNNER_TEMP/codex-interface-probe.txt" \
+            --color never \
+            --help >/dev/null
 
       - name: Install and verify pinned Antigravity CLI
         env:
