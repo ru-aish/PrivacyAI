@@ -77,6 +77,8 @@ The image contains only public review instructions. The synthetic private email 
 
 The dynamic PR number and commit identities are not embedded in the image. The harness generates `LIVE_REVIEW_SCOPE.md` from GitHub and Git evidence for each run. It reviews the exact selected PR range (`PR base..PR merge commit`) while exercising the requested current release SHA.
 
+Codex remains in its `workspace-write` filesystem sandbox. The workflow explicitly enables that sandbox's network path because GitHub-hosted runners reject Codex's separate loopback-network namespace setup with `RTM_NEWADDR`; this does not broaden filesystem write access beyond the existing writable roots or bypass PrivacyAI's request gateway.
+
 ## Release candidate isolation
 
 The workflow:

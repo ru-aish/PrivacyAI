@@ -177,6 +177,86 @@ test("AGY tool schemas sanitize only prose annotations and preserve future struc
   );
 });
 
+test("AGY historical function-call argument keys remain provider schema identifiers", async () => {
+  const body = sampleRequest();
+  const declaration = body.request.tools[0].functionDeclarations[0];
+  declaration.name = "run_command";
+  declaration.description = "Execute one command in a selected working directory.";
+  declaration.parameters = {
+    type: "object",
+    properties: {
+      Cwd: { type: "string" },
+      CommandLine: { type: "string" },
+      BypassSandbox: { type: "boolean" }
+    },
+    required: ["Cwd", "CommandLine"]
+  };
+  body.request.contents = [{
+    role: "model",
+    parts: [{
+      functionCall: {
+        id: "call-command",
+        name: "run_command",
+        args: {
+          Cwd: "/tmp/project",
+          CommandLine: `printf '%s' '${PRIVATE_EMAIL}'`,
+          BypassSandbox: true
+        }
+      }
+    }]
+  }];
+
+  const classifierInputs = [];
+  const keyMappings = {
+    "[PRIVATE_VALUE_1]": "Cwd",
+    "[PRIVATE_VALUE_2]": "CommandLine",
+    "[PRIVATE_VALUE_3]": "BypassSandbox",
+    "[EMAIL_1]": PRIVATE_EMAIL
+  };
+  const sanitizer = async text => {
+    classifierInputs.push(text);
+    let sanitizedPrompt = text;
+    const sessionMap = {};
+    for (const [placeholder, original] of Object.entries(keyMappings)) {
+      if (!sanitizedPrompt.includes(original)) continue;
+      sanitizedPrompt = sanitizedPrompt.replaceAll(original, placeholder);
+      sessionMap[placeholder] = original;
+    }
+    return { sanitizedPrompt, sessionMap };
+  };
+
+  const first = await sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer }));
+  const args = first.body.request.contents[0].parts[0].functionCall.args;
+  assert.deepEqual(Object.keys(args), ["Cwd", "CommandLine", "BypassSandbox"]);
+  assert.equal(args.Cwd, "/tmp/project");
+  assert.match(args.CommandLine, /\[EMAIL_1\]/);
+  assert.equal(args.BypassSandbox, true);
+  assert.equal(classifierInputs.some(text => text.includes("Cwd")), false);
+  assert.equal(classifierInputs.some(text => text.includes("CommandLine")), false);
+  assert.equal(classifierInputs.some(text => text.includes("BypassSandbox")), false);
+  assert.equal(Object.values(first.sessionMapAdditions).includes("Cwd"), false);
+  assert.equal(Object.values(first.sessionMapAdditions).includes("CommandLine"), false);
+  assert.equal(Object.values(first.sessionMapAdditions).includes("BypassSandbox"), false);
+  assert.equal(first.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
+  assert.deepEqual(
+    first.body.request.tools[0].functionDeclarations[0].parameters,
+    declaration.parameters
+  );
+
+  const second = await sanitizeAgyRequestBody(body, withTestIdentity({
+    sanitizer,
+    sessionMap: first.sessionMapAdditions
+  }));
+  assert.deepEqual(
+    second.body.request.tools[0].functionDeclarations[0].parameters,
+    declaration.parameters
+  );
+  assert.match(
+    second.body.request.contents[0].parts[0].functionCall.args.CommandLine,
+    /\[EMAIL_1\]/
+  );
+});
+
 test("AGY session-map migration replaces stale bracket tool placeholders", () => {
   const body = sampleRequest();
   const migrated = normalizeAgySessionMap(body, {

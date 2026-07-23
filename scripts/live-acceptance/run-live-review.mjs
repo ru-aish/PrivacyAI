@@ -191,6 +191,7 @@ async function runCodex(context) {
     "--ignore-user-config",
     "--ignore-rules",
     "--sandbox", "workspace-write",
+    "--config", "sandbox_workspace_write.network_access=true",
     "--image", context.imagePath,
     "--output-last-message", finalPath,
     "--color", "never"

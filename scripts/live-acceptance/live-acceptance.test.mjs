@@ -363,10 +363,12 @@ test("workflow pins agent versions and validates the candidate before repository
   assert.match(workflow, /path: \/tmp\/privacyai-live-evidence/);
   assert.match(workflow, /if-no-files-found: error/);
   assert.ok(workflow.includes("codex exec \\\n            --ephemeral"));
+  assert.ok(workflow.includes("--config sandbox_workspace_write.network_access=true"));
   assert.ok(workflow.includes('--output-last-message "$RUNNER_TEMP/codex-interface-probe.txt"'));
   const runnerSource = await readFile(new URL("./run-live-review.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(runnerSource, /--ask-for-approval/);
   assert.match(runnerSource, /"--sandbox", "workspace-write"/);
+  assert.match(runnerSource, /"--config", "sandbox_workspace_write\.network_access=true"/);
   const validation = workflow.indexOf("Validate candidate identity before executing repository code");
   const dependencyInstall = workflow.indexOf("Install deterministic workspace dependencies");
   assert.ok(validation >= 0 && dependencyInstall > validation);
@@ -496,6 +498,8 @@ if (args[0] === "agent") {
   if (args[1] === "codex") {
     if (args.includes("--dangerously-bypass-approvals-and-sandbox")) process.exit(20);
     if (!args.includes("--sandbox") || !args.includes("workspace-write")) process.exit(21);
+    const configIndex = args.indexOf("--config");
+    if (configIndex < 0 || args[configIndex + 1] !== "sandbox_workspace_write.network_access=true") process.exit(25);
   }
   if (args[1] === "agy") {
     if (args.includes("--dangerously-skip-permissions")) process.exit(22);
