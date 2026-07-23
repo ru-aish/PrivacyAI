@@ -102,6 +102,7 @@ jobs:
             --ignore-user-config \
             --ignore-rules \
             --sandbox workspace-write \
+            --config sandbox_workspace_write.network_access=true \
             --image "$GITHUB_WORKSPACE/scripts/live-acceptance/assets/review-instructions.png" \
             --output-last-message "$RUNNER_TEMP/codex-interface-probe.txt" \
             --color never \

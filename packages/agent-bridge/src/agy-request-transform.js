@@ -142,7 +142,8 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
         value: entry.value,
         slotKey: entry.slotKey,
         artifactType: entry.artifactType,
-        artifactKey: entry.artifactKey
+        artifactKey: entry.artifactKey,
+        sanitizeObjectKeys: entry.sanitizeObjectKeys
       })),
       {
         sanitizer: options.sanitizer,
@@ -369,7 +370,8 @@ function collectContentArtifacts(content, basePath, artifactKey, slots, textArti
         value: part.functionCall.args,
         slotKey: `${slotPrefix}/functionCall/args`,
         artifactKey,
-        artifactType: "tool_call"
+        artifactType: "tool_call",
+        sanitizeObjectKeys: false
       });
       return;
     }
