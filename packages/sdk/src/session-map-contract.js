@@ -39,7 +39,6 @@ export function rebaseSessionAdditions(sanitizedText, additions = {}, existing =
 
   const normalizedExisting = normalizeSessionMap(existing);
   const normalizedAdditions = normalizeSessionMap(additions);
-  assertCompatibleOriginals(normalizedExisting, normalizedAdditions);
 
   const existingEntries = Object.entries(normalizedExisting);
   const additionEntries = Object.entries(normalizedAdditions);
@@ -103,7 +102,7 @@ function isValidEntry([placeholder, original]) {
 
 function validateEntries(entries) {
   const placeholders = new Map();
-  const originals = new Map();
+  const originals = new Set();
 
   for (const [placeholder, original] of entries) {
     const placeholderKey = foldCase(placeholder);
@@ -114,18 +113,11 @@ function validateEntries(entries) {
       throw invalidSessionMapError();
     }
     rememberUnambiguous(placeholders, placeholderKey, placeholder);
-    rememberUnambiguous(originals, foldCase(original), original);
+    originals.add(foldCase(original));
   }
 
   for (const placeholderKey of placeholders.keys()) {
     if (originals.has(placeholderKey)) throw ambiguousSessionMapError();
-  }
-}
-
-function assertCompatibleOriginals(existing, additions) {
-  const originals = new Map();
-  for (const original of [...Object.values(existing), ...Object.values(additions)]) {
-    rememberUnambiguous(originals, foldCase(original), original);
   }
 }
 

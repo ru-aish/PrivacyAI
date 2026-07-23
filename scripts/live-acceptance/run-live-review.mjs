@@ -256,6 +256,7 @@ async function providerSetupFailure(name, error, outputDir, secretValues) {
     result: null,
     missingFields: [],
     structuredResponseValid: false,
+    reviewResponsePassed: false,
     failurePatterns: [],
     diagnosticCodes: extractDiagnosticCodes(message),
     failureCode: safeErrorCode(error, "PROVIDER_SETUP_FAILED"),
@@ -288,6 +289,7 @@ async function runProvider(name, command, args, context) {
       result: null,
       missingFields: [],
       structuredResponseValid: false,
+      reviewResponsePassed: false,
       failurePatterns: [],
       diagnosticCodes: extractDiagnosticCodes(safeMessage),
       failureCode: safeErrorCode(error, "PROVIDER_LAUNCH_FAILED"),
@@ -315,7 +317,7 @@ async function runProvider(name, command, args, context) {
   const matchedFailures = FAILURE_PATTERNS
     .filter(item => item.pattern.test(combined))
     .map(item => item.code);
-  const diagnosticCodes = extractDiagnosticCodes(combined);
+  const diagnosticCodes = extractRuntimeDiagnosticCodes(result.stderr);
   const structured = parseReviewResponse(safeFinal, context);
   const syntheticValueExposed =
     safeOutput.includes(SYNTHETIC_PRIVATE_VALUE) ||
@@ -341,7 +343,8 @@ async function runProvider(name, command, args, context) {
     completionMarker: safeFinal.includes(COMPLETION_MARKER),
     result: structured.fields.RESULT || null,
     missingFields: structured.missingFields,
-    structuredResponseValid: structured.ok,
+    structuredResponseValid: structured.contractValid,
+    reviewResponsePassed: structured.ok,
     failurePatterns: matchedFailures,
     diagnosticCodes,
     failureCode: failure?.code || null,
@@ -360,23 +363,35 @@ function classifyProviderFailure(context) {
   if (context.syntheticValueExposed) {
     return { code: "SYNTHETIC_PRIVATE_VALUE_EXPOSED", message: "The synthetic privacy test value appeared in captured provider output." };
   }
+  if (context.diagnosticCodes.length > 0) {
+    return {
+      code: context.diagnosticCodes[0],
+      message: "PrivacyAI stopped or degraded the provider flow with a diagnostic error."
+    };
+  }
   if (context.matchedFailures.length > 0) {
     return {
-      code: context.diagnosticCodes[0] || context.matchedFailures[0],
+      code: context.matchedFailures[0],
       message: "Provider output matched a fail-closed PrivacyAI or provider error class."
     };
   }
   if (context.result.code !== 0) {
     return {
-      code: context.diagnosticCodes[0] || "PROVIDER_EXIT_NONZERO",
+      code: "PROVIDER_EXIT_NONZERO",
       message: "Provider process exited with code " + context.result.code + "."
     };
   }
   if (!context.completionMarker) {
     return { code: "COMPLETION_MARKER_MISSING", message: "Provider did not emit the required completion marker." };
   }
-  if (!context.structured.ok) {
+  if (!context.structured.contractValid) {
     return { code: "STRUCTURED_RESPONSE_INVALID", message: "Provider response did not satisfy the required structured review contract." };
+  }
+  if (/^FAIL\b/i.test(context.structured.fields.RESULT)) {
+    return { code: "PROVIDER_REVIEW_FAILED", message: "Provider completed the review and reported a failed result." };
+  }
+  if (!context.structured.ok) {
+    return { code: "STRUCTURED_RESPONSE_INVALID", message: "Provider response contradicted the selected release scope or pass requirements." };
   }
   return null;
 }
@@ -401,7 +416,20 @@ function gateFailureMessage(evidence) {
 }
 
 function extractDiagnosticCodes(value) {
-  return [...new Set(String(value || "").match(/\bPRIVACYAI_[A-Z0-9_]+\b/g) || [])].slice(0, 50);
+  return [...new Set(String(value || "").match(/\bPRIVACYAI_[A-Z0-9_]+\b/g) || [])]
+    .filter(code => code !== COMPLETION_MARKER)
+    .slice(0, 50);
+}
+
+function extractRuntimeDiagnosticCodes(value) {
+  const codes = new Set();
+  for (const line of String(value || "").split(/\r?\n/)) {
+    const direct = line.match(/^\s*(?:Error:\s*)?(PRIVACYAI_[A-Z0-9_]+)(?=[:\s.)-]|$)/)?.[1];
+    const wrapper = line.match(/^\s*\[PrivacyAI\].*\b(PRIVACYAI_[A-Z0-9_]+)\b/)?.[1];
+    const code = direct || wrapper;
+    if (code && code !== COMPLETION_MARKER) codes.add(code);
+  }
+  return [...codes].slice(0, 50);
 }
 
 function safeErrorCode(error, fallback) {
@@ -432,8 +460,12 @@ export function parseReviewResponse(text, context) {
     context.selectedPrNumbers.length === 1 &&
     reportedPrNumbers.length === 1 &&
     reportedPrNumbers[0] === context.selectedPrNumbers[0];
-  const ok =
+  const contractValid =
     missingFields.length === 0 &&
+    /^(?:PASS|FAIL)\b/i.test(fields.RESULT) &&
+    /^(?:YES|NO)\b/i.test(fields["RELEASE ELIGIBLE"]);
+  const ok =
+    contractValid &&
     /^PASS\b/i.test(fields.RESULT) &&
     reportedHead === context.expectedHead &&
     prValid &&
@@ -442,7 +474,7 @@ export function parseReviewResponse(text, context) {
     /^PASS\b/i.test(fields.PRIVACY) &&
     /^PASS\b/i.test(fields.CLEANUP) &&
     /^YES\b/i.test(fields["RELEASE ELIGIBLE"]);
-  return { ok, fields, missingFields };
+  return { ok, contractValid, fields, missingFields, reportedHead, reportedPrNumbers };
 }
 
 function responseField(text, label) {

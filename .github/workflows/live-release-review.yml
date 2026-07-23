@@ -83,12 +83,36 @@ jobs:
       - name: Install deterministic workspace dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install image and process prerequisites
+      - name: Install image and sandbox prerequisites
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends tesseract-ocr
+          sudo apt-get install --yes --no-install-recommends \
+            apparmor-profiles \
+            apparmor-utils \
+            bubblewrap \
+            tesseract-ocr
+          if [[ -f /usr/share/apparmor/extra-profiles/bwrap-userns-restrict ]] && \
+             [[ -r /sys/module/apparmor/parameters/enabled ]] && \
+             grep -qi '^Y' /sys/module/apparmor/parameters/enabled; then
+            sudo install -m 0644 \
+              /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+              /etc/apparmor.d/bwrap-userns-restrict
+            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          fi
+          command -v bwrap
+          bwrap --version
+          bwrap \
+            --ro-bind / / \
+            --dev /dev \
+            --proc /proc \
+            --unshare-user \
+            --uid 0 \
+            --gid 0 \
+            --unshare-pid \
+            --die-with-parent \
+            /bin/sh -c 'test -r /etc/os-release && printf "sandbox-prerequisite-ok\\n"'
 
       - name: Install pinned Codex CLI
         shell: bash

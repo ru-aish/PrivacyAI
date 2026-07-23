@@ -55,18 +55,39 @@ export function compileKnownReplacer(sessionMap = {}, replacer) {
 
   const candidates = replacementCandidates(normalizeSessionMap(sessionMap));
   if (candidates.length === 0) return identityText;
-  const candidatesByValue = new Map(
-    candidates.map(candidate => [foldCase(candidate.value), candidate])
-  );
-  const pattern = new RegExp(
-    candidates.map(candidate => escapeRegExp(candidate.value)).join("|"),
-    "gi"
-  );
+
+  const candidatesByExactValue = new Map();
+  const candidatesByFoldedValue = new Map();
+  for (const candidate of candidates) {
+    candidatesByExactValue.set(candidate.value, candidate);
+    const folded = foldCase(candidate.value);
+    let matching = candidatesByFoldedValue.get(folded);
+    if (!matching) {
+      matching = [];
+      candidatesByFoldedValue.set(folded, matching);
+    }
+    matching.push(candidate);
+  }
+
+  const patternValues = [];
+  const seenFoldedValues = new Set();
+  for (const candidate of candidates) {
+    const folded = foldCase(candidate.value);
+    if (seenFoldedValues.has(folded)) continue;
+    seenFoldedValues.add(folded);
+    patternValues.push(candidate.value);
+  }
+  const pattern = new RegExp(patternValues.map(escapeRegExp).join("|"), "gi");
 
   // Match only the original input. Replacement output is never rescanned, so
   // protected originals cannot rewrite text inside existing or inserted tokens.
   return text => text.replace(pattern, match => {
-    const candidate = candidatesByValue.get(foldCase(match));
+    let candidate = candidatesByExactValue.get(match);
+    if (!candidate) {
+      const matching = candidatesByFoldedValue.get(foldCase(match)) || [];
+      if (matching.length > 1) throw ambiguousKnownValueError();
+      candidate = matching[0];
+    }
     if (!candidate) {
       throw new Error("PrivacyAI could not resolve a known-value replacement.");
     }
@@ -112,4 +133,12 @@ function compareText(left, right) {
   if (left < right) return -1;
   if (left > right) return 1;
   return 0;
+}
+
+function ambiguousKnownValueError() {
+  const error = new Error(
+    "PrivacyAI blocked a case-insensitive match between distinct protected values."
+  );
+  error.code = "PRIVACYAI_AMBIGUOUS_SESSION_MAP";
+  return error;
 }

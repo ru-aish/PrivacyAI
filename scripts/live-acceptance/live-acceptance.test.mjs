@@ -110,6 +110,8 @@ test("review image stays public while the launch prompt carries the synthetic pr
   const launchPrompt = await readFile(new URL("./prompts/launch.txt", import.meta.url), "utf8");
   assert.doesNotMatch(instructionText, /qa-review-7f8a@example\.test/);
   assert.match(launchPrompt, /qa-review-7f8a@example\.test/);
+  assert.match(launchPrompt, /Do not create subagents, background tasks, asynchronous commands/);
+  assert.match(launchPrompt, /no more than 12 tool calls/);
 
   const imageBytes = await readFile(ASSET);
   const engine = createImageSanitizer();
@@ -309,6 +311,56 @@ test("failed provider evidence records provider cause and database diagnostics",
   assert.match(summary, /request_blocked/);
 });
 
+test("provider diagnostics and explicit FAIL results outrank response-shape symptoms", async t => {
+  const fixture = await gitFixture(t);
+  const root = fixture.root;
+  const home = join(root, "home");
+  await prepareCiHome({
+    home,
+    model: "fixture-model",
+    apiKey: "mistral-fixture-key",
+    codexAuthJson: JSON.stringify({ token: "fixture" }),
+    agyAuthJson: JSON.stringify({
+      "antigravity-oauth-token": Buffer.from("fixture").toString("base64")
+    })
+  });
+  const scopeDir = join(root, "scope");
+  await writeJson(join(scopeDir, "scope.json"), {
+    releaseSha: fixture.commits.at(-1),
+    selectedPullRequests: [{ number: 1 }]
+  });
+  await writeFile(join(scopeDir, "LIVE_REVIEW_SCOPE.md"), "# Fixture scope\n");
+  const mock = join(root, "privacyai-contract-failure");
+  await writeFile(mock, mockPrivacyAiContractFailureSource());
+  await chmod(mock, 0o755);
+  const output = join(root, "evidence");
+
+  await assert.rejects(
+    runLiveReview({
+      workspace: fixture.repo,
+      scopePath: join(scopeDir, "LIVE_REVIEW_SCOPE.md"),
+      scopeJsonPath: join(scopeDir, "scope.json"),
+      imagePath: ASSET,
+      home,
+      privacyai: mock,
+      outputDir: output,
+      providers: "both"
+    }),
+    /provider:codex.*PROVIDER_REVIEW_FAILED/i
+  );
+
+  const evidence = JSON.parse(await readFile(join(output, "harness-result.json"), "utf8"));
+  assert.equal(evidence.providers.codex.failureCode, "PROVIDER_REVIEW_FAILED");
+  assert.equal(evidence.providers.codex.structuredResponseValid, true);
+  assert.equal(evidence.providers.codex.reviewResponsePassed, false);
+  assert.deepEqual(evidence.providers.codex.diagnosticCodes, []);
+  assert.equal(evidence.providers.agy.failureCode, "PRIVACYAI_AGY_SESSION_MAP_COLLISION");
+  assert.equal(evidence.providers.agy.completionMarker, false);
+  assert.deepEqual(evidence.providers.agy.diagnosticCodes, [
+    "PRIVACYAI_AGY_SESSION_MAP_COLLISION"
+  ]);
+});
+
 test("structured review validation rejects findings and inexact PR references", () => {
   const context = {
     expectedHead: "a".repeat(40),
@@ -328,6 +380,7 @@ test("structured review validation rejects findings and inexact PR references", 
   ].join("\n");
 
   assert.equal(parseReviewResponse(valid, context).ok, true);
+  assert.equal(parseReviewResponse(valid, context).contractValid, true);
   assert.equal(
     parseReviewResponse(
       valid.replace("LIVE FLOW:", "LIVE_FLOW:").replace("RELEASE ELIGIBLE:", "RELEASE_ELIGIBLE:"),
@@ -335,6 +388,20 @@ test("structured review validation rejects findings and inexact PR references", 
     ).ok,
     true
   );
+  const explicitFailure = [
+    "RESULT: FAIL",
+    "HEAD: unavailable",
+    "PR: unavailable",
+    "FINDINGS: repository shell access failed",
+    "CHANGES: none",
+    "TESTS: not run",
+    "LIVE FLOW: not run",
+    "PRIVACY: not verified",
+    "CLEANUP: not applicable",
+    "RELEASE ELIGIBLE: NO"
+  ].join("\n");
+  assert.equal(parseReviewResponse(explicitFailure, context).contractValid, true);
+  assert.equal(parseReviewResponse(explicitFailure, context).ok, false);
   assert.equal(
     parseReviewResponse(valid.replace("PR: #1", "PR: #10"), context).ok,
     false
@@ -351,6 +418,12 @@ test("workflow pins agent versions and validates the candidate before repository
   assert.doesNotMatch(workflow, /@openai\/codex@\$\{\{\s*inputs\./);
   assert.match(workflow, /CODEX_VERSION: "0\.144\.5"/);
   assert.match(workflow, /AGY_VERSION: "1\.1\.5"/);
+  assert.match(workflow, /sudo apt-get install --yes --no-install-recommends[\s\\]+[\s\S]*bubblewrap/);
+  assert.match(workflow, /apparmor_parser -r \/etc\/apparmor\.d\/bwrap-userns-restrict/);
+  assert.match(workflow, /bwrap --version/);
+  assert.match(workflow, /--unshare-user/);
+  assert.match(workflow, /sandbox-prerequisite-ok/);
+  assert.doesNotMatch(workflow, /apparmor_restrict_unprivileged_userns=0/);
   assert.match(workflow, /test -f "\$RUNNER_TEMP\/agy-extract\/antigravity"/);
   assert.match(workflow, /test -x "\$RUNNER_TEMP\/agy-extract\/antigravity"/);
   assert.match(workflow, /install -m 0755 "\$RUNNER_TEMP\/agy-extract\/antigravity" "\$HOME\/\.local\/bin\/agy"/);
@@ -425,6 +498,56 @@ async function waitUntil(predicate, timeoutMs = 5000) {
     if (Date.now() >= deadline) throw new Error("Timed out waiting for fixture.");
     await new Promise(resolve => setTimeout(resolve, 10));
   }
+}
+
+function mockPrivacyAiContractFailureSource() {
+  return `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args[0] === "state") {
+  console.log(JSON.stringify({ components: [
+    { name: "configuration", status: "ready" },
+    { name: "identity", status: "ready" },
+    { name: "vault", status: "ready" },
+    { name: "context", status: "ready" },
+    { name: "lineage", status: "ready" }
+  ] }));
+  process.exit(0);
+}
+if (args[0] === "doctor") {
+  console.log(JSON.stringify({ configuration: { configured: true }, localModel: { ok: true } }));
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "codex") {
+  const result = [
+    "RESULT: FAIL",
+    "HEAD: unavailable",
+    "PR: unavailable",
+    "FINDINGS: repository shell access failed",
+    "CHANGES: none",
+    "TESTS: not run",
+    "LIVE FLOW: not run",
+    "PRIVACY: not verified",
+    "CLEANUP: not applicable",
+    "RELEASE ELIGIBLE: NO",
+    "PRIVACYAI_LIVE_REVIEW_COMPLETE",
+    ""
+  ].join("\\n");
+  const outputIndex = args.indexOf("--output-last-message");
+  if (outputIndex >= 0) writeFileSync(args[outputIndex + 1], result);
+  process.stdout.write(result);
+  process.exit(0);
+}
+if (args[0] === "agent" && args[1] === "agy") {
+  process.stdout.write("I launched two bounded review commands.\\n");
+  process.stderr.write(
+    "[PrivacyAI] AGY transport stopped a request " +
+    "(intercepted-request: PRIVACYAI_AGY_SESSION_MAP_COLLISION).\\n"
+  );
+  process.exit(0);
+}
+process.exit(2);
+`;
 }
 
 function mockPrivacyAiFailureSource() {
