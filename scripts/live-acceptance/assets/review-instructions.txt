@@ -4,6 +4,6 @@ PrivacyAI Live Release Review
 2. Independently review the selected PR diff and then exercise that change in the installed release candidate. Do not trust existing green tests.
 3. Inspect correctness, privacy/security, migrations, portability, packaging, PTY/process cleanup, concurrency, recovery, and diagnostics relevant to the selected PR.
 4. Test packed release artifacts in a fresh HOME and temporary Git repository. Run doctor/state preflight, launch the protected agent, send a harmless task, and require a real operation.
-5. Use qa-review-7f8a@example.test and verify it never appears in provider-bound evidence or public logs. Fail on 422/internal errors, bypass, timeouts, or leaked processes/files.
+5. Use the synthetic private value supplied in the launch prompt. Verify it never appears in provider-bound evidence or public logs. Fail on 422/internal errors, bypass, timeouts, or leaked processes/files.
 6. Do not modify tracked source or commit. Report minimal reproductions and the smallest safe correction for every finding.
 7. Return every required field: RESULT, HEAD, PR, FINDINGS, CHANGES, TESTS, LIVE FLOW, PRIVACY, CLEANUP, RELEASE ELIGIBLE. End with PRIVACYAI_LIVE_REVIEW_COMPLETE.

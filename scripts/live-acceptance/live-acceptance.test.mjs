@@ -11,6 +11,8 @@ import { generateReviewScope } from "./generate-scope.mjs";
 import { prepareCiHome } from "./prepare-ci-home.mjs";
 import { parseReviewResponse, runLiveReview } from "./run-live-review.mjs";
 import { renderSummary } from "./write-summary.mjs";
+import { localSanitize } from "../../packages/sdk/src/index.js";
+import { createImageSanitizer } from "../../packages/sdk/src/image/index.js";
 
 const ASSET = new URL("./assets/review-instructions.png", import.meta.url).pathname;
 
@@ -101,6 +103,32 @@ test("CI home contains only the explicit remote override and approved auth files
     await readFile(join(paths.geminiDir, "antigravity-cli", "antigravity-oauth-token"), "utf8"),
     "agy-fixture-token"
   );
+});
+
+test("review image stays public while the launch prompt carries the synthetic privacy probe", async () => {
+  const instructionText = await readFile(new URL("./assets/review-instructions.txt", import.meta.url), "utf8");
+  const launchPrompt = await readFile(new URL("./prompts/launch.txt", import.meta.url), "utf8");
+  assert.doesNotMatch(instructionText, /qa-review-7f8a@example\.test/);
+  assert.match(launchPrompt, /qa-review-7f8a@example\.test/);
+
+  const imageBytes = await readFile(ASSET);
+  const engine = createImageSanitizer();
+  try {
+    const result = await engine.sanitize(
+      "data:image/png;base64," + imageBytes.toString("base64"),
+      {
+        sanitizer: async text => {
+          const sanitized = await localSanitize(text);
+          return { sanitizedPrompt: sanitized.sanitizedText, sessionMap: sanitized.sessionMap };
+        },
+        sessionMap: {}
+      }
+    );
+    assert.equal(result.changed, false);
+    assert.equal(result.verificationAttempts, 0);
+  } finally {
+    await engine.close();
+  }
 });
 
 test("AGY image MCP exposes only the fixed instruction-image tool", async t => {
@@ -334,6 +362,11 @@ test("workflow pins agent versions and validates the candidate before repository
   assert.doesNotMatch(workflow, /pr_1:|pr_2:|pr_3:/);
   assert.match(workflow, /path: \/tmp\/privacyai-live-evidence/);
   assert.match(workflow, /if-no-files-found: error/);
+  assert.ok(workflow.includes("codex exec \\\n            --ephemeral"));
+  assert.ok(workflow.includes('--output-last-message "$RUNNER_TEMP/codex-interface-probe.txt"'));
+  const runnerSource = await readFile(new URL("./run-live-review.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(runnerSource, /--ask-for-approval/);
+  assert.match(runnerSource, /"--sandbox", "workspace-write"/);
   const validation = workflow.indexOf("Validate candidate identity before executing repository code");
   const dependencyInstall = workflow.indexOf("Install deterministic workspace dependencies");
   assert.ok(validation >= 0 && dependencyInstall > validation);
