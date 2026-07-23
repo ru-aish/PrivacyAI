@@ -302,6 +302,59 @@ test("AGY image additions reject case-insensitive alias collisions", async () =>
   );
 });
 
+test("AGY merges image additions whose protected originals differ only by case", async () => {
+  const result = await sanitizeAgyRequestBody(
+    minimalImageRequest("case-original-session", "case-original-request"),
+    withTestIdentity({
+      sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+      sessionMap: { "[ORGANIZATION_1]": "PrivacyAI" },
+      imageSanitizer: {
+        async sanitize(inlineData) {
+          return {
+            inlineData,
+            changed: false,
+            sessionMapAdditions: { "[ORGANIZATION_2]": "PRIVACYAI" }
+          };
+        }
+      }
+    })
+  );
+
+  assert.deepEqual(result.sessionMapAdditions, {
+    "[ORGANIZATION_2]": "PRIVACYAI"
+  });
+});
+
+test("AGY preserves exact protected values that differ only by case", async () => {
+  const first = "CaseSensitiveOwner";
+  const second = "casesensitiveowner";
+  const body = minimalRequest(`${first} then ${second}`, "case-value-session", "case-value-request");
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({
+    sanitizer: async text => {
+      let sanitizedPrompt = text;
+      const sessionMap = {};
+      for (const [placeholder, original] of [
+        ["[PERSON_1]", first],
+        ["[PERSON_2]", second]
+      ]) {
+        if (!sanitizedPrompt.includes(original)) continue;
+        sanitizedPrompt = sanitizedPrompt.replaceAll(original, placeholder);
+        sessionMap[placeholder] = original;
+      }
+      return { sanitizedPrompt, sessionMap };
+    }
+  }));
+
+  assert.equal(
+    result.body.request.contents[0].parts[0].text,
+    "[PERSON_1] then [PERSON_2]"
+  );
+  assert.deepEqual(result.sessionMapAdditions, {
+    "[PERSON_1]": first,
+    "[PERSON_2]": second
+  });
+});
+
 test("AGY request transformation leaves protocol identities outside the sanitizer", async () => {
   const body = sampleRequest();
   body.request.contents[1].parts[0].thoughtSignature = "opaque-signature";

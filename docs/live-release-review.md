@@ -77,7 +77,9 @@ The image contains only public review instructions. The synthetic private email 
 
 The dynamic PR number and commit identities are not embedded in the image. The harness generates `LIVE_REVIEW_SCOPE.md` from GitHub and Git evidence for each run. It reviews the exact selected PR range (`PR base..PR merge commit`) while exercising the requested current release SHA.
 
-Codex remains in its `workspace-write` filesystem sandbox. The workflow explicitly enables that sandbox's network path because GitHub-hosted runners reject Codex's separate loopback-network namespace setup with `RTM_NEWADDR`; this does not broaden filesystem write access beyond the existing writable roots or bypass PrivacyAI's request gateway.
+Codex remains in its `workspace-write` filesystem sandbox. The workflow installs the distribution `bubblewrap` package, loads Ubuntu 24.04's bounded `bwrap-userns-restrict` AppArmor profile when required, and executes a real user-namespace preflight before provider credentials are prepared. It also enables the sandbox's network path because GitHub-hosted runners reject Codex's separate loopback-network namespace setup with `RTM_NEWADDR`. These steps do not broaden filesystem write access beyond the existing writable roots or bypass PrivacyAI's request gateway.
+
+The launch prompt keeps both reviews sequential and bounded: no subagents, background tasks, scheduled work, full-monorepo test command, or more than 12 tool calls. The provider reviews only the selected PR's changed paths and their focused tests; deterministic repository-wide suites remain ordinary CI responsibilities.
 
 ## Release candidate isolation
 
@@ -107,9 +109,9 @@ The uploaded sanitized artifact contains:
 
 The database snapshot deliberately excludes request/response payloads, `metadata_json`, session maps, hashes, vault values, credentials, and private originals.
 
-## Expected current behavior
+## Failure classification
 
-The harness intentionally does not weaken or bypass PrivacyAI failures. If the current Codex request produces a privacy-verification `422`, the live workflow must fail and retain only sanitized evidence. Fixing that product issue is a separate change after the CI gate is established.
+The harness does not weaken or bypass provider or PrivacyAI failures. A PrivacyAI runtime diagnostic such as `PRIVACYAI_AGY_SESSION_MAP_COLLISION` takes precedence over secondary symptoms such as a missing completion marker. A provider that returns every required field with `RESULT: FAIL` is recorded as `PROVIDER_REVIEW_FAILED`; malformed, contradictory, or incomplete responses remain `STRUCTURED_RESPONSE_INVALID`. The completion marker is never treated as a diagnostic code.
 
 ## Local contract tests
 

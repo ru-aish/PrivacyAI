@@ -376,20 +376,45 @@ test("normalizeSessionMap removes malformed and identity mappings", () => {
   );
 });
 
-test("normalizeSessionMap rejects ambiguous case-insensitive aliases", () => {
+test("normalizeSessionMap rejects folded placeholder collisions", () => {
   for (const ambiguous of [
     { "[EMAIL_1]": "first", "[email_1]": "second" },
-    { "[EMAIL_1]": "Alice", "[PERSON_1]": "alice" },
     { "[EMAIL_1]": "first", "[TOKEN_1]": "[email_1]" }
   ]) {
     assert.throws(
       () => normalizeSessionMap(ambiguous),
       error =>
         error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP" &&
-        !error.message.includes("first") &&
-        !error.message.includes("Alice")
+        !error.message.includes("first")
     );
   }
+});
+
+test("normalizeSessionMap preserves exact protected values that differ only by case", () => {
+  assert.deepEqual(
+    normalizeSessionMap({
+      "[PERSON_1]": "Alice",
+      "[PERSON_2]": "alice"
+    }),
+    {
+      "[PERSON_1]": "Alice",
+      "[PERSON_2]": "alice"
+    }
+  );
+});
+
+test("known sanitization resolves exact case variants and rejects an ambiguous folded match", () => {
+  const caseVariants = {
+    "[PERSON_1]": "Alice",
+    "[PERSON_2]": "alice"
+  };
+
+  assert.equal(sanitizeKnownText("Alice met alice", caseVariants), "[PERSON_1] met [PERSON_2]");
+  assert.throws(
+    () => sanitizeKnownText("ALICE", caseVariants),
+    error => error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP" &&
+      !error.message.includes("Alice")
+  );
 });
 
 test("normalizeSessionMap rejects prototype-control placeholders", () => {
@@ -691,7 +716,7 @@ test("alias preference preserves case-insensitive placeholder/original collision
   );
 });
 
-test("rebaseSessionAdditions resolves folded placeholder collisions and rejects folded originals", () => {
+test("rebaseSessionAdditions resolves folded placeholder collisions and preserves case-distinct originals", () => {
   assert.deepEqual(
     rebaseSessionAdditions(
       "[email_1]",
@@ -704,13 +729,16 @@ test("rebaseSessionAdditions resolves folded placeholder collisions and rejects 
     }
   );
 
-  assert.throws(
-    () => rebaseSessionAdditions(
+  assert.deepEqual(
+    rebaseSessionAdditions(
       "[PERSON_2]",
       { "[PERSON_2]": "Alice" },
       { "[PERSON_1]": "alice" }
     ),
-    error => error?.code === "PRIVACYAI_AMBIGUOUS_SESSION_MAP"
+    {
+      sanitizedText: "[PERSON_2]",
+      sessionMap: { "[PERSON_2]": "Alice" }
+    }
   );
 });
 
