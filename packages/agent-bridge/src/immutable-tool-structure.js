@@ -62,7 +62,7 @@ function walk(value, sessionMap, options, depth) {
   if (!isPlainObject(value)) throw invalidValue(options);
 
   for (const [key, child] of Object.entries(value)) {
-    assertUnprotectedString(key, sessionMap, options);
+    assertUnprotectedString(key, sessionMap, { ...options, isStructuralKey: true });
     walk(child, sessionMap, options, depth + 1);
   }
 }
