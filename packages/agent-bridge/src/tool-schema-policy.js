@@ -227,7 +227,8 @@ function assertSchema(value, policy) {
 function assertImmutable(value, sessionMap, policy) {
   assertImmutableToolString(value, sessionMap, {
     protectedValueError: policy.protectedValueError,
-    invalidValueError: policy.invalidSchemaError
+    invalidValueError: policy.invalidSchemaError,
+    isStructuralKey: true
   });
 }
 

@@ -67,15 +67,52 @@ function walk(value, sessionMap, options, depth) {
   }
 }
 
+const SYSTEM_SCHEMA_IDENTIFIERS = new Set([
+  "$schema", "$id", "$defs", "definitions", "properties", "patternProperties",
+  "additionalProperties", "type", "items", "required", "description", "title",
+  "$comment", "allOf", "anyOf", "oneOf", "enum", "format", "pattern",
+  "string", "object", "array", "boolean", "integer", "number", "null",
+  "additionalItems", "prefixItems", "contains", "if", "then", "else", "not",
+  "dependentRequired", "dependentSchemas",
+  "exec", "exec_command", "run_command", "view_file", "replace_file_content",
+  "multi_replace_file_content", "write_to_file", "list_dir", "grep_search",
+  "search_web", "read_url_content", "schedule", "send_message", "invoke_subagent",
+  "define_subagent", "manage_task", "manage_subagents", "list_permissions",
+  "ask_permission", "ask_question", "generate_image", "call_mcp_tool",
+  "list_resources", "read_resource",
+  "cmd", "Cwd", "CommandLine", "WaitMsBeforeAsync", "RunPersistent",
+  "RequestedTerminalID", "TargetFile", "CodeContent", "Description",
+  "Instruction", "StartLine", "EndLine", "AbsolutePath", "Query", "SearchPath",
+  "DirectoryPath", "Url", "Prompt", "DurationSeconds", "TimerCondition",
+  "CronExpression", "MaxIterations", "Recipient", "Message", "ServerName",
+  "ToolName", "Arguments", "Uri", "TaskId", "Action", "Input", "Subagents",
+  "Role", "TypeName", "Model", "Workspace", "ImageName", "ImagePaths",
+  "AspectRatio", "Overwrite", "AllowMultiple", "TargetContent",
+  "ReplacementContent", "ReplacementChunks", "ArtifactMetadata", "Summary",
+  "UserFacing", "RequestFeedback", "IsSkillFile", "ContentOffset",
+  "CaseInsensitive", "Includes", "IsRegex", "MatchPerLine", "toolAction",
+  "toolSummary", "yield_time_ms", "max_output_tokens", "sandbox_permissions",
+  "justification", "prefix_rule", "workdir"
+]);
+
 function assertUnprotectedString(value, sessionMap, options) {
   const normalized = value.toLocaleLowerCase("en-US");
+  if (SYSTEM_SCHEMA_IDENTIFIERS.has(value) || SYSTEM_SCHEMA_IDENTIFIERS.has(normalized)) {
+    return;
+  }
+  const isStructuralKey = options.isStructuralKey === true;
   for (const original of Object.values(sessionMap || {})) {
-    if (
-      typeof original === "string" &&
-      original.length > 0 &&
-      normalized.includes(original.toLocaleLowerCase("en-US"))
-    ) {
-      throw protectedValue(options);
+    if (typeof original === "string" && original.length > 0) {
+      const normalizedOriginal = original.toLocaleLowerCase("en-US");
+      if (isStructuralKey) {
+        if (normalized === normalizedOriginal) {
+          throw protectedValue(options);
+        }
+      } else {
+        if (normalized.includes(normalizedOriginal)) {
+          throw protectedValue(options);
+        }
+      }
     }
   }
   if (

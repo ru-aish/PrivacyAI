@@ -175,6 +175,32 @@ test("AGY tool schemas sanitize only prose annotations and preserve future struc
     error => error?.code === "PRIVACYAI_AGY_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE" &&
       !error.message.includes(PRIVATE_KEY)
   );
+
+  const systemToolReq = sampleRequest();
+  systemToolReq.request.tools[0].functionDeclarations[0] = {
+    name: "run_command",
+    description: "PROPOSE a command to run on behalf of the user.",
+    parameters: {
+      type: "object",
+      properties: {
+        CommandLine: { type: "string", description: "Exact command" },
+        Cwd: { type: "string", description: "Working directory" },
+        WaitMsBeforeAsync: { type: "integer", description: "Wait time" }
+      },
+      required: ["CommandLine", "Cwd"]
+    }
+  };
+  const sanitizedSystemTool = await sanitizeAgyRequestBody(
+    systemToolReq,
+    withTestIdentity({
+      sanitizer: deterministicSanitizer,
+      sessionMap: {
+        "[EMAIL_1]": "rudra.patel154958@gmail.com",
+        "[PATH_1]": "/home/coder/Code/privacyai-workspace/PrivacyAI-wave3-demo-243cc"
+      }
+    })
+  );
+  assert.equal(sanitizedSystemTool.body.request.tools[0].functionDeclarations[0].name, "run_command");
 });
 
 test("AGY session-map migration replaces stale bracket tool placeholders", () => {
