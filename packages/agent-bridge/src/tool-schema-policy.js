@@ -175,7 +175,7 @@ function walkImmutable(value, sessionMap, trace, policy, depth) {
   assertDepth(depth, policy);
   trace.immutableNodeCount += 1;
   if (typeof value === "string") {
-    assertImmutable(value, sessionMap, policy);
+    assertImmutable(value, sessionMap, policy, { isStructuralKey: true });
     return;
   }
   if (value == null || typeof value === "boolean") return;
