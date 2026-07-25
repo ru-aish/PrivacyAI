@@ -177,6 +177,90 @@ test("AGY tool schemas sanitize only prose annotations and preserve future struc
   );
 });
 
+test("AGY ignores generic mapping collisions in immutable protocol strings", async () => {
+  const body = sampleRequest();
+  const declaration = body.request.tools[0].functionDeclarations[0];
+  declaration.parameters = {
+    type: "object",
+    properties: {
+      Subagents: { type: "array", items: { type: "string" } },
+      ArtifactMetadata: { type: "object" },
+      Action: { type: "string", enum: ["run", "stop"] }
+    },
+    required: ["Subagents", "Action"]
+  };
+  const result = await sanitizeAgyRequestBody(body, withTestIdentity({
+    sanitizer: deterministicSanitizer,
+    sessionMap: {
+      "[PRIVATE_VALUE_10]": "run",
+      "[PRIVATE_VALUE_11]": "Subagents",
+      "[PRIVATE_VALUE_12]": "agents",
+      "[PRIVATE_VALUE_13]": "unrelated-private-value"
+    }
+  }));
+
+  assert.deepEqual(
+    result.body.request.tools[0].functionDeclarations[0].parameters,
+    declaration.parameters
+  );
+
+  await assert.rejects(
+    sanitizeAgyRequestBody(body, withTestIdentity({
+      sanitizer: deterministicSanitizer,
+      sessionMap: { privacyai_tool_deadbeef1234: "Subagents" }
+    })),
+    error => error?.code === "PRIVACYAI_AGY_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE"
+  );
+
+  const structuredSecret = sampleRequest();
+  structuredSecret.request.tools[0].functionDeclarations[0].parameters = {
+    type: "object",
+    properties: { Action: { type: "string", enum: ["run"] } }
+  };
+  await assert.rejects(
+    sanitizeAgyRequestBody(structuredSecret, withTestIdentity({
+      sanitizer: deterministicSanitizer,
+      sessionMap: { "[SECRET_1]": "run" }
+    })),
+    error => error?.code === "PRIVACYAI_AGY_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE"
+  );
+});
+
+test("AGY classifier false positives cannot poison later immutable schemas", async () => {
+  const body = sampleRequest();
+  const declaration = body.request.tools[0].functionDeclarations[0];
+  declaration.description = "Choose Subagents before sending.";
+  declaration.parameters = {
+    type: "object",
+    properties: { Subagents: { type: "array", items: { type: "string" } } },
+    required: ["Subagents"]
+  };
+  const sanitizer = async text => {
+    const base = await deterministicSanitizer(text);
+    if (!base.sanitizedPrompt.includes("Subagents")) return base;
+    return {
+      sanitizedPrompt: base.sanitizedPrompt.replaceAll("Subagents", "[PRIVATE_VALUE_14]"),
+      sessionMap: { ...base.sessionMap, "[PRIVATE_VALUE_14]": "Subagents" }
+    };
+  };
+
+  const first = await sanitizeAgyRequestBody(body, withTestIdentity({ sanitizer }));
+  assert.equal(Object.values(first.sessionMapAdditions).includes("Subagents"), true);
+  assert.deepEqual(
+    first.body.request.tools[0].functionDeclarations[0].parameters,
+    declaration.parameters
+  );
+
+  const second = await sanitizeAgyRequestBody(body, withTestIdentity({
+    sanitizer,
+    sessionMap: first.sessionMapAdditions
+  }));
+  assert.deepEqual(
+    second.body.request.tools[0].functionDeclarations[0].parameters,
+    declaration.parameters
+  );
+});
+
 test("AGY historical function-call argument keys remain provider schema identifiers", async () => {
   const body = sampleRequest();
   const declaration = body.request.tools[0].functionDeclarations[0];

@@ -229,6 +229,7 @@ function assertImmutable(value, sessionMap, policy) {
     protectedValueError: policy.protectedValueError,
     invalidValueError: policy.invalidSchemaError
   });
+  policy.onImmutableString?.(value);
 }
 
 function assertDepth(depth, policy) {
@@ -251,6 +252,8 @@ function normalizePolicy(options) {
   return {
     allowedTypes,
     maxDepth,
+    onImmutableString: typeof options.onImmutableString === "function"
+      ? options.onImmutableString : null,
     annotationSlot: typeof options.annotationSlot === "function"
       ? options.annotationSlot
       : ({ path, value, trace }) => ({ path, value, schemaTrace: trace }),
