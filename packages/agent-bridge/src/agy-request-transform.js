@@ -1,4 +1,7 @@
-import { normalizeSessionMap } from "@privacy-ai/sdk";
+import {
+  normalizeSessionMap,
+  parsePrivacyPlaceholder
+} from "@privacy-ai/sdk";
 import {
   collectAgyToolSchema,
   finalizeAgyToolSchemaTrace
@@ -63,6 +66,7 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
   }
 
   const transformed = structuredClone(body);
+  const validatedProtocolStrings = collectValidatedAgyProtocolStrings(transformed);
   const imageSlots = collectAgyImageSlots(transformed);
   const maxImages = Number(options.maxImagesPerRequest ?? DEFAULT_MAX_IMAGES_PER_REQUEST);
   if (!Number.isSafeInteger(maxImages) || maxImages <= 0) {
@@ -134,7 +138,13 @@ export async function sanitizeAgyRequestBody(body, options = {}) {
     }
   }
 
-  const { slots, schemaTraces } = collectAgyArtifacts(transformed, completeSessionMap);
+  // Generic classifier mappings may collide with validated AGY schema literals. Exclude
+  // them only from immutable-schema comparison; keep the full map for sanitization.
+  const immutableSessionMap = filterGenericAgyProtocolCollisions(
+    completeSessionMap,
+    validatedProtocolStrings
+  );
+  const { slots, schemaTraces } = collectAgyArtifacts(transformed, immutableSessionMap);
   let artifactResult;
   try {
     artifactResult = await sanitizeModelVisibleArtifacts(
@@ -337,6 +347,57 @@ function collectAgyArtifacts(body, sessionMap = {}) {
   }
 
   return { slots, schemaTraces };
+}
+
+function collectValidatedAgyProtocolStrings(body) {
+  const output = new Set();
+  const collect = (schema, path, schemaKind) => {
+    collectAgyToolSchema(schema, path, {}, schemaKind, {
+      onImmutableString(value) {
+        output.add(value.toLocaleLowerCase("en-US"));
+      }
+    });
+  };
+
+  for (let toolIndex = 0; toolIndex < (body?.request?.tools?.length || 0); toolIndex += 1) {
+    const declarations = body.request.tools[toolIndex].functionDeclarations;
+    for (let declarationIndex = 0; declarationIndex < declarations.length; declarationIndex += 1) {
+      const declaration = declarations[declarationIndex];
+      const basePath = ["request", "tools", toolIndex, "functionDeclarations", declarationIndex];
+      for (const key of ["parameters", "parametersJsonSchema", "response", "responseJsonSchema"]) {
+        if (declaration[key] == null) continue;
+        collect(declaration[key], [...basePath, key], `tool_${key}`);
+      }
+    }
+  }
+
+  if (body?.request?.generationConfig?.responseSchema != null) {
+    collect(
+      body.request.generationConfig.responseSchema,
+      ["request", "generationConfig", "responseSchema"],
+      "generation_response_schema"
+    );
+  }
+  return output;
+}
+
+function filterGenericAgyProtocolCollisions(sessionMap, protocolStrings) {
+  if (!(protocolStrings instanceof Set) || protocolStrings.size === 0) {
+    return { ...(sessionMap || {}) };
+  }
+  return Object.fromEntries(Object.entries(sessionMap || {}).filter(([placeholder, original]) =>
+    parsePrivacyPlaceholder(placeholder)?.category !== "PRIVATE_VALUE" ||
+    !mappingCollidesWithAgyProtocol(original, protocolStrings)
+  ));
+}
+
+function mappingCollidesWithAgyProtocol(original, protocolStrings) {
+  if (typeof original !== "string" || original.length === 0) return false;
+  const folded = original.toLocaleLowerCase("en-US");
+  for (const value of protocolStrings) {
+    if (value.includes(folded)) return true;
+  }
+  return false;
 }
 
 function collectContentArtifacts(content, basePath, artifactKey, slots, textArtifactType) {

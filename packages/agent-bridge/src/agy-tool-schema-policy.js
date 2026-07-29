@@ -21,12 +21,19 @@ const AGY_SCHEMA_TYPES = new Set([
   "TYPE_UNSPECIFIED"
 ]);
 
-export function collectAgyToolSchema(schema, path, sessionMap = {}, schemaKind = "tool_schema") {
+export function collectAgyToolSchema(
+  schema,
+  path,
+  sessionMap = {},
+  schemaKind = "tool_schema",
+  options = {}
+) {
   return collectToolSchemaAnnotations(schema, path, sessionMap, {
     schemaKind,
     allowedTypes: AGY_SCHEMA_TYPES,
     invalidSchemaError,
     protectedValueError: immutableProtectedValueError,
+    onImmutableString: options.onImmutableString,
     annotationSlot: ({ path: slotPath, value, trace }) => ({
       path: slotPath,
       value,
