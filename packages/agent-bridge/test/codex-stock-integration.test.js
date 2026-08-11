@@ -119,6 +119,81 @@ test("installed stock Codex executes its native command through the provider gat
   assert.equal(captured.every(body => !JSON.stringify(body).includes(PRIVATE_EMAIL)), true);
 });
 
+test("installed stock Codex GPT-5.6 Luna receives hosted web and image tools through the gateway", { timeout: 60_000 }, async t => {
+  const codex = await resolveExecutable("codex");
+  if (!codex) return t.skip("Codex is not installed");
+
+  const workspace = await createTestTempDir("privacyai-stock-codex-hosted-workspace-");
+  const codexHome = await createTestTempDir("privacyai-stock-codex-hosted-home-");
+  const vaultDir = await createTestTempDir("privacyai-stock-codex-hosted-vault-");
+  t.after(() => Promise.all([
+    rm(workspace, { recursive: true, force: true }),
+    rm(codexHome, { recursive: true, force: true }),
+    rm(vaultDir, { recursive: true, force: true })
+  ]));
+  let captured;
+
+  const upstream = await startServer(async (request, response) => {
+    if (request.method === "GET" && request.url.startsWith("/v1/models")) {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ models: [] }));
+      return;
+    }
+    if (request.method !== "POST" || request.url !== "/v1/responses") {
+      response.writeHead(404).end();
+      return;
+    }
+    captured = await readRequestJson(request);
+    writeSse(response, [
+      responseCreated("resp-hosted-tools"),
+      assistantMessage("msg-hosted-tools", "HOSTED_TOOLS_OK"),
+      responseCompleted("resp-hosted-tools")
+    ]);
+  });
+  t.after(() => upstream.close());
+
+  const gateway = await startCodexProviderGateway({
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
+    hostedToolPolicy: { webSearch: true, imageGeneration: true },
+    baseDir: vaultDir,
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const args = [
+    ...buildCodexProviderArgs(gateway.baseURL),
+    "--search",
+    "--enable",
+    "image_generation",
+    "-m",
+    "gpt-5.6-luna",
+    "-a",
+    "never",
+    "-s",
+    "read-only",
+    "exec",
+    "--skip-git-repo-check",
+    "Reply with exactly HOSTED_TOOLS_OK and do not call tools."
+  ];
+  const result = await run(codex, args, {
+    cwd: workspace,
+    env: {
+      ...process.env,
+      CODEX_HOME: codexHome,
+      OPENAI_API_KEY: "dummy-local-test-key",
+      NO_COLOR: "1"
+    }
+  });
+
+  assert.equal(result.code, 0, `Codex failed:\n${result.stderr}\n${result.stdout}`);
+  assert.ok(captured, "Codex should send a GPT-5.6 Luna request through the provider gateway");
+  const hostedTypes = captured.tools
+    .map(tool => tool.type)
+    .filter(type => type === "web_search" || type === "image_generation");
+  assert.deepEqual(hostedTypes, ["web_search", "image_generation"]);
+});
+
 test("installed stock Codex preserves custom Lark grammar under a false-positive sanitizer", { timeout: 60_000 }, async t => {
   const codex = await resolveExecutable("codex");
   if (!codex) return t.skip("Codex is not installed");

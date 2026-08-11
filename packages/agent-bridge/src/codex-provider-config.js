@@ -7,16 +7,50 @@ export const CODEX_GATEWAY_DISABLED_FEATURES = Object.freeze([
   "responses_websockets",
   "responses_websockets_v2",
   "realtime_conversation",
-  "standalone_web_search",
-  "search_tool",
   "apps",
   "enable_mcp_apps",
   "in_app_browser",
   "browser_use",
   "computer_use",
-  "remote_plugin",
-  "image_generation"
+  "remote_plugin"
 ]);
+
+export function resolveCodexHostedToolPolicy(args = []) {
+  let webSearch = false;
+  let imageGeneration = true;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = String(args[index]);
+    if (arg === "--") break;
+    if (arg === "--search") webSearch = true;
+    if (arg === "--enable" || arg === "--disable") {
+      const feature = String(args[index + 1] || "");
+      if (feature === "image_generation") imageGeneration = arg === "--enable";
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--enable=") || arg.startsWith("--disable=")) {
+      const enabled = arg.startsWith("--enable=");
+      const feature = arg.slice(arg.indexOf("=") + 1);
+      if (feature === "image_generation") imageGeneration = enabled;
+      continue;
+    }
+    if (arg === "-c" || arg === "--config") {
+      const assignment = String(args[index + 1] || "");
+      const imageToggle = parseBooleanFeatureAssignment(assignment, "image_generation");
+      if (imageToggle != null) imageGeneration = imageToggle;
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("--config=")) {
+      const imageToggle = parseBooleanFeatureAssignment(
+        arg.slice("--config=".length),
+        "image_generation"
+      );
+      if (imageToggle != null) imageGeneration = imageToggle;
+    }
+  }
+  return Object.freeze({ webSearch, imageGeneration });
+}
 
 export function buildCodexProviderArgs(baseURL, options = {}) {
   const parsed = new URL(baseURL);
@@ -46,8 +80,6 @@ export function buildCodexProviderArgs(baseURL, options = {}) {
   const provider = providerFields.join(",");
 
   return [
-    "-c",
-    'web_search="disabled"',
     "-c",
     `model_provider=${tomlString(PROTECTED_PROVIDER_ID)}`,
     "-c",
@@ -95,6 +127,13 @@ export function parseCodexPrivacyMode(args, options = {}) {
     mode,
     args: joinCodexArguments({ ...parts, beforeDelimiter: forwarded })
   };
+}
+
+function parseBooleanFeatureAssignment(value, feature) {
+  const assignment = String(value || "").trim();
+  const match = assignment.match(/^features\.([A-Za-z0-9_-]+)\s*=\s*(true|false|1|0|"true"|"false")$/i);
+  if (!match || match[1] !== feature) return null;
+  return new Set(["true", "1", '"true"']).has(match[2].toLowerCase());
 }
 
 function tomlString(value) {

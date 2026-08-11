@@ -94,6 +94,7 @@ export async function startCodexProviderGateway(options = {}) {
   }
 
   const timeouts = resolveCodexGatewayTimeouts(options);
+  const hostedToolPolicy = normalizeHostedToolPolicy(options.hostedToolPolicy);
   const nonce = options.nonce || randomBytes(24).toString("hex");
   const identityRoot = await openInstallationPrivacyIdentity(options);
   const vault = options.vault || new SessionVault({ ...options, identityRoot });
@@ -141,6 +142,7 @@ export async function startCodexProviderGateway(options = {}) {
     imageSanitizer,
     verificationStore,
     policyFingerprint,
+    hostedToolPolicy,
     serial,
     sessionCaches,
     maintenance,
@@ -299,7 +301,9 @@ async function handleRequestCore(request, response, context) {
       currentThread.sessionMap || {}
     );
     let sessionMap = { ...currentSessionMap };
+    const previouslyInheritedParents = new Set(currentThread.parentSessionKeys || []);
     for (const parentSessionKey of identity.parentSessionKeys) {
+      if (previouslyInheritedParents.has(parentSessionKey)) continue;
       const parentVault = await context.vault.load(parentSessionKey);
       const parentThread = await runVerificationStoreOperation(
         context,
@@ -334,6 +338,9 @@ async function handleRequestCore(request, response, context) {
       onArtifactComplete: context.onSanitizerArtifactComplete,
       onSchemaTrace: context.onSchemaTrace
     });
+    if (suffix === "/responses") {
+      injectHostedCodexTools(result.body, context.hostedToolPolicy);
+    }
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
     const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
       sessionKey: identity.sessionKey, provider: "codex", operation: "responses.create",
@@ -895,6 +902,49 @@ function commitCacheWrites(cache, writes = [], maxEntries = 2048, verificationSt
     const oldest = cache.keys().next().value;
     if (oldest == null) break;
     cache.delete(oldest);
+  }
+}
+
+function normalizeHostedToolPolicy(value) {
+  if (value == null) return Object.freeze({ webSearch: false, imageGeneration: false });
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("hostedToolPolicy must be an object.");
+  }
+  for (const key of Object.keys(value)) {
+    if (!new Set(["webSearch", "imageGeneration"]).has(key)) {
+      throw new TypeError(`Unsupported hosted Codex tool policy field: ${key}`);
+    }
+  }
+  for (const key of ["webSearch", "imageGeneration"]) {
+    if (value[key] != null && typeof value[key] !== "boolean") {
+      throw new TypeError(`hostedToolPolicy.${key} must be a boolean.`);
+    }
+  }
+  return Object.freeze({
+    webSearch: value.webSearch === true,
+    imageGeneration: value.imageGeneration === true
+  });
+}
+
+function injectHostedCodexTools(body, policy) {
+  if (!body || typeof body !== "object" || (!policy.webSearch && !policy.imageGeneration)) return;
+  if (body.tools == null) body.tools = [];
+  if (!Array.isArray(body.tools)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_CONTROL",
+      "PrivacyAI blocked a non-array Codex tools field."
+    );
+  }
+  const types = new Set(body.tools.map(tool => tool?.type).filter(Boolean));
+  if (policy.webSearch && !types.has("web_search")) {
+    body.tools.push({
+      type: "web_search",
+      external_web_access: true,
+      search_content_types: ["text", "image"]
+    });
+  }
+  if (policy.imageGeneration && !types.has("image_generation")) {
+    body.tools.push({ type: "image_generation", output_format: "png" });
   }
 }
 

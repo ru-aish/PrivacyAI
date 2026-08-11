@@ -104,6 +104,10 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   assert.equal(spawned.args.includes("--privacy-gateway"), false);
   assert.equal(gatewayOptions.maxContextChars, 13312);
   assert.equal(gatewayOptions.verificationStore, verificationStore);
+  assert.deepEqual(gatewayOptions.hostedToolPolicy, {
+    webSearch: false,
+    imageGeneration: true
+  });
   assert.equal(
     progress.some(event => event.message ===
       "Reused cached privacy decisions for 2 local startup file(s)"),

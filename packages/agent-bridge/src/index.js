@@ -18,7 +18,8 @@ export {
   CODEX_GATEWAY_DISABLED_FEATURES,
   buildCodexProviderArgs,
   isProtectedCodexConfigOverride,
-  parseCodexPrivacyMode
+  parseCodexPrivacyMode,
+  resolveCodexHostedToolPolicy
 } from "./codex-provider-config.js";
 export { resolveCodexGatewayTimeouts, startCodexProviderGateway } from "./codex-provider-gateway.js";
 export { createCodexImageSanitizer, toCodexImageError } from "./codex-image-adapter.js";

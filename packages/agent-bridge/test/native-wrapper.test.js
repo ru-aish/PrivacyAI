@@ -221,7 +221,8 @@ test("argument guards preserve normal Codex workflows while blocking provider by
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--", "resume"]));
 
   assert.throws(() => validateNativeArguments("codex", ["--remote", "unix:///tmp/server"]), /not protected by the local provider gateway/);
-  assert.throws(() => validateNativeArguments("codex", ["--search"]), /not protected/);
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--search"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--enable", "image_generation"]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--image", "private.png"]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["-i", "private.png"]));
   assert.throws(() => validateNativeArguments("codex", ["--profile", "unsafe"]), /not protected/);

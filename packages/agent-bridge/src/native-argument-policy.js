@@ -103,7 +103,6 @@ function validateGatewayCodexArguments(args) {
   const blockedFlags = new Set([
     "--remote",
     "--remote-auth-token-env",
-    "--search",
     "--oss",
     "--local-provider",
     "-p",

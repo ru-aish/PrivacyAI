@@ -26,6 +26,7 @@ import {
   parseCodexPrivacyMode,
   pruneCodexArgumentKeyMappings,
   resolveCodexGatewayTimeouts,
+  resolveCodexHostedToolPolicy,
   restoreResponseItem,
   sanitizeCodexMetadataHeaders,
   sanitizeCodexRequestBody,
@@ -554,10 +555,25 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
   );
 
   const hosted = sampleRequest();
-  hosted.tools = [{ type: "web_search", external_web_access: true }];
+  hosted.tools = [{
+    type: "web_search",
+    external_web_access: true,
+    search_content_types: ["text", "image"]
+  }, {
+    type: "image_generation",
+    output_format: "png"
+  }];
+  const hostedResult = await sanitizeCodexRequestBody(
+    hosted,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+  assert.deepEqual(hostedResult.body.tools, hosted.tools);
+
+  const invalidHosted = sampleRequest();
+  invalidHosted.tools = [{ type: "image_generation", input_image_mask: { image_url: "private.png" } }];
   await assert.rejects(
-    sanitizeCodexRequestBody(hosted, withTestIdentity({ sanitizer: deterministicSanitizer })),
-    error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_PROVIDER_TOOL"
+    sanitizeCodexRequestBody(invalidHosted, withTestIdentity({ sanitizer: deterministicSanitizer })),
+    error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
   );
 
   const custom = sampleRequest();
@@ -1118,16 +1134,63 @@ test("Codex schema policy fails closed for detectable or known protected immutab
   }
 });
 
-test("restoreResponseItem rejects unknown and provider-hosted response items", () => {
+test("Codex request history preserves validated web-search and generated-image provider items", async () => {
+  const body = sampleRequest();
+  body.input = [{
+    type: "web_search_call",
+    id: "ws-history",
+    status: "completed",
+    action: {
+      type: "search",
+      query: "[EMAIL_1]",
+      queries: ["[EMAIL_1]"],
+      sources: [{ type: "url", url: "https://example.test/public" }]
+    }
+  }, {
+    type: "image_generation_call",
+    id: "ig-history",
+    status: "completed",
+    result: "iVBORw0KGgoAAAANSUhEUg=="
+  }];
+  body.tools = [];
+  const result = await sanitizeCodexRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+  assert.deepEqual(result.body.input, body.input);
+});
+
+test("restoreResponseItem preserves validated provider-hosted items and rejects unknown response items", () => {
+  const webSearch = {
+    type: "web_search_call",
+    id: "ws-1",
+    status: "completed",
+    action: { type: "search", query: "[EMAIL_1]", queries: ["[EMAIL_1]"] }
+  };
+  restoreResponseItem(webSearch, sessionMap);
+  assert.equal(webSearch.action.query, "[EMAIL_1]");
+  assert.deepEqual(webSearch.action.queries, ["[EMAIL_1]"]);
+
+  const imageGeneration = {
+    type: "image_generation_call",
+    id: "ig-1",
+    status: "completed",
+    result: "iVBORw0KGgoAAAANSUhEUg=="
+  };
+  restoreResponseItem(imageGeneration, sessionMap);
+  assert.equal(imageGeneration.result, "iVBORw0KGgoAAAANSUhEUg==");
+
   for (const item of [
     { type: "future_provider_tool", private: "[EMAIL_1]" },
-    { type: "web_search_call", action: { query: "[EMAIL_1]" } },
-    { type: "image_generation_call", revised_prompt: "[EMAIL_1]" },
+    { type: "image_generation_call", status: "completed", revised_prompt: "[EMAIL_1]" },
     { type: "other", value: "[EMAIL_1]" }
   ]) {
     assert.throws(
       () => restoreResponseItem(item, sessionMap),
-      error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_RESPONSE_ITEM"
+      error => new Set([
+        "PRIVACYAI_CODEX_UNSUPPORTED_RESPONSE_ITEM",
+        "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
+      ]).has(error?.code)
     );
   }
 
@@ -1143,6 +1206,134 @@ test("restoreResponseItem rejects unknown and provider-hosted response items", (
       ),
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_RESPONSE_CONTENT"
   );
+});
+
+test("Codex SSE forwards native web-search and image-generation events without rewriting payloads", () => {
+  const restorer = new CodexSseRestorer(sessionMap);
+  const frames = [
+    sse({
+      type: "response.web_search_call.in_progress",
+      item_id: "ws-stream",
+      output_index: 0,
+      sequence_number: 1
+    }),
+    sse({
+      type: "response.web_search_call.searching",
+      item_id: "ws-stream",
+      output_index: 0,
+      sequence_number: 2
+    }),
+    sse({
+      type: "response.output_item.done",
+      item: {
+        type: "web_search_call",
+        id: "ws-stream",
+        status: "completed",
+        action: { type: "search", query: "[EMAIL_1]", queries: ["[EMAIL_1]"] }
+      }
+    }),
+    sse({
+      type: "response.image_generation_call.in_progress",
+      item_id: "ig-stream",
+      output_index: 1,
+      sequence_number: 3
+    }),
+    sse({
+      type: "response.image_generation_call.partial_image",
+      item_id: "ig-stream",
+      output_index: 1,
+      partial_image_index: 0,
+      partial_image_b64: "UEFJMV9TRU5TSVRJVkVf",
+      sequence_number: 4
+    }),
+    sse({
+      type: "response.output_item.done",
+      item: {
+        type: "image_generation_call",
+        id: "ig-stream",
+        status: "completed",
+        result: "iVBORw0KGgoAAAANSUhEUg=="
+      }
+    }),
+    sse({
+      type: "response.web_search_call.completed",
+      item_id: "ws-stream",
+      output_index: 0,
+      sequence_number: 5
+    }),
+    sse({ type: "response.completed", response: { id: "provider-tools", usage: null } })
+  ].join("");
+
+  const events = parseSse([
+    ...restorer.write(Buffer.from(frames)),
+    ...restorer.end()
+  ].join(""));
+  assert.equal(events.some(event => event.type === "response.web_search_call.searching"), true);
+  assert.equal(events.some(event => event.type === "response.image_generation_call.partial_image"), true);
+  const webDone = events.find(event => event.type === "response.output_item.done" && event.item?.type === "web_search_call");
+  assert.equal(webDone.item.action.query, "[EMAIL_1]");
+  const partial = events.find(event => event.type === "response.image_generation_call.partial_image");
+  assert.equal(partial.partial_image_b64, "UEFJMV9TRU5TSVRJVkVf");
+  const imageDone = events.find(event => event.type === "response.output_item.done" && event.item?.type === "image_generation_call");
+  assert.equal(imageDone.item.result, "iVBORw0KGgoAAAANSUhEUg==");
+});
+
+test("gateway injects requested hosted tools only after privacy sanitization", async t => {
+  let captured;
+  const upstream = await startServer(async (request, response) => {
+    captured = await readRequestJson(request);
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(
+      sse({ type: "response.completed", response: { id: "hosted-tools", usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+
+  const root = await createTestTempDir("privacyai-hosted-tools-");
+  const observed = [];
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    hostedToolPolicy: { webSearch: true, imageGeneration: true },
+    baseDir: root,
+    verificationDbPath: join(root, "context.sqlite3"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true,
+    onSanitizedRequest: body => observed.push(structuredClone(body))
+  });
+  t.after(() => gateway.close());
+
+  const body = sampleRequest();
+  body.instructions = `Research for ${PRIVATE_EMAIL}`;
+  body.tools = [{
+    type: "function",
+    name: "local_tool",
+    description: "Local tool",
+    strict: false,
+    parameters: { type: "object", properties: {} }
+  }];
+  const response = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  assert.equal(response.status, 200, await response.text());
+
+  assert.ok(captured);
+  assert.equal(JSON.stringify(captured).includes(PRIVATE_EMAIL), false);
+  assert.equal(captured.instructions.includes("[EMAIL_1]"), true);
+  assert.deepEqual(
+    captured.tools.map(tool => tool.type),
+    ["function", "web_search", "image_generation"]
+  );
+  assert.deepEqual(captured.tools[1], {
+    type: "web_search",
+    external_web_access: true,
+    search_content_types: ["text", "image"]
+  });
+  assert.deepEqual(captured.tools[2], { type: "image_generation", output_format: "png" });
+  assert.equal(observed.length, 1);
+  assert.deepEqual(observed[0].tools, captured.tools);
 });
 
 test("restoreResponseItem restores string outputs and JSON-sensitive function arguments", () => {
@@ -2711,9 +2902,12 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
       maps.set(key, { sessionMap });
     }
   };
+  const root = await createTestTempDir("privacyai-parent-inheritance-");
   const gateway = await startCodexProviderGateway({
     sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} }),
     vault,
+    baseDir: root,
+    verificationDbPath: join(root, "context.sqlite3"),
     apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
     allowInsecureTestUpstream: true
   });
@@ -2747,6 +2941,30 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
   assert.equal(inheritedEvents[0].delta, `Hello ${PRIVATE_EMAIL}`);
   assert.deepEqual(maps.get("codex-provider:child").sessionMap, { "[EMAIL_1]": PRIVATE_EMAIL });
 
+  maps.set("codex-provider:parent", {
+    sessionMap: {
+      "[EMAIL_1]": PRIVATE_EMAIL,
+      "[API_KEY_1]": "parent-added-after-spawn"
+    }
+  });
+  maps.set("codex-provider:child", {
+    sessionMap: {
+      "[EMAIL_1]": PRIVATE_EMAIL,
+      "[API_KEY_1]": "child-owned-mapping"
+    }
+  });
+  const continued = await fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(childBody)
+  });
+  assert.equal(continued.status, 200, await continued.text());
+  assert.equal(upstreamRequests, 2);
+  assert.equal(
+    maps.get("codex-provider:child").sessionMap["[API_KEY_1]"],
+    "child-owned-mapping"
+  );
+
   maps.set("codex-provider:conflicted-child", {
     sessionMap: { "[EMAIL_1]": "different@example.test" }
   });
@@ -2762,7 +2980,7 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
     body: JSON.stringify(conflictedBody)
   });
   assert.equal(conflicted.status, 422);
-  assert.equal(upstreamRequests, 1);
+  assert.equal(upstreamRequests, 2);
 
   maps.set("codex-provider:alias-heavy-child", {
     sessionMap: Object.fromEntries(
@@ -2781,7 +2999,7 @@ test("gateway inherits parent mappings and rejects ambiguous child collisions", 
     body: JSON.stringify(aliasHeavyBody)
   });
   assert.equal(aliasHeavy.status, 422);
-  assert.equal(upstreamRequests, 1);
+  assert.equal(upstreamRequests, 2);
 });
 
 test("gateway reuses persisted thread verification after restart and invalidates changed policy/content", async t => {
@@ -2983,7 +3201,46 @@ test("Codex gateway preserves legacy injected verification stores without update
   assert.equal(JSON.stringify(thread.identityMap).includes(PRIVATE_EMAIL), false);
 });
 
-test("Codex provider args force loopback Responses transport and disable unsupported provider-hosted tools", () => {
+test("Codex hosted-tool policy mirrors search and image-generation CLI intent", () => {
+  assert.deepEqual(resolveCodexHostedToolPolicy([]), {
+    webSearch: false,
+    imageGeneration: true
+  });
+  assert.deepEqual(resolveCodexHostedToolPolicy(["--search", "exec", "hello"]), {
+    webSearch: true,
+    imageGeneration: true
+  });
+  assert.deepEqual(resolveCodexHostedToolPolicy([
+    "--search",
+    "--disable",
+    "image_generation",
+    "exec",
+    "hello"
+  ]), {
+    webSearch: true,
+    imageGeneration: false
+  });
+  assert.deepEqual(resolveCodexHostedToolPolicy([
+    "--disable=image_generation",
+    "--enable=image_generation",
+    "exec",
+    "hello"
+  ]), {
+    webSearch: false,
+    imageGeneration: true
+  });
+  assert.deepEqual(resolveCodexHostedToolPolicy([
+    "-c",
+    "features.image_generation=false",
+    "exec",
+    "hello"
+  ]), {
+    webSearch: false,
+    imageGeneration: false
+  });
+});
+
+test("Codex provider args force loopback Responses transport while preserving native web and image tools", () => {
   const args = buildCodexProviderArgs("http://127.0.0.1:12345/nonce");
   assert.equal(args.includes('model_provider="privacyai"'), true);
   const provider = args.find(value => value.startsWith("model_providers.privacyai="));
@@ -2991,10 +3248,14 @@ test("Codex provider args force loopback Responses transport and disable unsuppo
   assert.match(provider, /supports_websockets=false/);
   assert.match(provider, /request_max_retries=0/);
   assert.match(provider, /stream_max_retries=0/);
-  assert.equal(args.includes('web_search="disabled"'), true);
-  for (const feature of ["enable_request_compression", "responses_websockets", "apps", "image_generation"]) {
+  assert.equal(args.includes('web_search="disabled"'), false);
+  for (const feature of ["enable_request_compression", "responses_websockets", "apps"]) {
     const index = args.indexOf(feature);
     assert.equal(index > 0 && args[index - 1] === "--disable", true, feature);
+  }
+  for (const feature of ["standalone_web_search", "search_tool", "image_generation"]) {
+    const index = args.indexOf(feature);
+    assert.equal(index === -1 || args[index - 1] !== "--disable", true, feature);
   }
   assert.throws(() => buildCodexProviderArgs("http://localhost:1234/x"), /literal IPv4 loopback/);
 });

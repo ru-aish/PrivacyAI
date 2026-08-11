@@ -615,11 +615,11 @@ export function restoreResponseItem(item, sessionMap = {}) {
       item.tools = restoreValue(item.tools, sessionMap);
       break;
     case "web_search_call":
+      validateWebSearchCallItem(item);
+      break;
     case "image_generation_call":
-      throw gatewayError(
-        "PRIVACYAI_CODEX_UNSUPPORTED_RESPONSE_ITEM",
-        `PrivacyAI blocked provider-hosted Codex response item type: ${item.type}`
-      );
+      validateImageGenerationCallItem(item);
+      break;
     case "compaction":
     case "context_compaction":
     case "compaction_trigger":
@@ -907,11 +907,11 @@ function collectResponseItem(item, slots, path, context = {}) {
       collectToolDefinitions(item.tools, slots, [...path, "tools"], context);
       return;
     case "web_search_call":
+      validateWebSearchCallItem(item);
+      return;
     case "image_generation_call":
-      throw gatewayError(
-        "PRIVACYAI_CODEX_UNSUPPORTED_PROVIDER_TOOL",
-        `PrivacyAI blocked provider-hosted Codex history item type: ${item.type}`
-      );
+      validateImageGenerationCallItem(item);
+      return;
     case "compaction":
       validateResponseItemShape(
         item,
@@ -1254,16 +1254,128 @@ function collectToolDefinition(tool, slots, path, options = {}) {
       options.onImmutableString?.(tool.format.definition);
       return;
     case "web_search":
-      throw gatewayError(
-        "PRIVACYAI_CODEX_UNSUPPORTED_PROVIDER_TOOL",
-        "PrivacyAI blocked a provider-hosted Codex web-search tool."
-      );
+      validateWebSearchToolDefinition(tool);
+      return;
+    case "image_generation":
+      validateImageGenerationToolDefinition(tool);
+      return;
     default:
       throw gatewayError(
         "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION",
         `PrivacyAI blocked unsupported Codex tool type: ${safeResponseItemType(tool.type)}`
       );
   }
+}
+
+function validateWebSearchToolDefinition(tool) {
+  assertOnlyKeys(
+    tool,
+    new Set([
+      "type",
+      "external_web_access",
+      "search_content_types",
+      "search_context_size",
+      "filters",
+      "user_location"
+    ]),
+    "web search tool"
+  );
+  if (tool.external_web_access != null && typeof tool.external_web_access !== "boolean") {
+    throw invalidProviderToolDefinition("web search external_web_access");
+  }
+  if (tool.search_content_types != null) {
+    if (
+      !Array.isArray(tool.search_content_types) ||
+      tool.search_content_types.some(value => !new Set(["text", "image"]).has(value)) ||
+      new Set(tool.search_content_types).size !== tool.search_content_types.length
+    ) {
+      throw invalidProviderToolDefinition("web search content types");
+    }
+  }
+  if (
+    tool.search_context_size != null &&
+    !new Set(["low", "medium", "high"]).has(tool.search_context_size)
+  ) {
+    throw invalidProviderToolDefinition("web search context size");
+  }
+  if (tool.filters != null) {
+    assertOnlyKeys(tool.filters, new Set(["allowed_domains"]), "web search filters");
+    if (
+      !Array.isArray(tool.filters.allowed_domains) ||
+      tool.filters.allowed_domains.some(value => typeof value !== "string" || value.length === 0 || value.length > 2048)
+    ) {
+      throw invalidProviderToolDefinition("web search allowed domains");
+    }
+  }
+  if (tool.user_location != null) {
+    assertOnlyKeys(
+      tool.user_location,
+      new Set(["type", "city", "country", "region", "timezone"]),
+      "web search user location"
+    );
+    if (tool.user_location.type !== "approximate") {
+      throw invalidProviderToolDefinition("web search user location type");
+    }
+    for (const key of ["city", "country", "region", "timezone"]) {
+      if (
+        tool.user_location[key] != null &&
+        (typeof tool.user_location[key] !== "string" || tool.user_location[key].length > 512)
+      ) {
+        throw invalidProviderToolDefinition(`web search user location ${key}`);
+      }
+    }
+  }
+}
+
+function validateImageGenerationToolDefinition(tool) {
+  assertOnlyKeys(
+    tool,
+    new Set([
+      "type",
+      "output_format",
+      "background",
+      "input_fidelity",
+      "model",
+      "moderation",
+      "output_compression",
+      "partial_images",
+      "quality",
+      "size"
+    ]),
+    "image generation tool"
+  );
+  for (const [key, allowed] of [
+    ["output_format", new Set(["png", "jpeg", "webp"])],
+    ["background", new Set(["auto", "opaque", "transparent"])],
+    ["input_fidelity", new Set(["low", "high"])],
+    ["moderation", new Set(["auto"])],
+    ["quality", new Set(["auto", "low", "medium", "high"])],
+    ["size", new Set(["auto", "1024x1024", "1024x1536", "1536x1024"])]
+  ]) {
+    if (tool[key] != null && !allowed.has(tool[key])) {
+      throw invalidProviderToolDefinition(`image generation ${key}`);
+    }
+  }
+  if (tool.model != null) assertProtocolToken(tool.model, "image generation model", 160);
+  if (
+    tool.output_compression != null &&
+    (!Number.isSafeInteger(tool.output_compression) || tool.output_compression < 0 || tool.output_compression > 100)
+  ) {
+    throw invalidProviderToolDefinition("image generation output compression");
+  }
+  if (
+    tool.partial_images != null &&
+    (!Number.isSafeInteger(tool.partial_images) || tool.partial_images < 0 || tool.partial_images > 3)
+  ) {
+    throw invalidProviderToolDefinition("image generation partial images");
+  }
+}
+
+function invalidProviderToolDefinition(label) {
+  return gatewayError(
+    "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION",
+    `PrivacyAI blocked an invalid Codex ${label}.`
+  );
 }
 
 function collectSchemaSlots(
@@ -1533,6 +1645,98 @@ function validateStatus(value, label, required) {
     throw gatewayError(
       "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
       `PrivacyAI blocked an unsupported Codex ${label}.`
+    );
+  }
+}
+
+function validateWebSearchCallItem(item) {
+  validateResponseItemShape(
+    item,
+    new Set(["type", "id", "status", "action", "internal_chat_message_metadata_passthrough"]),
+    "web search call"
+  );
+  if (!new Set(["completed", "searching", "in_progress", "incomplete", "failed"]).has(item.status)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex web search status."
+    );
+  }
+  if (item.action == null) return;
+  assertOnlyKeys(
+    item.action,
+    new Set(["type", "query", "queries", "url", "pattern", "sources"]),
+    "web search action"
+  );
+  if (!new Set(["search", "open_page", "find_in_page"]).has(item.action.type)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex web search action."
+    );
+  }
+  for (const key of ["query", "url", "pattern"]) {
+    if (item.action[key] != null && typeof item.action[key] !== "string") {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        `PrivacyAI blocked a non-string Codex web search ${key}.`
+      );
+    }
+  }
+  if (
+    item.action.queries != null &&
+    (!Array.isArray(item.action.queries) || item.action.queries.some(value => typeof value !== "string"))
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked malformed Codex web search queries."
+    );
+  }
+  if (item.action.sources != null) {
+    if (!Array.isArray(item.action.sources)) {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        "PrivacyAI blocked malformed Codex web search sources."
+      );
+    }
+    for (const source of item.action.sources) {
+      assertOnlyKeys(source, new Set(["type", "url", "name"]), "web search source");
+      if (!new Set(["url", "api"]).has(source.type)) {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+          "PrivacyAI blocked an unsupported Codex web search source."
+        );
+      }
+      if (source.url != null && typeof source.url !== "string") {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+          "PrivacyAI blocked a non-string Codex web search source URL."
+        );
+      }
+      if (source.name != null && typeof source.name !== "string") {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+          "PrivacyAI blocked a non-string Codex web search source name."
+        );
+      }
+    }
+  }
+}
+
+function validateImageGenerationCallItem(item) {
+  validateResponseItemShape(
+    item,
+    new Set(["type", "id", "status", "result", "internal_chat_message_metadata_passthrough"]),
+    "image generation call"
+  );
+  if (!new Set(["completed", "generating", "in_progress", "incomplete", "failed"]).has(item.status)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex image generation status."
+    );
+  }
+  if (item.result != null && typeof item.result !== "string") {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked a non-string Codex image generation result."
     );
   }
 }
