@@ -8,6 +8,7 @@ import {
   pruneCodexArgumentKeyMappings,
   restoreCodexCompactResponse,
   restoreCodexJsonResponse,
+  sanitizeCodexImageGenerationRequestBody,
   sanitizeCodexMetadataHeaders,
   sanitizeCodexRequestBody
 } from "./codex-request-transform.js";
@@ -60,6 +61,7 @@ import {
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_VERIFICATION_RETRY_TIMEOUT_MS = 2500;
@@ -255,7 +257,7 @@ async function handleRequestCore(request, response, context) {
   if (suffix === "/health" && request.method === "GET") {
     return writeJson(response, 200, { ok: true });
   }
-  if (!new Set(["/responses", "/responses/compact", "/models"]).has(suffix)) {
+  if (!new Set(["/responses", "/responses/compact", "/models", "/images/generations"]).has(suffix)) {
     return writeJson(response, 404, { error: "PrivacyAI blocked an unsupported Codex provider route." });
   }
   const safeSearch = sanitizeUpstreamSearch(suffix, url.search, context);
@@ -284,6 +286,9 @@ async function handleRequestCore(request, response, context) {
     body = JSON.parse(rawBody.toString("utf8"));
   } catch {
     throw gatewayError("PRIVACYAI_CODEX_INVALID_JSON", "PrivacyAI blocked malformed Codex provider JSON.");
+  }
+  if (suffix === "/images/generations") {
+    return proxyImageGeneration(request, response, context, suffix, safeSearch, body);
   }
   validateRouteRequestBody(suffix, body);
 
@@ -341,6 +346,7 @@ async function handleRequestCore(request, response, context) {
     if (suffix === "/responses") {
       injectHostedCodexTools(result.body, context.hostedToolPolicy);
     }
+    const usesHostedTools = hasHostedCodexTools(result.body);
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
     const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
       sessionKey: identity.sessionKey, provider: "codex", operation: "responses.create",
@@ -388,7 +394,8 @@ async function handleRequestCore(request, response, context) {
       body: result.body,
       sessionMap: completeMap,
       sessionKey: identity.sessionKey,
-      lineageHandle
+      lineageHandle,
+      usesHostedTools
     };
   });
 
@@ -403,7 +410,8 @@ async function handleRequestCore(request, response, context) {
     transformed.sessionMap,
     transformed.body.stream === true,
     transformed.sessionKey,
-    transformed.lineageHandle
+    transformed.lineageHandle,
+    transformed.usesHostedTools
   );
 }
 
@@ -452,6 +460,90 @@ async function proxyModels(request, response, context, suffix, search) {
   response.end(responseBody);
 }
 
+async function proxyImageGeneration(request, response, context, suffix, search, body) {
+  const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
+  const turnId = sanitizedHeaders["x-codex-image-turn-id"];
+  const sessionKey = turnId
+    ? `codex-image:${turnId}`
+    : `codex-image:request-${randomBytes(16).toString("hex")}`;
+  const privacyIdentity = sessionPrivacyIdentity(context.identityRoot, sessionKey);
+  const transformed = await context.serial.run(sessionKey, async () => {
+    throwIfAborted(context.requestSignal);
+    const currentVault = await context.vault.load(sessionKey);
+    const sessionMap = currentVault?.sessionMap || {};
+    const cache = sessionCache(context, sessionKey);
+    const result = await sanitizeCodexImageGenerationRequestBody(body, {
+      sanitizer: context.sanitizer,
+      identity: privacyIdentity,
+      identityRoot: context.identityRoot,
+      sessionMap,
+      cache,
+      policyFingerprint: context.policyFingerprint,
+      maxContextChars: context.maxContextChars,
+      maxContextTokens: context.maxContextTokens,
+      tokenCounter: context.tokenCounter,
+      signal: context.requestSignal,
+      onBatchComplete: context.onSanitizerBatchComplete,
+      onArtifactComplete: context.onSanitizerArtifactComplete
+    });
+    if (!sessionMapsEqual(sessionMap, result.sessionMap)) {
+      await context.vault.save(sessionKey, result.sessionMap);
+    }
+    await runVerificationStoreOperation(context, () => commitCacheWrites(
+      cache,
+      result.cacheWrites,
+      Number(context.maxCacheEntriesPerSession || 2048),
+      context.verificationStore
+    ));
+    if (typeof context.onSanitizedRequest === "function") {
+      await context.onSanitizedRequest(result.body, {
+        sessionKey,
+        route: "images_generations"
+      });
+    }
+    const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
+      sessionKey,
+      provider: "codex",
+      operation: "images.generate",
+      model: result.body.model,
+      placeholders: Object.keys(result.sessionMap),
+      signal: context.requestSignal
+    });
+    return { body: result.body, lineageHandle };
+  });
+
+  const rawBody = Buffer.from(JSON.stringify(transformed.body));
+  const upstream = upstreamUrl(request.headers, context, suffix, search);
+  delete sanitizedHeaders["x-openai-internal-codex-responses-lite"];
+  const headers = upstreamHeaders(sanitizedHeaders, upstream, rawBody.length);
+  context.phase = "upstream_connect";
+  let upstreamSent = false;
+  let upstreamResponse;
+  try {
+    upstreamResponse = await requestCodexUpstream(upstream, "POST", headers, rawBody, {
+      signal: context.requestSignal,
+      timeoutMs: context.upstreamTimeoutMs,
+      onRequestSent: () => { upstreamSent = true; }
+    });
+  } catch (error) {
+    if (upstreamSent) await recordFailedProviderResponse(context.lineageRecorder, transformed.lineageHandle);
+    throw error;
+  }
+  context.phase = "upstream_response";
+  const statusCode = upstreamResponse.statusCode || 502;
+  await recordLineageBestEffort(context.lineageRecorder, "providerResponse", transformed.lineageHandle, {
+    success: statusCode >= 200 && statusCode < 300
+  });
+  const raw = await readBoundedHttpBody(
+    upstreamResponse,
+    Number(context.maxImageResponseBytes || DEFAULT_MAX_IMAGE_RESPONSE_BYTES),
+    { destroyOnLimit: true, idleTimeoutMs: context.upstreamIdleTimeoutMs }
+  );
+  forwardResponseHeaders(response, upstreamResponse.headers, false);
+  response.writeHead(statusCode);
+  response.end(raw);
+}
+
 async function proxyTransformed(
   request,
   response,
@@ -462,10 +554,12 @@ async function proxyTransformed(
   sessionMap,
   expectsSse,
   sessionKey,
-  lineageHandle
+  lineageHandle,
+  usesHostedTools
 ) {
   const upstream = upstreamUrl(request.headers, context, suffix, search);
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
+  if (usesHostedTools) delete sanitizedHeaders["x-openai-internal-codex-responses-lite"];
   const headers = upstreamHeaders(sanitizedHeaders, upstream, body.length);
   context.phase = "upstream_connect";
   let upstreamSent = false;
@@ -561,7 +655,9 @@ async function proxySseResponse(
   statusCode,
   options = {}
 ) {
-  const restorer = new CodexSseRestorer(sessionMap);
+  const restorer = new CodexSseRestorer(sessionMap, {
+    onEvent: context.onProviderEvent
+  });
   const iterator = upstreamResponse[Symbol.asyncIterator]();
   const staged = [];
   const maxProbeBytes = Number(context.maxSseProbeBytes || 256 * 1024);
@@ -798,6 +894,7 @@ function safeRouteIdentifier(suffix) {
   if (suffix === "/responses") return "responses";
   if (suffix === "/responses/compact") return "responses_compact";
   if (suffix === "/models") return "models";
+  if (suffix === "/images/generations") return "images_generations";
   return "gateway";
 }
 
@@ -946,6 +1043,12 @@ function injectHostedCodexTools(body, policy) {
   if (policy.imageGeneration && !types.has("image_generation")) {
     body.tools.push({ type: "image_generation", output_format: "png" });
   }
+}
+
+function hasHostedCodexTools(body) {
+  return Array.isArray(body?.tools) && body.tools.some(tool =>
+    tool?.type === "web_search" || tool?.type === "image_generation"
+  );
 }
 
 function mergeInheritedSessionMap(current, inherited) {

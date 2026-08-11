@@ -31,6 +31,7 @@ const FORWARDED_EVENT_TYPES = new Set([
   "response.web_search_call.searching",
   "response.web_search_call.completed",
   "response.image_generation_call.in_progress",
+  "response.image_generation_call.generating",
   "response.image_generation_call.partial_image",
   "response.image_generation_call.completed",
   "response.reasoning_summary_text.delta",
@@ -66,6 +67,7 @@ export class CodexSseRestorer {
     this.deltaStreams = new Map();
     this.functionArgumentsByAlias = new Map();
     this.completedToolCalls = [];
+    this.onEvent = typeof options.onEvent === "function" ? options.onEvent : null;
     this.maxFunctionArgumentChars = Number(options.maxFunctionArgumentChars || 1_000_000);
   }
 
@@ -138,6 +140,10 @@ export class CodexSseRestorer {
         `PrivacyAI blocked unsupported Codex SSE event type: ${safeEventType(event.type)}`
       );
     }
+    this.onEvent?.({
+      type: safeEventType(event.type),
+      itemType: event.item?.type ? safeEventType(event.item.type) : null
+    });
 
     const transformed = [];
     if (shouldFlushBefore(event)) transformed.push(...this.#flushAllEvents());

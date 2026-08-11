@@ -28,6 +28,7 @@ import {
   resolveCodexGatewayTimeouts,
   resolveCodexHostedToolPolicy,
   restoreResponseItem,
+  sanitizeCodexImageGenerationRequestBody,
   sanitizeCodexMetadataHeaders,
   sanitizeCodexRequestBody,
   startCodexProviderGateway
@@ -73,6 +74,7 @@ test("Codex request header policy forwards only required stock and OpenAI header
     "user-agent": "codex_cli_rs/0.144.1",
     "x-client-request-id": "thread-123",
     "x-codex-beta-features": "hooks,plugins",
+    "x-codex-image-turn-id": "019ff2e2-b1db-7090-a1ed-3e05cca7f6bd",
     "x-codex-turn-metadata": JSON.stringify({
       thread_id: "thread-123",
       request_kind: "turn",
@@ -88,6 +90,10 @@ test("Codex request header policy forwards only required stock and OpenAI header
 
   assert.equal(headers.authorization, "Bearer test-token");
   assert.equal(headers["chatgpt-account-id"], "account-test");
+  assert.equal(
+    headers["x-codex-image-turn-id"],
+    "019ff2e2-b1db-7090-a1ed-3e05cca7f6bd"
+  );
   assert.equal(headers.cookie, undefined);
   assert.equal(headers["x-private-note"], undefined);
   assert.equal(headers.traceparent, undefined);
@@ -1134,12 +1140,41 @@ test("Codex schema policy fails closed for detectable or known protected immutab
   }
 });
 
+test("Codex standalone image-generation request sanitizes only the prompt", async () => {
+  const body = {
+    prompt: `Draw a simple badge for ${PRIVATE_EMAIL}`,
+    background: "auto",
+    model: "gpt-image-2",
+    quality: "auto",
+    size: "auto"
+  };
+  const result = await sanitizeCodexImageGenerationRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+  assert.equal(result.body.prompt, "Draw a simple badge for [EMAIL_1]");
+  assert.deepEqual(
+    { ...result.body, prompt: body.prompt },
+    body
+  );
+  assert.equal(result.sessionMapAdditions["[EMAIL_1]"], PRIVATE_EMAIL);
+
+  await assert.rejects(
+    sanitizeCodexImageGenerationRequestBody(
+      { ...body, images: [{ image_url: "data:image/png;base64,AAAA" }] },
+      withTestIdentity({ sanitizer: deterministicSanitizer })
+    ),
+    error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
+  );
+});
+
 test("Codex request history preserves validated web-search and generated-image provider items", async () => {
   const body = sampleRequest();
   body.input = [{
     type: "web_search_call",
     id: "ws-history",
     status: "completed",
+    metadata: { turn_id: "turn-web-history" },
     action: {
       type: "search",
       query: "[EMAIL_1]",
@@ -1150,6 +1185,7 @@ test("Codex request history preserves validated web-search and generated-image p
     type: "image_generation_call",
     id: "ig-history",
     status: "completed",
+    metadata: { turn_id: "turn-image-history" },
     result: "iVBORw0KGgoAAAANSUhEUg=="
   }];
   body.tools = [];
@@ -1165,6 +1201,7 @@ test("restoreResponseItem preserves validated provider-hosted items and rejects 
     type: "web_search_call",
     id: "ws-1",
     status: "completed",
+    metadata: { turn_id: "turn-web-response" },
     action: { type: "search", query: "[EMAIL_1]", queries: ["[EMAIL_1]"] }
   };
   restoreResponseItem(webSearch, sessionMap);
@@ -1175,21 +1212,30 @@ test("restoreResponseItem preserves validated provider-hosted items and rejects 
     type: "image_generation_call",
     id: "ig-1",
     status: "completed",
+    action: "generate",
+    output_format: "png",
+    background: "opaque",
+    quality: "medium",
+    revised_prompt: "Draw [EMAIL_1] as a simple badge",
+    size: "1024x1024",
+    metadata: { turn_id: "turn-image-response" },
     result: "iVBORw0KGgoAAAANSUhEUg=="
   };
   restoreResponseItem(imageGeneration, sessionMap);
   assert.equal(imageGeneration.result, "iVBORw0KGgoAAAANSUhEUg==");
+  assert.equal(imageGeneration.revised_prompt, "Draw [EMAIL_1] as a simple badge");
 
   for (const item of [
     { type: "future_provider_tool", private: "[EMAIL_1]" },
-    { type: "image_generation_call", status: "completed", revised_prompt: "[EMAIL_1]" },
+    { type: "image_generation_call", id: "ig-invalid", status: "completed", action: "explode" },
     { type: "other", value: "[EMAIL_1]" }
   ]) {
     assert.throws(
       () => restoreResponseItem(item, sessionMap),
       error => new Set([
         "PRIVACYAI_CODEX_UNSUPPORTED_RESPONSE_ITEM",
-        "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
+        "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD",
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE"
       ]).has(error?.code)
     );
   }
@@ -1209,7 +1255,10 @@ test("restoreResponseItem preserves validated provider-hosted items and rejects 
 });
 
 test("Codex SSE forwards native web-search and image-generation events without rewriting payloads", () => {
-  const restorer = new CodexSseRestorer(sessionMap);
+  const observedEvents = [];
+  const restorer = new CodexSseRestorer(sessionMap, {
+    onEvent: event => observedEvents.push(event)
+  });
   const frames = [
     sse({
       type: "response.web_search_call.in_progress",
@@ -1229,6 +1278,7 @@ test("Codex SSE forwards native web-search and image-generation events without r
         type: "web_search_call",
         id: "ws-stream",
         status: "completed",
+        metadata: { turn_id: "turn-web-stream" },
         action: { type: "search", query: "[EMAIL_1]", queries: ["[EMAIL_1]"] }
       }
     }),
@@ -1237,6 +1287,12 @@ test("Codex SSE forwards native web-search and image-generation events without r
       item_id: "ig-stream",
       output_index: 1,
       sequence_number: 3
+    }),
+    sse({
+      type: "response.image_generation_call.generating",
+      item_id: "ig-stream",
+      output_index: 1,
+      sequence_number: 4
     }),
     sse({
       type: "response.image_generation_call.partial_image",
@@ -1252,6 +1308,12 @@ test("Codex SSE forwards native web-search and image-generation events without r
         type: "image_generation_call",
         id: "ig-stream",
         status: "completed",
+        action: "generate",
+        output_format: "png",
+        background: "opaque",
+        quality: "high",
+        revised_prompt: "A generated public image",
+        size: "1024x1024",
         result: "iVBORw0KGgoAAAANSUhEUg=="
       }
     }),
@@ -1269,6 +1331,7 @@ test("Codex SSE forwards native web-search and image-generation events without r
     ...restorer.end()
   ].join(""));
   assert.equal(events.some(event => event.type === "response.web_search_call.searching"), true);
+  assert.equal(events.some(event => event.type === "response.image_generation_call.generating"), true);
   assert.equal(events.some(event => event.type === "response.image_generation_call.partial_image"), true);
   const webDone = events.find(event => event.type === "response.output_item.done" && event.item?.type === "web_search_call");
   assert.equal(webDone.item.action.query, "[EMAIL_1]");
@@ -1276,11 +1339,25 @@ test("Codex SSE forwards native web-search and image-generation events without r
   assert.equal(partial.partial_image_b64, "UEFJMV9TRU5TSVRJVkVf");
   const imageDone = events.find(event => event.type === "response.output_item.done" && event.item?.type === "image_generation_call");
   assert.equal(imageDone.item.result, "iVBORw0KGgoAAAANSUhEUg==");
+  assert.equal(
+    observedEvents.some(event => event.type === "response.web_search_call.searching"),
+    true
+  );
+  assert.equal(
+    observedEvents.some(event =>
+      event.type === "response.output_item.done" && event.itemType === "image_generation_call"
+    ),
+    true
+  );
+  assert.equal(JSON.stringify(observedEvents).includes("[EMAIL_1]"), false);
+  assert.equal(JSON.stringify(observedEvents).includes("iVBORw0KGgoAAAANSUhEUg=="), false);
 });
 
 test("gateway injects requested hosted tools only after privacy sanitization", async t => {
   let captured;
+  let capturedLiteHeader;
   const upstream = await startServer(async (request, response) => {
+    capturedLiteHeader = request.headers["x-openai-internal-codex-responses-lite"];
     captured = await readRequestJson(request);
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(
@@ -1314,12 +1391,16 @@ test("gateway injects requested hosted tools only after privacy sanitization", a
   }];
   const response = await fetch(`${gateway.baseURL}/responses`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-openai-internal-codex-responses-lite": "true"
+    },
     body: JSON.stringify(body)
   });
   assert.equal(response.status, 200, await response.text());
 
   assert.ok(captured);
+  assert.equal(capturedLiteHeader, undefined);
   assert.equal(JSON.stringify(captured).includes(PRIVATE_EMAIL), false);
   assert.equal(captured.instructions.includes("[EMAIL_1]"), true);
   assert.deepEqual(
@@ -1334,6 +1415,89 @@ test("gateway injects requested hosted tools only after privacy sanitization", a
   assert.deepEqual(captured.tools[2], { type: "image_generation", output_format: "png" });
   assert.equal(observed.length, 1);
   assert.deepEqual(observed[0].tools, captured.tools);
+});
+
+test("gateway sanitizes standalone image prompts and preserves image responses unchanged", async t => {
+  const upstreamBody = Buffer.from(JSON.stringify({
+    created: 1778832973,
+    background: "opaque",
+    data: [{ b64_json: "UE5HX0JJTkFSWV9QQVlMT0FE" }],
+    quality: "medium",
+    size: "1024x1024"
+  }));
+  let capturedBody;
+  let capturedTurnId;
+  const upstream = await startServer(async (request, response) => {
+    capturedTurnId = request.headers["x-codex-image-turn-id"];
+    capturedBody = await readRequestJson(request);
+    response.writeHead(200, {
+      "content-type": "application/json",
+      "content-length": String(upstreamBody.length)
+    });
+    response.end(upstreamBody);
+  });
+  t.after(() => upstream.close());
+
+  const root = await createTestTempDir("privacyai-image-generation-route-");
+  const observed = [];
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    baseDir: root,
+    verificationDbPath: join(root, "context.sqlite3"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true,
+    onSanitizedRequest: (body, metadata) => observed.push({ body, metadata })
+  });
+  t.after(() => gateway.close());
+
+  const turnId = "019ff2e2-b1db-7090-a1ed-3e05cca7f6bd";
+  const response = await fetch(`${gateway.baseURL}/images/generations`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-codex-image-turn-id": turnId
+    },
+    body: JSON.stringify({
+      prompt: `Create a badge for ${PRIVATE_EMAIL}`,
+      background: "auto",
+      model: "gpt-image-2",
+      quality: "auto",
+      size: "auto"
+    })
+  });
+  const responseBytes = Buffer.from(await response.arrayBuffer());
+  assert.equal(response.status, 200);
+  assert.deepEqual(responseBytes, upstreamBody);
+  assert.equal(capturedTurnId, turnId);
+  assert.deepEqual(capturedBody, {
+    prompt: "Create a badge for [EMAIL_1]",
+    background: "auto",
+    model: "gpt-image-2",
+    quality: "auto",
+    size: "auto"
+  });
+  assert.equal(JSON.stringify(capturedBody).includes(PRIVATE_EMAIL), false);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].metadata.route, "images_generations");
+  assert.equal(observed[0].metadata.sessionKey, `codex-image:${turnId}`);
+
+  const legacyResponse = await fetch(`${gateway.baseURL}/images/generations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      prompt: `Create another badge for ${PRIVATE_EMAIL}`,
+      background: "auto",
+      model: "gpt-image-2",
+      quality: "auto",
+      size: "auto"
+    })
+  });
+  assert.equal(legacyResponse.status, 200);
+  await legacyResponse.arrayBuffer();
+  assert.equal(capturedTurnId, undefined);
+  assert.equal(capturedBody.prompt, "Create another badge for [EMAIL_1]");
+  assert.equal(observed.length, 2);
+  assert.match(observed[1].metadata.sessionKey, /^codex-image:request-[a-f0-9]{32}$/);
 });
 
 test("restoreResponseItem restores string outputs and JSON-sensitive function arguments", () => {

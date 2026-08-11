@@ -54,6 +54,7 @@ export {
   restoreCodexCompactResponse,
   restoreCodexJsonResponse,
   restoreResponseItem,
+  sanitizeCodexImageGenerationRequestBody,
   sanitizeCodexMetadataHeaders,
   sanitizeCodexRequestBody
 } from "./codex-request-transform.js";
