@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   assertNoProtectedOriginalsInValue,
+  parsePrivacyPlaceholder,
   normalizeSessionMap,
   rebaseSessionAdditions,
   restoreText,
@@ -114,11 +115,16 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     );
   }
 
+  const validatedProtocolStrings = collectValidatedCodexProtocolStrings(transformed);
   const initialSessionMap = pruneCodexArgumentKeyMappings(
     transformed,
     options.sessionMap || {}
   );
-  const { slots, schemaTraces } = collectModelVisibleSlots(transformed, initialSessionMap);
+  const immutableSessionMap = filterCodexClassifierProtocolCollisions(
+    initialSessionMap,
+    validatedProtocolStrings
+  );
+  const { slots, schemaTraces } = collectModelVisibleSlots(transformed, immutableSessionMap);
   const imageSlots = collectImageSlots(transformed.input, ["input"]);
   const maxImages = Number(options.maxImagesPerRequest ?? DEFAULT_MAX_IMAGES_PER_REQUEST);
   if (!Number.isSafeInteger(maxImages) || maxImages <= 0) {
@@ -285,8 +291,13 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
 
   const transformed = deepClone(body);
   const recoverableProtocolKeys = collectLegacyCodexProtocolKeys(transformed);
+  const validatedProtocolStrings = collectValidatedCodexProtocolStrings(transformed);
   const completeMap = pruneCodexArgumentKeyMappings(transformed, sessionMap);
-  const { slots } = collectModelVisibleSlots(transformed, completeMap);
+  const immutableSessionMap = filterCodexClassifierProtocolCollisions(
+    completeMap,
+    validatedProtocolStrings
+  );
+  const { slots } = collectModelVisibleSlots(transformed, immutableSessionMap);
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
   const cacheWrites = [];
   const itemRecords = [];
@@ -362,19 +373,56 @@ function collectImageOutputPayload(outputValue, path, output) {
   }
 }
 
-function collectModelVisibleSlots(transformed, sessionMap = {}) {
+function collectModelVisibleSlots(transformed, sessionMap = {}, options = {}) {
   const slots = [];
   const schemaTraces = [];
+  const context = { sessionMap, schemaTraces, onImmutableString: options.onImmutableString };
   if (typeof transformed.instructions === "string") {
     slots.push(slot(transformed, ["instructions"]));
   }
-  collectResponseItems(transformed.input, slots, ["input"], { sessionMap, schemaTraces });
-  if (transformed.tools != null) collectToolDefinitions(transformed.tools, slots, ["tools"], { sessionMap, schemaTraces });
+  collectResponseItems(transformed.input, slots, ["input"], context);
+  if (transformed.tools != null) collectToolDefinitions(transformed.tools, slots, ["tools"], context);
   if (transformed.text?.format?.schema != null) {
     const schemaPath = ["text", "format", "schema"];
-    collectSchemaSlots(transformed.text.format.schema, slots, schemaPath, sessionMap, schemaTraces);
+    collectSchemaSlots(
+      transformed.text.format.schema,
+      slots,
+      schemaPath,
+      sessionMap,
+      schemaTraces,
+      options.onImmutableString
+    );
   }
   return { slots, schemaTraces };
+}
+
+function collectValidatedCodexProtocolStrings(body) {
+  const protocolStrings = new Set();
+  collectModelVisibleSlots(body, {}, {
+    onImmutableString(value) {
+      protocolStrings.add(value.toLocaleLowerCase("en-US"));
+    }
+  });
+  return protocolStrings;
+}
+
+function filterCodexClassifierProtocolCollisions(sessionMap, protocolStrings) {
+  if (!(protocolStrings instanceof Set) || protocolStrings.size === 0) {
+    return { ...(sessionMap || {}) };
+  }
+  return Object.fromEntries(Object.entries(sessionMap || {}).filter(([placeholder, original]) =>
+    parsePrivacyPlaceholder(placeholder)?.category !== "SENSITIVE" ||
+    !mappingCollidesWithCodexProtocol(original, protocolStrings)
+  ));
+}
+
+function mappingCollidesWithCodexProtocol(original, protocolStrings) {
+  if (typeof original !== "string" || original.length === 0) return false;
+  const folded = original.toLocaleLowerCase("en-US");
+  for (const value of protocolStrings) {
+    if (value.includes(folded)) return true;
+  }
+  return false;
 }
 
 export function codexSessionContext(body, fallbackSessionId, headers = {}) {
@@ -1117,7 +1165,14 @@ function collectToolDefinition(tool, slots, path, options = {}) {
           "PrivacyAI blocked a function tool with invalid defer_loading."
         );
       }
-      collectSchemaSlots(tool.parameters, slots, [...path, "parameters"], options.sessionMap, options.schemaTraces);
+      collectSchemaSlots(
+        tool.parameters,
+        slots,
+        [...path, "parameters"],
+        options.sessionMap,
+        options.schemaTraces,
+        options.onImmutableString
+      );
       return;
     case "namespace":
       if (options.nested) {
@@ -1164,7 +1219,14 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         );
       }
       collectRequiredString(tool, "description", slots, path);
-      collectSchemaSlots(tool.parameters, slots, [...path, "parameters"], options.sessionMap, options.schemaTraces);
+      collectSchemaSlots(
+        tool.parameters,
+        slots,
+        [...path, "parameters"],
+        options.sessionMap,
+        options.schemaTraces,
+        options.onImmutableString
+      );
       return;
     case "custom":
       if (options.nested) {
@@ -1189,6 +1251,7 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         options.sessionMap,
         "custom Lark grammar"
       );
+      options.onImmutableString?.(tool.format.definition);
       return;
     case "web_search":
       throw gatewayError(
@@ -1203,8 +1266,15 @@ function collectToolDefinition(tool, slots, path, options = {}) {
   }
 }
 
-function collectSchemaSlots(value, slots, path, sessionMap, schemaTraces) {
-  const collected = collectCodexJsonSchema(value, path, sessionMap);
+function collectSchemaSlots(
+  value,
+  slots,
+  path,
+  sessionMap,
+  schemaTraces,
+  onImmutableString
+) {
+  const collected = collectCodexJsonSchema(value, path, sessionMap, { onImmutableString });
   collected.trace.path = path;
   slots.push(...collected.slots);
   schemaTraces?.push(collected.trace);

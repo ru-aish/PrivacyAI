@@ -1039,6 +1039,42 @@ test("Codex text.format schema uses the same immutable policy, including boolean
   assert.equal(booleanResult.body.text.format.schema, true);
 });
 
+test("Codex classifier false positives cannot poison later immutable schemas", async () => {
+  const body = sampleRequest();
+  body.tools = [{
+    type: "namespace",
+    name: "collaboration",
+    description: "Collaboration tools.",
+    tools: [{
+      type: "function",
+      name: "spawn_agent",
+      description: "Spawn one collaboration agent.",
+      strict: false,
+      parameters: {
+        type: "object",
+        properties: {
+          fork_turns: { type: "boolean" },
+          message: { type: "string" },
+          task_name: { type: "string" }
+        },
+        required: ["message"],
+        additionalProperties: false
+      }
+    }]
+  }];
+  const parameters = structuredClone(body.tools[0].tools[0].parameters);
+  const classifierFalsePositive = {
+    "[PAI1_SENSITIVE_AAAAAAAAAAAAAAAAAAAAAAAA]": "turn"
+  };
+
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({
+    sanitizer: deterministicSanitizer,
+    sessionMap: classifierFalsePositive
+  }));
+
+  assert.deepEqual(result.body.tools[0].tools[0].parameters, parameters);
+});
+
 test("Codex schema policy fails closed for detectable or known protected immutable identifiers and malformed schemas", async () => {
   const body = sampleRequest();
   body.tools[0].parameters = {
