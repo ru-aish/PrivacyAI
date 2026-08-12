@@ -3,6 +3,8 @@ import { mkdir, readFile, readdir, readlink, rm, writeFile } from "node:fs/promi
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
+import { createPrivacyError } from "@privacy-ai/sdk";
+
 import { isSameLiveProcess, readProcessStartIdentity } from "./process-identity.js";
 
 const DEFAULT_LOCK_DIR = join(homedir(), ".local", "state", "privacyai", "launches");
@@ -120,11 +122,18 @@ function isPrivacyAiWrapperProcess(args, flavor) {
 }
 
 function duplicateLaunchError(flavor, ownerPid) {
-  const duplicate = new Error(
+  const publicMessage =
     `PrivacyAI already has an active ${flavor} session for this working directory. ` +
-    "Close that session before starting another one."
-  );
-  duplicate.code = "PRIVACYAI_AGENT_ALREADY_RUNNING";
+    "Close that session before starting another one.";
+  const duplicate = createPrivacyError({
+    code: "PRIVACYAI_AGENT_ALREADY_RUNNING",
+    category: "internal",
+    phase: "startup",
+    status: 409,
+    retryable: false,
+    message: publicMessage,
+    publicMessage
+  });
   duplicate.ownerPid = Number(ownerPid);
   return duplicate;
 }
