@@ -146,33 +146,41 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     const sanitizeImage = typeof options.imageSanitizer === "function"
       ? options.imageSanitizer
       : options.imageSanitizer?.sanitize?.bind(options.imageSanitizer);
-    if (typeof sanitizeImage !== "function") {
-      throw gatewayError(
-        "PRIVACYAI_CODEX_IMAGE_SANITIZER_REQUIRED",
-        "PrivacyAI blocked image content because no local image sanitizer is available."
-      );
-    }
+    const isProviderGeneratedImage = typeof options.isProviderGeneratedImage === "function"
+      ? options.isProviderGeneratedImage
+      : null;
     for (let imageIndex = 0; imageIndex < imageSlots.length; imageIndex += 1) {
       throwIfAborted(options.signal);
       const entry = imageSlots[imageIndex];
-      const result = await sanitizeImage(entry.value, {
-        sanitizer: options.sanitizer,
-        identity: options.identity,
-        sessionMap: imageSessionMap,
-        maxContextChars: options.maxContextChars,
-        maxContextTokens: options.maxContextTokens,
-        tokenCounter: options.tokenCounter,
-        signal: options.signal,
-        onBatchComplete: options.onBatchComplete
-      });
-      if (!result || typeof result.imageUrl !== "string") {
-        throw gatewayError(
-          "PRIVACYAI_CODEX_INVALID_SANITIZED_IMAGE",
-          "PrivacyAI blocked the Codex request because image sanitization returned an invalid result."
-        );
+      const providerGenerated = isProviderGeneratedImage
+        ? await isProviderGeneratedImage(entry.value)
+        : false;
+      if (!providerGenerated) {
+        if (typeof sanitizeImage !== "function") {
+          throw gatewayError(
+            "PRIVACYAI_CODEX_IMAGE_SANITIZER_REQUIRED",
+            "PrivacyAI blocked image content because no local image sanitizer is available."
+          );
+        }
+        const result = await sanitizeImage(entry.value, {
+          sanitizer: options.sanitizer,
+          identity: options.identity,
+          sessionMap: imageSessionMap,
+          maxContextChars: options.maxContextChars,
+          maxContextTokens: options.maxContextTokens,
+          tokenCounter: options.tokenCounter,
+          signal: options.signal,
+          onBatchComplete: options.onBatchComplete
+        });
+        if (!result || typeof result.imageUrl !== "string") {
+          throw gatewayError(
+            "PRIVACYAI_CODEX_INVALID_SANITIZED_IMAGE",
+            "PrivacyAI blocked the Codex request because image sanitization returned an invalid result."
+          );
+        }
+        mergeDetectedMappings(imageSessionMap, imageSessionMapAdditions, result.sessionMapAdditions);
+        setAtPath(transformed, entry.path, result.imageUrl);
       }
-      mergeDetectedMappings(imageSessionMap, imageSessionMapAdditions, result.sessionMapAdditions);
-      setAtPath(transformed, entry.path, result.imageUrl);
       if (typeof options.onArtifactComplete === "function") {
         await options.onArtifactComplete({
           artifactIndex: imageIndex,

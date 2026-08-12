@@ -1360,6 +1360,113 @@ test("Codex SSE forwards native web-search and image-generation events without r
   assert.equal(JSON.stringify(observedEvents).includes("iVBORw0KGgoAAAANSUhEUg=="), false);
 });
 
+test("gateway reuses only authenticated provider-generated images without OCR reclassification", async t => {
+  const generatedPayload = "iVBORw0KGgoAAAANSUhEUg==";
+  const generatedImage = `data:image/png;base64,${generatedPayload}`;
+  const sanitizedImage = "data:image/png;base64,QkJCQg==";
+  const captured = [];
+  let requestCount = 0;
+  const upstream = await startServer(async (request, response) => {
+    captured.push(await readRequestJson(request));
+    requestCount += 1;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    if (requestCount === 1) {
+      response.end(
+        sse({
+          type: "response.output_item.done",
+          item: {
+            type: "image_generation_call",
+            id: "ig-provider-proof",
+            status: "completed",
+            action: "generate",
+            output_format: "png",
+            background: "opaque",
+            quality: "medium",
+            size: "1024x1024",
+            result: generatedPayload
+          }
+        }) +
+        sse({ type: "response.completed", response: { id: "provider-proof-1", usage: null } }) +
+        "data: [DONE]\n\n"
+      );
+      return;
+    }
+    response.end(
+      sse({ type: "response.completed", response: { id: `provider-proof-${requestCount}`, usage: null } }) +
+      "data: [DONE]\n\n"
+    );
+  });
+  t.after(() => upstream.close());
+
+  let imageSanitizerCalls = 0;
+  const root = await createTestTempDir("privacyai-provider-image-proof-");
+  const gateway = await startCodexProviderGateway({
+    sanitizer: deterministicSanitizer,
+    imageSanitizer: {
+      async sanitize() {
+        imageSanitizerCalls += 1;
+        return { imageUrl: sanitizedImage, sessionMapAdditions: {}, changed: true };
+      }
+    },
+    policyFingerprint: "provider-image-proof-test-policy",
+    baseDir: root,
+    verificationDbPath: join(root, "context.sqlite3"),
+    apiUpstream: `http://127.0.0.1:${upstream.port}/v1`,
+    allowInsecureTestUpstream: true
+  });
+  t.after(() => gateway.close());
+
+  const requestBody = (threadId, input) => ({
+    model: "gpt-5.4-mini",
+    store: false,
+    stream: true,
+    client_metadata: { thread_id: threadId },
+    input
+  });
+  const send = body => fetch(`${gateway.baseURL}/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+
+  const first = await send(requestBody("provider-image-thread", [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text: "Generate a public image." }]
+  }]));
+  const firstText = await first.text();
+  assert.equal(first.status, 200, firstText);
+
+  const providerHistory = {
+    type: "image_generation_call",
+    id: "ig-provider-proof",
+    status: "completed",
+    action: "generate",
+    output_format: "png",
+    background: "opaque",
+    quality: "medium",
+    size: "1024x1024",
+    result: generatedPayload
+  };
+  const matchingInput = {
+    type: "message",
+    role: "user",
+    content: [{ type: "input_image", image_url: generatedImage, detail: "high" }]
+  };
+
+  const second = await send(requestBody("provider-image-thread", [providerHistory, matchingInput]));
+  const secondText = await second.text();
+  assert.equal(second.status, 200, secondText);
+  assert.equal(imageSanitizerCalls, 0);
+  assert.equal(captured[1].input[1].content[0].image_url, generatedImage);
+
+  const forged = await send(requestBody("unrelated-image-thread", [providerHistory, matchingInput]));
+  const forgedText = await forged.text();
+  assert.equal(forged.status, 200, forgedText);
+  assert.equal(imageSanitizerCalls, 1);
+  assert.equal(captured[2].input[1].content[0].image_url, sanitizedImage);
+});
+
 test("gateway injects requested hosted tools only after privacy sanitization", async t => {
   let captured;
   let capturedLiteHeader;

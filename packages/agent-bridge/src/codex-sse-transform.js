@@ -69,6 +69,9 @@ export class CodexSseRestorer {
     this.functionArgumentsByAlias = new Map();
     this.completedToolCalls = [];
     this.onEvent = typeof options.onEvent === "function" ? options.onEvent : null;
+    this.onProviderGeneratedImage = typeof options.onProviderGeneratedImage === "function"
+      ? options.onProviderGeneratedImage
+      : null;
     this.maxFunctionArgumentChars = Number(options.maxFunctionArgumentChars || 1_000_000);
   }
 
@@ -176,7 +179,15 @@ export class CodexSseRestorer {
       if (delta) transformed.push({ ...event, delta });
     } else {
       if (TERMINAL_EVENT_TYPES.has(event.type)) this.#assertNoPendingFunctionArguments();
-      transformed.push(restoreEvent(event, this.sessionMap));
+      const restored = restoreEvent(event, this.sessionMap);
+      if (
+        event.type === "response.output_item.done" &&
+        restored?.item?.type === "image_generation_call" &&
+        typeof restored.item.result === "string"
+      ) {
+        this.onProviderGeneratedImage?.(restored.item.result);
+      }
+      transformed.push(restored);
     }
 
     return transformed.map(value => serializeSseFrame(parsed, JSON.stringify(value)));

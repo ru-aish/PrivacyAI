@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 
 import { restoreText } from "@privacy-ai/sdk";
@@ -329,6 +329,11 @@ async function handleRequestCore(request, response, context) {
     const result = await sanitizeCodexRequestBody(body, {
       sanitizer: context.sanitizer,
       imageSanitizer: context.imageSanitizer,
+      isProviderGeneratedImage: imageUrl => hasProviderGeneratedImageProof(
+        context,
+        [identity.sessionKey, ...(currentThread.parentSessionKeys || []), ...identity.parentSessionKeys],
+        imageUrl
+      ),
       identity: privacyIdentity,
       identityRoot: context.identityRoot,
       sessionMap,
@@ -656,7 +661,12 @@ async function proxySseResponse(
   options = {}
 ) {
   const restorer = new CodexSseRestorer(sessionMap, {
-    onEvent: context.onProviderEvent
+    onEvent: context.onProviderEvent,
+    onProviderGeneratedImage: result => rememberProviderGeneratedImageProof(
+      context,
+      options.sessionKey,
+      result
+    )
   });
   const iterator = upstreamResponse[Symbol.asyncIterator]();
   const staged = [];
@@ -947,6 +957,69 @@ function runVerificationStoreOperation(context, operation) {
     signal: context.requestSignal,
     timeoutMs: context.verificationRetryTimeoutMs
   });
+}
+
+function rememberProviderGeneratedImageProof(context, sessionKey, result) {
+  if (typeof sessionKey !== "string" || !sessionKey) return;
+  const contentHash = providerGeneratedResultHash(result);
+  if (!contentHash) return;
+  const cacheKey = providerGeneratedImageProofKey(sessionKey, contentHash);
+  try {
+    context.verificationStore.putVerification({
+      cacheKey,
+      contentHash,
+      artifactType: "provider_generated_image",
+      policyFingerprint: context.policyFingerprint,
+      sessionMapAdditions: {},
+      identityKeyId: context.identityRoot?.keyId || ""
+    });
+  } catch {
+    // Proof caching is an optimization. A write failure keeps the next image
+    // on the normal local sanitization path instead of weakening the boundary.
+  }
+}
+
+function hasProviderGeneratedImageProof(context, sessionKeys, imageUrl) {
+  const contentHash = providerGeneratedInputHash(imageUrl);
+  if (!contentHash) return false;
+  for (const sessionKey of [...new Set(sessionKeys.filter(value => typeof value === "string" && value))]) {
+    try {
+      const proof = context.verificationStore.getVerification(
+        providerGeneratedImageProofKey(sessionKey, contentHash),
+        context.policyFingerprint
+      );
+      if (proof?.artifactType === "provider_generated_image" && proof.contentHash === contentHash) {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function providerGeneratedImageProofKey(sessionKey, contentHash) {
+  return verificationFingerprint({
+    boundary: "codex-provider-generated-image",
+    version: 1,
+    sessionKey,
+    contentHash
+  });
+}
+
+function providerGeneratedResultHash(result) {
+  if (typeof result !== "string" || !result || /[\r\n\0]/.test(result)) return null;
+  const dataUrl = /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(result);
+  const payload = dataUrl?.[1] || (/^[A-Za-z0-9+/]+={0,2}$/.test(result) ? result : null);
+  if (!payload) return null;
+  return createHash("sha256").update(payload).digest("hex");
+}
+
+function providerGeneratedInputHash(imageUrl) {
+  if (typeof imageUrl !== "string") return null;
+  const match = /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(imageUrl);
+  if (!match?.[1]) return null;
+  return createHash("sha256").update(match[1]).digest("hex");
 }
 
 function sessionCache(context, sessionKey) {
