@@ -505,6 +505,19 @@ test("sanitizeStructuredValue preserves protocol object keys when key sanitizati
   assert.deepEqual(result.sessionMapAdditions, { "[EMAIL_1]": privateEmail });
 });
 
+test("sanitizeStructuredValue leak verification honors disabled protocol-key sanitization", async () => {
+  const result = await sanitizeStructuredValue({ cell_id: "safe value" }, {
+    sanitizeObjectKeys: false,
+    sessionMap: {
+      "[PAI1_SENSITIVE_AAAAAAAAAAAAAAAAAAAAAAAA]": "cell_id"
+    },
+    sanitizer: async text => ({ sanitizedPrompt: text, sessionMap: {} })
+  });
+
+  assert.deepEqual(result.value, { cell_id: "safe value" });
+  assert.deepEqual(result.sessionMapAdditions, {});
+});
+
 test("chunk overlap contains every accepted 512-character private span", async () => {
   const secret = "S".repeat(512);
   const input = "x".repeat(1420) + secret + "y".repeat(1000);

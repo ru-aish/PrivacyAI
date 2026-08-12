@@ -110,7 +110,9 @@ export async function sanitizeStructuredValue(value, options = {}) {
   const sanitizeKnown = compileKnownSanitizer(state.completeMap);
   const resolved = slots.map(slot => sanitizeKnown(slot.value));
   const sanitizedValue = rebuildStructuredValue(template, resolved);
-  assertNoProtectedOriginalsInValue(sanitizedValue, state.completeMap);
+  assertNoProtectedOriginalsInValue(sanitizedValue, state.completeMap, {
+    includeKeys: options.sanitizeObjectKeys
+  });
 
   const identityMapAdditions = options.identity?.describeSessionMap?.(state.additions, {
     domain: artifactType
