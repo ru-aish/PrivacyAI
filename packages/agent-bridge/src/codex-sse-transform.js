@@ -47,6 +47,7 @@ const INTERNAL_EVENT_TYPES = new Set([
 ]);
 
 const SUPPRESSED_EVENT_TYPES = new Set([
+  "keepalive",
   "response.in_progress",
   "response.queued",
   "response.content_part.added",

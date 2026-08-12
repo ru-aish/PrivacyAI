@@ -1295,6 +1295,11 @@ test("Codex SSE forwards native web-search and image-generation events without r
       sequence_number: 4
     }),
     sse({
+      type: "keepalive",
+      payload: "[EMAIL_1]",
+      sequence_number: 4
+    }),
+    sse({
       type: "response.image_generation_call.partial_image",
       item_id: "ig-stream",
       output_index: 1,
@@ -1332,6 +1337,7 @@ test("Codex SSE forwards native web-search and image-generation events without r
   ].join(""));
   assert.equal(events.some(event => event.type === "response.web_search_call.searching"), true);
   assert.equal(events.some(event => event.type === "response.image_generation_call.generating"), true);
+  assert.equal(events.some(event => event.type === "keepalive"), false);
   assert.equal(events.some(event => event.type === "response.image_generation_call.partial_image"), true);
   const webDone = events.find(event => event.type === "response.output_item.done" && event.item?.type === "web_search_call");
   assert.equal(webDone.item.action.query, "[EMAIL_1]");
@@ -1343,6 +1349,7 @@ test("Codex SSE forwards native web-search and image-generation events without r
     observedEvents.some(event => event.type === "response.web_search_call.searching"),
     true
   );
+  assert.equal(observedEvents.some(event => event.type === "keepalive"), true);
   assert.equal(
     observedEvents.some(event =>
       event.type === "response.output_item.done" && event.itemType === "image_generation_call"
