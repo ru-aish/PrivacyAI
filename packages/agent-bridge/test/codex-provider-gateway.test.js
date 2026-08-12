@@ -1097,6 +1097,46 @@ test("Codex classifier false positives cannot poison later immutable schemas", a
   assert.deepEqual(result.body.tools[0].tools[0].parameters, parameters);
 });
 
+test("Codex provider aliases from classifier false positives cannot re-poison immutable custom grammars", async () => {
+  const body = sampleRequest();
+  const grammar = [
+    "start: begin_patch hunk+ end_patch",
+    'begin_patch: "*** Begin Patch" LF',
+    'hunk: "*** Update File: " PATH LF',
+    'end_patch: "*** End Patch" LF',
+    "PATH: /[^\\r\\n]+/"
+  ].join("\n");
+  body.tools = [{
+    type: "custom",
+    name: "apply_patch",
+    description: "Apply a patch",
+    format: { type: "grammar", syntax: "lark", definition: grammar }
+  }];
+  const genericAlias = "[PAI1_SENSITIVE_AAAAAAAAAAAAAAAAAAAAAAAA]";
+  const providerAlias = "privacyai_2dd9e5e14ed4";
+
+  const poisonedMap = {
+    [genericAlias]: "a",
+    [providerAlias]: "a"
+  };
+  const seed = buildCodexRequestVerificationSeed(body, poisonedMap);
+  const cache = new Map(seed.cacheWrites);
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({
+    sanitizer: deterministicSanitizer,
+    sessionMap: poisonedMap,
+    cache: { get: key => cache.get(key) }
+  }));
+  assert.equal(result.body.tools[0].format.definition, grammar);
+
+  assert.throws(
+    () => buildCodexRequestVerificationSeed(body, {
+      ...poisonedMap,
+      "[PAI1_API_KEY_BBBBBBBBBBBBBBBBBBBBBBBB]": "a"
+    }),
+    error => error?.code === "PRIVACYAI_CODEX_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE"
+  );
+});
+
 test("Codex schema policy fails closed for detectable or known protected immutable identifiers and malformed schemas", async () => {
   const body = sampleRequest();
   body.tools[0].parameters = {

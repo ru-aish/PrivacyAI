@@ -15,7 +15,7 @@ import {
   finalizeCodexJsonSchemaTrace
 } from "./codex-json-schema-policy.js";
 import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
-import { deterministicProviderIdentifier } from "./privacy-identity.js";
+import { deterministicProviderIdentifier, identityDomainForAlias } from "./privacy-identity.js";
 import { assertImmutableToolString } from "./immutable-tool-structure.js";
 
 const ALLOWED_TOP_LEVEL_FIELDS = new Set([
@@ -504,13 +504,29 @@ function collectValidatedCodexProtocolStrings(body) {
 }
 
 function filterCodexClassifierProtocolCollisions(sessionMap, protocolStrings) {
-  if (!(protocolStrings instanceof Set) || protocolStrings.size === 0) {
-    return { ...(sessionMap || {}) };
+  const entries = Object.entries(sessionMap || {});
+  if (!(protocolStrings instanceof Set) || protocolStrings.size === 0 || entries.length === 0) {
+    return Object.fromEntries(entries);
   }
-  return Object.fromEntries(Object.entries(sessionMap || {}).filter(([placeholder, original]) =>
-    parsePrivacyPlaceholder(placeholder)?.category !== "SENSITIVE" ||
-    !mappingCollidesWithCodexProtocol(original, protocolStrings)
-  ));
+
+  const falsePositiveOriginals = new Set(entries
+    .filter(([placeholder, original]) =>
+      parsePrivacyPlaceholder(placeholder)?.category === "SENSITIVE" &&
+      mappingCollidesWithCodexProtocol(original, protocolStrings)
+    )
+    .map(([, original]) => original.toLocaleLowerCase("en-US")));
+  if (falsePositiveOriginals.size === 0) return Object.fromEntries(entries);
+
+  return Object.fromEntries(entries.filter(([placeholder, original]) => {
+    if (
+      typeof original !== "string" ||
+      !falsePositiveOriginals.has(original.toLocaleLowerCase("en-US"))
+    ) {
+      return true;
+    }
+    return parsePrivacyPlaceholder(placeholder)?.category !== "SENSITIVE" &&
+      identityDomainForAlias(placeholder) !== "provider-identifier";
+  }));
 }
 
 function mappingCollidesWithCodexProtocol(original, protocolStrings) {
