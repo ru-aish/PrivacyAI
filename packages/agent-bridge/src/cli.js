@@ -33,7 +33,7 @@ export async function runPrivacyAiCli(argv = process.argv.slice(2), options = {}
         return await runDoctor({ ...options, stdout });
       case "--version":
       case "-v":
-        stdout.write("privacyai 0.0.2\n");
+        stdout.write("privacyai 0.4.0\n");
         return 0;
       case "help":
       case "--help":

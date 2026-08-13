@@ -2,7 +2,7 @@ import { isPrivacyError } from "@privacy-ai/sdk";
 
 import { loadBridgeCli, loadBridgeModule } from "./bridge.js";
 
-export const PRIVACYAI_CLI_VERSION = "0.0.2";
+export const PRIVACYAI_CLI_VERSION = "0.4.0";
 export const CLI_EXIT_CODES = Object.freeze({
   success: 0,
   failure: 1,
