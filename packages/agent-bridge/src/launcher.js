@@ -5,7 +5,11 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadPrivacyConfig } from "./config-store.js";
-import { buildCodexProviderArgs, parseCodexPrivacyMode } from "./codex-provider-config.js";
+import {
+  buildCodexProviderArgs,
+  parseCodexPrivacyMode,
+  resolveCodexHostedToolPolicy
+} from "./codex-provider-config.js";
 import { startCodexProviderGateway } from "./codex-provider-gateway.js";
 import {
   CODEX_TUI_SESSION_ACTION_EXIT_CODE,
@@ -198,6 +202,7 @@ export async function launchNativeTui(flavor, userArgs = [], options = {}) {
         allowInsecureTestUpstream: options.allowInsecureTestUpstream,
         upstreamTimeoutMs: options.upstreamTimeoutMs,
         upstreamIdleTimeoutMs: options.upstreamIdleTimeoutMs,
+        hostedToolPolicy: resolveCodexHostedToolPolicy(forwardedArgs),
         lineageRecorder: options.lineageRecorder || createLineageRecorder(lineageRepository)
       });
       const protectedArgs = buildCodexProviderArgs(gateway.baseURL, options);

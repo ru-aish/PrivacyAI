@@ -27,6 +27,13 @@ const FORWARDED_EVENT_TYPES = new Set([
   "response.output_text.delta",
   "response.output_text.annotation.added",
   "response.custom_tool_call_input.delta",
+  "response.web_search_call.in_progress",
+  "response.web_search_call.searching",
+  "response.web_search_call.completed",
+  "response.image_generation_call.in_progress",
+  "response.image_generation_call.generating",
+  "response.image_generation_call.partial_image",
+  "response.image_generation_call.completed",
   "response.reasoning_summary_text.delta",
   "response.reasoning_summary_text.done",
   "response.reasoning_text.delta",
@@ -40,6 +47,7 @@ const INTERNAL_EVENT_TYPES = new Set([
 ]);
 
 const SUPPRESSED_EVENT_TYPES = new Set([
+  "keepalive",
   "response.in_progress",
   "response.queued",
   "response.content_part.added",
@@ -60,6 +68,10 @@ export class CodexSseRestorer {
     this.deltaStreams = new Map();
     this.functionArgumentsByAlias = new Map();
     this.completedToolCalls = [];
+    this.onEvent = typeof options.onEvent === "function" ? options.onEvent : null;
+    this.onProviderGeneratedImage = typeof options.onProviderGeneratedImage === "function"
+      ? options.onProviderGeneratedImage
+      : null;
     this.maxFunctionArgumentChars = Number(options.maxFunctionArgumentChars || 1_000_000);
   }
 
@@ -132,6 +144,10 @@ export class CodexSseRestorer {
         `PrivacyAI blocked unsupported Codex SSE event type: ${safeEventType(event.type)}`
       );
     }
+    this.onEvent?.({
+      type: safeEventType(event.type),
+      itemType: event.item?.type ? safeEventType(event.item.type) : null
+    });
 
     const transformed = [];
     if (shouldFlushBefore(event)) transformed.push(...this.#flushAllEvents());
@@ -163,7 +179,15 @@ export class CodexSseRestorer {
       if (delta) transformed.push({ ...event, delta });
     } else {
       if (TERMINAL_EVENT_TYPES.has(event.type)) this.#assertNoPendingFunctionArguments();
-      transformed.push(restoreEvent(event, this.sessionMap));
+      const restored = restoreEvent(event, this.sessionMap);
+      if (
+        event.type === "response.output_item.done" &&
+        restored?.item?.type === "image_generation_call" &&
+        typeof restored.item.result === "string"
+      ) {
+        this.onProviderGeneratedImage?.(restored.item.result);
+      }
+      transformed.push(restored);
     }
 
     return transformed.map(value => serializeSseFrame(parsed, JSON.stringify(value)));

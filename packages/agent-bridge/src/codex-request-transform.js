@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   assertNoProtectedOriginalsInValue,
+  parsePrivacyPlaceholder,
   normalizeSessionMap,
   rebaseSessionAdditions,
   restoreText,
@@ -14,7 +15,7 @@ import {
   finalizeCodexJsonSchemaTrace
 } from "./codex-json-schema-policy.js";
 import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
-import { deterministicProviderIdentifier } from "./privacy-identity.js";
+import { deterministicProviderIdentifier, identityDomainForAlias } from "./privacy-identity.js";
 import { assertImmutableToolString } from "./immutable-tool-structure.js";
 
 const ALLOWED_TOP_LEVEL_FIELDS = new Set([
@@ -53,6 +54,7 @@ const CODEX_REQUEST_HEADER_ALLOWLIST = new Set([
   "x-client-request-id",
   "x-codex-beta-features",
   "x-codex-installation-id",
+  "x-codex-image-turn-id",
   "x-codex-parent-thread-id",
   "x-codex-turn-metadata",
   "x-codex-turn-state",
@@ -114,11 +116,16 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     );
   }
 
+  const validatedProtocolStrings = collectValidatedCodexProtocolStrings(transformed);
   const initialSessionMap = pruneCodexArgumentKeyMappings(
     transformed,
     options.sessionMap || {}
   );
-  const { slots, schemaTraces } = collectModelVisibleSlots(transformed, initialSessionMap);
+  const immutableSessionMap = filterCodexClassifierProtocolCollisions(
+    initialSessionMap,
+    validatedProtocolStrings
+  );
+  const { slots, schemaTraces } = collectModelVisibleSlots(transformed, immutableSessionMap);
   const imageSlots = collectImageSlots(transformed.input, ["input"]);
   const maxImages = Number(options.maxImagesPerRequest ?? DEFAULT_MAX_IMAGES_PER_REQUEST);
   if (!Number.isSafeInteger(maxImages) || maxImages <= 0) {
@@ -139,33 +146,41 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     const sanitizeImage = typeof options.imageSanitizer === "function"
       ? options.imageSanitizer
       : options.imageSanitizer?.sanitize?.bind(options.imageSanitizer);
-    if (typeof sanitizeImage !== "function") {
-      throw gatewayError(
-        "PRIVACYAI_CODEX_IMAGE_SANITIZER_REQUIRED",
-        "PrivacyAI blocked image content because no local image sanitizer is available."
-      );
-    }
+    const isProviderGeneratedImage = typeof options.isProviderGeneratedImage === "function"
+      ? options.isProviderGeneratedImage
+      : null;
     for (let imageIndex = 0; imageIndex < imageSlots.length; imageIndex += 1) {
       throwIfAborted(options.signal);
       const entry = imageSlots[imageIndex];
-      const result = await sanitizeImage(entry.value, {
-        sanitizer: options.sanitizer,
-        identity: options.identity,
-        sessionMap: imageSessionMap,
-        maxContextChars: options.maxContextChars,
-        maxContextTokens: options.maxContextTokens,
-        tokenCounter: options.tokenCounter,
-        signal: options.signal,
-        onBatchComplete: options.onBatchComplete
-      });
-      if (!result || typeof result.imageUrl !== "string") {
-        throw gatewayError(
-          "PRIVACYAI_CODEX_INVALID_SANITIZED_IMAGE",
-          "PrivacyAI blocked the Codex request because image sanitization returned an invalid result."
-        );
+      const providerGenerated = isProviderGeneratedImage
+        ? await isProviderGeneratedImage(entry.value)
+        : false;
+      if (!providerGenerated) {
+        if (typeof sanitizeImage !== "function") {
+          throw gatewayError(
+            "PRIVACYAI_CODEX_IMAGE_SANITIZER_REQUIRED",
+            "PrivacyAI blocked image content because no local image sanitizer is available."
+          );
+        }
+        const result = await sanitizeImage(entry.value, {
+          sanitizer: options.sanitizer,
+          identity: options.identity,
+          sessionMap: imageSessionMap,
+          maxContextChars: options.maxContextChars,
+          maxContextTokens: options.maxContextTokens,
+          tokenCounter: options.tokenCounter,
+          signal: options.signal,
+          onBatchComplete: options.onBatchComplete
+        });
+        if (!result || typeof result.imageUrl !== "string") {
+          throw gatewayError(
+            "PRIVACYAI_CODEX_INVALID_SANITIZED_IMAGE",
+            "PrivacyAI blocked the Codex request because image sanitization returned an invalid result."
+          );
+        }
+        mergeDetectedMappings(imageSessionMap, imageSessionMapAdditions, result.sessionMapAdditions);
+        setAtPath(transformed, entry.path, result.imageUrl);
       }
-      mergeDetectedMappings(imageSessionMap, imageSessionMapAdditions, result.sessionMapAdditions);
-      setAtPath(transformed, entry.path, result.imageUrl);
       if (typeof options.onArtifactComplete === "function") {
         await options.onArtifactComplete({
           artifactIndex: imageIndex,
@@ -268,6 +283,94 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
   };
 }
 
+export async function sanitizeCodexImageGenerationRequestBody(body, options = {}) {
+  throwIfAborted(options.signal);
+  assertOnlyKeys(
+    body,
+    new Set(["prompt", "background", "model", "n", "quality", "size"]),
+    "image generation request"
+  );
+  if (
+    typeof body.prompt !== "string" ||
+    body.prompt.length === 0 ||
+    body.prompt.length > 1_000_000
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_IMAGE_REQUEST",
+      "PrivacyAI blocked an invalid Codex image-generation prompt."
+    );
+  }
+  if (body.background != null && !new Set(["auto", "opaque", "transparent"]).has(body.background)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_IMAGE_REQUEST",
+      "PrivacyAI blocked an unsupported Codex image-generation background."
+    );
+  }
+  assertProtocolToken(body.model, "image generation model", 160);
+  if (body.n != null && (!Number.isSafeInteger(body.n) || body.n < 1 || body.n > 10)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_IMAGE_REQUEST",
+      "PrivacyAI blocked an invalid Codex image-generation count."
+    );
+  }
+  if (body.quality != null && !new Set(["auto", "low", "medium", "high"]).has(body.quality)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_IMAGE_REQUEST",
+      "PrivacyAI blocked an unsupported Codex image-generation quality."
+    );
+  }
+  if (
+    body.size != null &&
+    (typeof body.size !== "string" || !/^(?:auto|[1-9][0-9]{1,4}x[1-9][0-9]{1,4})$/.test(body.size))
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_IMAGE_REQUEST",
+      "PrivacyAI blocked an unsupported Codex image-generation size."
+    );
+  }
+  if (typeof options.sanitizer !== "function") {
+    throw new TypeError("Codex image generation transformation requires a sanitizer function.");
+  }
+
+  const transformed = deepClone(body);
+  const artifactResult = await sanitizeModelVisibleArtifacts([{
+    value: transformed.prompt,
+    slotKey: "image_generation/prompt",
+    artifactType: "codex_image_generation_prompt",
+    mutable: true,
+    sanitizeObjectKeys: false,
+    label: "image generation prompt"
+  }], {
+    sanitizer: options.sanitizer,
+    identity: options.identity,
+    identityRoot: options.identityRoot,
+    sessionMap: options.sessionMap || {},
+    cache: options.cache,
+    policyFingerprint: options.policyFingerprint,
+    maxContextChars: options.maxContextChars,
+    maxContextTokens: options.maxContextTokens,
+    tokenCounter: options.tokenCounter,
+    artifactTypePrefix: "codex_image_generation",
+    signal: options.signal,
+    onBatchComplete: options.onBatchComplete,
+    onArtifactComplete: options.onArtifactComplete,
+    invalidShapeError: () => gatewayError(
+      "PRIVACYAI_CODEX_INVALID_IMAGE_REQUEST",
+      "PrivacyAI blocked an image-generation request whose prompt shape changed during sanitization."
+    )
+  });
+  transformed.prompt = artifactResult.values[0];
+  return {
+    body: transformed,
+    sessionMap: artifactResult.sessionMap,
+    sessionMapAdditions: artifactResult.sessionMapAdditions,
+    cacheWrites: artifactResult.cacheWrites,
+    itemRecords: artifactResult.itemRecords,
+    policyFingerprint: artifactResult.policyFingerprint,
+    metrics: artifactResult.metrics
+  };
+}
+
 /**
  * Build persistent verification records for a request whose complete
  * model-visible content has already been classified as one atomic startup
@@ -285,8 +388,13 @@ export function buildCodexRequestVerificationSeed(body, sessionMap = {}, options
 
   const transformed = deepClone(body);
   const recoverableProtocolKeys = collectLegacyCodexProtocolKeys(transformed);
+  const validatedProtocolStrings = collectValidatedCodexProtocolStrings(transformed);
   const completeMap = pruneCodexArgumentKeyMappings(transformed, sessionMap);
-  const { slots } = collectModelVisibleSlots(transformed, completeMap);
+  const immutableSessionMap = filterCodexClassifierProtocolCollisions(
+    completeMap,
+    validatedProtocolStrings
+  );
+  const { slots } = collectModelVisibleSlots(transformed, immutableSessionMap);
   const policyFingerprint = String(options.policyFingerprint || "privacyai-agent-strict-v2");
   const cacheWrites = [];
   const itemRecords = [];
@@ -362,19 +470,72 @@ function collectImageOutputPayload(outputValue, path, output) {
   }
 }
 
-function collectModelVisibleSlots(transformed, sessionMap = {}) {
+function collectModelVisibleSlots(transformed, sessionMap = {}, options = {}) {
   const slots = [];
   const schemaTraces = [];
+  const context = { sessionMap, schemaTraces, onImmutableString: options.onImmutableString };
   if (typeof transformed.instructions === "string") {
     slots.push(slot(transformed, ["instructions"]));
   }
-  collectResponseItems(transformed.input, slots, ["input"], { sessionMap, schemaTraces });
-  if (transformed.tools != null) collectToolDefinitions(transformed.tools, slots, ["tools"], { sessionMap, schemaTraces });
+  collectResponseItems(transformed.input, slots, ["input"], context);
+  if (transformed.tools != null) collectToolDefinitions(transformed.tools, slots, ["tools"], context);
   if (transformed.text?.format?.schema != null) {
     const schemaPath = ["text", "format", "schema"];
-    collectSchemaSlots(transformed.text.format.schema, slots, schemaPath, sessionMap, schemaTraces);
+    collectSchemaSlots(
+      transformed.text.format.schema,
+      slots,
+      schemaPath,
+      sessionMap,
+      schemaTraces,
+      options.onImmutableString
+    );
   }
   return { slots, schemaTraces };
+}
+
+function collectValidatedCodexProtocolStrings(body) {
+  const protocolStrings = new Set();
+  collectModelVisibleSlots(body, {}, {
+    onImmutableString(value) {
+      protocolStrings.add(value.toLocaleLowerCase("en-US"));
+    }
+  });
+  return protocolStrings;
+}
+
+function filterCodexClassifierProtocolCollisions(sessionMap, protocolStrings) {
+  const entries = Object.entries(sessionMap || {});
+  if (!(protocolStrings instanceof Set) || protocolStrings.size === 0 || entries.length === 0) {
+    return Object.fromEntries(entries);
+  }
+
+  const falsePositiveOriginals = new Set(entries
+    .filter(([placeholder, original]) =>
+      parsePrivacyPlaceholder(placeholder)?.category === "SENSITIVE" &&
+      mappingCollidesWithCodexProtocol(original, protocolStrings)
+    )
+    .map(([, original]) => original.toLocaleLowerCase("en-US")));
+  if (falsePositiveOriginals.size === 0) return Object.fromEntries(entries);
+
+  return Object.fromEntries(entries.filter(([placeholder, original]) => {
+    if (
+      typeof original !== "string" ||
+      !falsePositiveOriginals.has(original.toLocaleLowerCase("en-US"))
+    ) {
+      return true;
+    }
+    return parsePrivacyPlaceholder(placeholder)?.category !== "SENSITIVE" &&
+      identityDomainForAlias(placeholder) !== "provider-identifier";
+  }));
+}
+
+function mappingCollidesWithCodexProtocol(original, protocolStrings) {
+  if (typeof original !== "string" || original.length === 0) return false;
+  const folded = original.toLocaleLowerCase("en-US");
+  for (const value of protocolStrings) {
+    if (value.includes(folded)) return true;
+  }
+  return false;
 }
 
 export function codexSessionContext(body, fallbackSessionId, headers = {}) {
@@ -567,11 +728,11 @@ export function restoreResponseItem(item, sessionMap = {}) {
       item.tools = restoreValue(item.tools, sessionMap);
       break;
     case "web_search_call":
+      validateWebSearchCallItem(item);
+      break;
     case "image_generation_call":
-      throw gatewayError(
-        "PRIVACYAI_CODEX_UNSUPPORTED_RESPONSE_ITEM",
-        `PrivacyAI blocked provider-hosted Codex response item type: ${item.type}`
-      );
+      validateImageGenerationCallItem(item);
+      break;
     case "compaction":
     case "context_compaction":
     case "compaction_trigger":
@@ -745,9 +906,18 @@ function collectResponseItem(item, slots, path, context = {}) {
     case "message":
       validateResponseItemShape(
         item,
-        new Set(["type", "id", "role", "content", "phase", "internal_chat_message_metadata_passthrough"]),
+        new Set([
+          "type",
+          "id",
+          "role",
+          "content",
+          "phase",
+          "status",
+          "internal_chat_message_metadata_passthrough"
+        ]),
         "message"
       );
+      validateStatus(item.status, "message status", false);
       if (!new Set(["user", "assistant", "developer", "system"]).has(item.role)) {
         throw gatewayError("PRIVACYAI_CODEX_UNSUPPORTED_INPUT", "PrivacyAI blocked an unsupported Codex message role.");
       }
@@ -769,9 +939,18 @@ function collectResponseItem(item, slots, path, context = {}) {
     case "reasoning":
       validateResponseItemShape(
         item,
-        new Set(["type", "id", "summary", "content", "encrypted_content", "internal_chat_message_metadata_passthrough"]),
+        new Set([
+          "type",
+          "id",
+          "summary",
+          "content",
+          "encrypted_content",
+          "status",
+          "internal_chat_message_metadata_passthrough"
+        ]),
         "reasoning"
       );
+      validateStatus(item.status, "reasoning status", false);
       collectReasoningEntries(item.summary, slots, [...path, "summary"], new Set(["summary_text"]));
       collectReasoningEntries(item.content, slots, [...path, "content"], new Set(["reasoning_text", "text"]));
       validateOpaqueProviderValue(item.encrypted_content, "reasoning encrypted content");
@@ -788,9 +967,19 @@ function collectResponseItem(item, slots, path, context = {}) {
     case "function_call":
       validateResponseItemShape(
         item,
-        new Set(["type", "id", "name", "namespace", "arguments", "call_id", "internal_chat_message_metadata_passthrough"]),
+        new Set([
+          "type",
+          "id",
+          "name",
+          "namespace",
+          "arguments",
+          "call_id",
+          "status",
+          "internal_chat_message_metadata_passthrough"
+        ]),
         "function_call"
       );
+      validateStatus(item.status, "function call status", false);
       collectRequiredProviderIdentifier(item, "name", slots, path);
       collectOptionalProviderIdentifier(item, "namespace", slots, path);
       requireProtocolIdentity(item.call_id, "function call id");
@@ -823,9 +1012,17 @@ function collectResponseItem(item, slots, path, context = {}) {
     case "function_call_output":
       validateResponseItemShape(
         item,
-        new Set(["type", "id", "call_id", "output", "internal_chat_message_metadata_passthrough"]),
+        new Set([
+          "type",
+          "id",
+          "call_id",
+          "output",
+          "status",
+          "internal_chat_message_metadata_passthrough"
+        ]),
         "function_call_output"
       );
+      validateStatus(item.status, "function output status", false);
       requireProtocolIdentity(item.call_id, "function output call id");
       collectOutputPayload(item.output, slots, [...path, "output"]);
       return;
@@ -859,11 +1056,11 @@ function collectResponseItem(item, slots, path, context = {}) {
       collectToolDefinitions(item.tools, slots, [...path, "tools"], context);
       return;
     case "web_search_call":
+      validateWebSearchCallItem(item);
+      return;
     case "image_generation_call":
-      throw gatewayError(
-        "PRIVACYAI_CODEX_UNSUPPORTED_PROVIDER_TOOL",
-        `PrivacyAI blocked provider-hosted Codex history item type: ${item.type}`
-      );
+      validateImageGenerationCallItem(item);
+      return;
     case "compaction":
       validateResponseItemShape(
         item,
@@ -1117,7 +1314,14 @@ function collectToolDefinition(tool, slots, path, options = {}) {
           "PrivacyAI blocked a function tool with invalid defer_loading."
         );
       }
-      collectSchemaSlots(tool.parameters, slots, [...path, "parameters"], options.sessionMap, options.schemaTraces);
+      collectSchemaSlots(
+        tool.parameters,
+        slots,
+        [...path, "parameters"],
+        options.sessionMap,
+        options.schemaTraces,
+        options.onImmutableString
+      );
       return;
     case "namespace":
       if (options.nested) {
@@ -1164,7 +1368,14 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         );
       }
       collectRequiredString(tool, "description", slots, path);
-      collectSchemaSlots(tool.parameters, slots, [...path, "parameters"], options.sessionMap, options.schemaTraces);
+      collectSchemaSlots(
+        tool.parameters,
+        slots,
+        [...path, "parameters"],
+        options.sessionMap,
+        options.schemaTraces,
+        options.onImmutableString
+      );
       return;
     case "custom":
       if (options.nested) {
@@ -1189,12 +1400,14 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         options.sessionMap,
         "custom Lark grammar"
       );
+      options.onImmutableString?.(tool.format.definition);
       return;
     case "web_search":
-      throw gatewayError(
-        "PRIVACYAI_CODEX_UNSUPPORTED_PROVIDER_TOOL",
-        "PrivacyAI blocked a provider-hosted Codex web-search tool."
-      );
+      validateWebSearchToolDefinition(tool);
+      return;
+    case "image_generation":
+      validateImageGenerationToolDefinition(tool);
+      return;
     default:
       throw gatewayError(
         "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION",
@@ -1203,8 +1416,126 @@ function collectToolDefinition(tool, slots, path, options = {}) {
   }
 }
 
-function collectSchemaSlots(value, slots, path, sessionMap, schemaTraces) {
-  const collected = collectCodexJsonSchema(value, path, sessionMap);
+function validateWebSearchToolDefinition(tool) {
+  assertOnlyKeys(
+    tool,
+    new Set([
+      "type",
+      "external_web_access",
+      "search_content_types",
+      "search_context_size",
+      "filters",
+      "user_location"
+    ]),
+    "web search tool"
+  );
+  if (tool.external_web_access != null && typeof tool.external_web_access !== "boolean") {
+    throw invalidProviderToolDefinition("web search external_web_access");
+  }
+  if (tool.search_content_types != null) {
+    if (
+      !Array.isArray(tool.search_content_types) ||
+      tool.search_content_types.some(value => !new Set(["text", "image"]).has(value)) ||
+      new Set(tool.search_content_types).size !== tool.search_content_types.length
+    ) {
+      throw invalidProviderToolDefinition("web search content types");
+    }
+  }
+  if (
+    tool.search_context_size != null &&
+    !new Set(["low", "medium", "high"]).has(tool.search_context_size)
+  ) {
+    throw invalidProviderToolDefinition("web search context size");
+  }
+  if (tool.filters != null) {
+    assertOnlyKeys(tool.filters, new Set(["allowed_domains"]), "web search filters");
+    if (
+      !Array.isArray(tool.filters.allowed_domains) ||
+      tool.filters.allowed_domains.some(value => typeof value !== "string" || value.length === 0 || value.length > 2048)
+    ) {
+      throw invalidProviderToolDefinition("web search allowed domains");
+    }
+  }
+  if (tool.user_location != null) {
+    assertOnlyKeys(
+      tool.user_location,
+      new Set(["type", "city", "country", "region", "timezone"]),
+      "web search user location"
+    );
+    if (tool.user_location.type !== "approximate") {
+      throw invalidProviderToolDefinition("web search user location type");
+    }
+    for (const key of ["city", "country", "region", "timezone"]) {
+      if (
+        tool.user_location[key] != null &&
+        (typeof tool.user_location[key] !== "string" || tool.user_location[key].length > 512)
+      ) {
+        throw invalidProviderToolDefinition(`web search user location ${key}`);
+      }
+    }
+  }
+}
+
+function validateImageGenerationToolDefinition(tool) {
+  assertOnlyKeys(
+    tool,
+    new Set([
+      "type",
+      "output_format",
+      "background",
+      "input_fidelity",
+      "model",
+      "moderation",
+      "output_compression",
+      "partial_images",
+      "quality",
+      "size"
+    ]),
+    "image generation tool"
+  );
+  for (const [key, allowed] of [
+    ["output_format", new Set(["png", "jpeg", "webp"])],
+    ["background", new Set(["auto", "opaque", "transparent"])],
+    ["input_fidelity", new Set(["low", "high"])],
+    ["moderation", new Set(["auto"])],
+    ["quality", new Set(["auto", "low", "medium", "high"])],
+    ["size", new Set(["auto", "1024x1024", "1024x1536", "1536x1024"])]
+  ]) {
+    if (tool[key] != null && !allowed.has(tool[key])) {
+      throw invalidProviderToolDefinition(`image generation ${key}`);
+    }
+  }
+  if (tool.model != null) assertProtocolToken(tool.model, "image generation model", 160);
+  if (
+    tool.output_compression != null &&
+    (!Number.isSafeInteger(tool.output_compression) || tool.output_compression < 0 || tool.output_compression > 100)
+  ) {
+    throw invalidProviderToolDefinition("image generation output compression");
+  }
+  if (
+    tool.partial_images != null &&
+    (!Number.isSafeInteger(tool.partial_images) || tool.partial_images < 0 || tool.partial_images > 3)
+  ) {
+    throw invalidProviderToolDefinition("image generation partial images");
+  }
+}
+
+function invalidProviderToolDefinition(label) {
+  return gatewayError(
+    "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION",
+    `PrivacyAI blocked an invalid Codex ${label}.`
+  );
+}
+
+function collectSchemaSlots(
+  value,
+  slots,
+  path,
+  sessionMap,
+  schemaTraces,
+  onImmutableString
+) {
+  const collected = collectCodexJsonSchema(value, path, sessionMap, { onImmutableString });
   collected.trace.path = path;
   slots.push(...collected.slots);
   schemaTraces?.push(collected.trace);
@@ -1258,6 +1589,7 @@ function isSafeForwardedHeaderValue(name, value) {
     "x-client-request-id",
     "x-codex-beta-features",
     "x-codex-installation-id",
+    "x-codex-image-turn-id",
     "x-codex-parent-thread-id",
     "x-codex-window-id",
     "x-openai-subagent"
@@ -1386,6 +1718,13 @@ function sanitizeInternalMessageMetadata(item) {
   assertProtocolToken(item[key].turn_id, "internal turn id", 256);
 }
 
+function validateProviderItemMetadata(value, label) {
+  if (value == null) return;
+  assertPlainObject(value, label);
+  assertOnlyKeys(value, new Set(["turn_id"]), label);
+  if (value.turn_id != null) assertProtocolToken(value.turn_id, `${label} turn id`, 256);
+}
+
 function validateImmutableCodexToolStructure(value, sessionMap, label) {
   assertImmutableToolString(value, sessionMap, {
     protectedValueError: () => gatewayError(
@@ -1463,6 +1802,159 @@ function validateStatus(value, label, required) {
     throw gatewayError(
       "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
       `PrivacyAI blocked an unsupported Codex ${label}.`
+    );
+  }
+}
+
+function validateWebSearchCallItem(item) {
+  validateResponseItemShape(
+    item,
+    new Set([
+      "type",
+      "id",
+      "status",
+      "action",
+      "metadata",
+      "internal_chat_message_metadata_passthrough"
+    ]),
+    "web search call"
+  );
+  validateProviderItemMetadata(item.metadata, "web search metadata");
+  if (!new Set(["completed", "searching", "in_progress", "incomplete", "failed"]).has(item.status)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex web search status."
+    );
+  }
+  if (item.action == null) return;
+  assertOnlyKeys(
+    item.action,
+    new Set(["type", "query", "queries", "url", "pattern", "sources"]),
+    "web search action"
+  );
+  if (!new Set(["search", "open_page", "find_in_page"]).has(item.action.type)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex web search action."
+    );
+  }
+  for (const key of ["query", "url", "pattern"]) {
+    if (item.action[key] != null && typeof item.action[key] !== "string") {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        `PrivacyAI blocked a non-string Codex web search ${key}.`
+      );
+    }
+  }
+  if (
+    item.action.queries != null &&
+    (!Array.isArray(item.action.queries) || item.action.queries.some(value => typeof value !== "string"))
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked malformed Codex web search queries."
+    );
+  }
+  if (item.action.sources != null) {
+    if (!Array.isArray(item.action.sources)) {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        "PrivacyAI blocked malformed Codex web search sources."
+      );
+    }
+    for (const source of item.action.sources) {
+      assertOnlyKeys(source, new Set(["type", "url", "name"]), "web search source");
+      if (!new Set(["url", "api"]).has(source.type)) {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+          "PrivacyAI blocked an unsupported Codex web search source."
+        );
+      }
+      if (source.url != null && typeof source.url !== "string") {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+          "PrivacyAI blocked a non-string Codex web search source URL."
+        );
+      }
+      if (source.name != null && typeof source.name !== "string") {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+          "PrivacyAI blocked a non-string Codex web search source name."
+        );
+      }
+    }
+  }
+}
+
+function validateImageGenerationCallItem(item) {
+  validateResponseItemShape(
+    item,
+    new Set([
+      "type",
+      "id",
+      "status",
+      "result",
+      "action",
+      "output_format",
+      "background",
+      "quality",
+      "revised_prompt",
+      "size",
+      "metadata",
+      "internal_chat_message_metadata_passthrough"
+    ]),
+    "image generation call"
+  );
+  validateProviderItemMetadata(item.metadata, "image generation metadata");
+  if (!new Set(["completed", "generating", "in_progress", "incomplete", "failed"]).has(item.status)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex image generation status."
+    );
+  }
+  if (item.result != null && typeof item.result !== "string") {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked a non-string Codex image generation result."
+    );
+  }
+  if (item.action != null && !new Set(["generate", "edit", "auto"]).has(item.action)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex image generation action."
+    );
+  }
+  if (item.output_format != null && !new Set(["png", "jpeg", "webp"]).has(item.output_format)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex image generation output format."
+    );
+  }
+  if (item.background != null && !new Set(["auto", "opaque", "transparent"]).has(item.background)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex image generation background."
+    );
+  }
+  if (item.quality != null && !new Set(["auto", "low", "medium", "high"]).has(item.quality)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex image generation quality."
+    );
+  }
+  if (item.revised_prompt != null && typeof item.revised_prompt !== "string") {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked a non-string Codex revised image prompt."
+    );
+  }
+  if (
+    item.size != null &&
+    (typeof item.size !== "string" || !/^(?:auto|[1-9][0-9]{1,4}x[1-9][0-9]{1,4})$/.test(item.size))
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an unsupported Codex image generation size."
     );
   }
 }

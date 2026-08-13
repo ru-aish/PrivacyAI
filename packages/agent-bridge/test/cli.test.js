@@ -174,6 +174,34 @@ test("bridge CLI preserves PrivacyError public messages", async () => {
   assert.doesNotMatch(text, /private-provider-secret@example\.test/);
 });
 
+test("Codex CLI explains an existing live session instead of reporting an internal failure", async () => {
+  const stderr = new PassThrough();
+  let text = "";
+  stderr.on("data", chunk => { text += chunk.toString(); });
+
+  const publicMessage =
+    "PrivacyAI already has an active codex session for this working directory. " +
+    "Close that session before starting another one.";
+  const code = await runPrivacyAiCli(["codex"], {
+    stderr,
+    launchNativeTui: async () => {
+      throw createPrivacyError({
+        code: "PRIVACYAI_AGENT_ALREADY_RUNNING",
+        category: "internal",
+        phase: "startup",
+        status: 409,
+        retryable: false,
+        message: publicMessage,
+        publicMessage
+      });
+    }
+  });
+
+  assert.equal(code, 1);
+  assert.equal(text, `${publicMessage}\n`);
+  assert.doesNotMatch(text, /internal failure/i);
+});
+
 
 test("Codex CLI bounds deferred TUI diagnostics and reports dropped history", async () => {
   const stderr = new PassThrough();

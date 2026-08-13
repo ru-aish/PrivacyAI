@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 
 import { restoreText } from "@privacy-ai/sdk";
@@ -8,6 +8,7 @@ import {
   pruneCodexArgumentKeyMappings,
   restoreCodexCompactResponse,
   restoreCodexJsonResponse,
+  sanitizeCodexImageGenerationRequestBody,
   sanitizeCodexMetadataHeaders,
   sanitizeCodexRequestBody
 } from "./codex-request-transform.js";
@@ -60,6 +61,7 @@ import {
 const LOOPBACK_HOST = "127.0.0.1";
 const DEFAULT_MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 64 * 1024 * 1024;
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_VERIFICATION_RETRY_TIMEOUT_MS = 2500;
@@ -94,6 +96,7 @@ export async function startCodexProviderGateway(options = {}) {
   }
 
   const timeouts = resolveCodexGatewayTimeouts(options);
+  const hostedToolPolicy = normalizeHostedToolPolicy(options.hostedToolPolicy);
   const nonce = options.nonce || randomBytes(24).toString("hex");
   const identityRoot = await openInstallationPrivacyIdentity(options);
   const vault = options.vault || new SessionVault({ ...options, identityRoot });
@@ -141,6 +144,7 @@ export async function startCodexProviderGateway(options = {}) {
     imageSanitizer,
     verificationStore,
     policyFingerprint,
+    hostedToolPolicy,
     serial,
     sessionCaches,
     maintenance,
@@ -253,7 +257,7 @@ async function handleRequestCore(request, response, context) {
   if (suffix === "/health" && request.method === "GET") {
     return writeJson(response, 200, { ok: true });
   }
-  if (!new Set(["/responses", "/responses/compact", "/models"]).has(suffix)) {
+  if (!new Set(["/responses", "/responses/compact", "/models", "/images/generations"]).has(suffix)) {
     return writeJson(response, 404, { error: "PrivacyAI blocked an unsupported Codex provider route." });
   }
   const safeSearch = sanitizeUpstreamSearch(suffix, url.search, context);
@@ -283,6 +287,9 @@ async function handleRequestCore(request, response, context) {
   } catch {
     throw gatewayError("PRIVACYAI_CODEX_INVALID_JSON", "PrivacyAI blocked malformed Codex provider JSON.");
   }
+  if (suffix === "/images/generations") {
+    return proxyImageGeneration(request, response, context, suffix, safeSearch, body);
+  }
   validateRouteRequestBody(suffix, body);
 
   const identity = codexSessionContext(body, undefined, request.headers);
@@ -299,7 +306,9 @@ async function handleRequestCore(request, response, context) {
       currentThread.sessionMap || {}
     );
     let sessionMap = { ...currentSessionMap };
+    const previouslyInheritedParents = new Set(currentThread.parentSessionKeys || []);
     for (const parentSessionKey of identity.parentSessionKeys) {
+      if (previouslyInheritedParents.has(parentSessionKey)) continue;
       const parentVault = await context.vault.load(parentSessionKey);
       const parentThread = await runVerificationStoreOperation(
         context,
@@ -320,6 +329,11 @@ async function handleRequestCore(request, response, context) {
     const result = await sanitizeCodexRequestBody(body, {
       sanitizer: context.sanitizer,
       imageSanitizer: context.imageSanitizer,
+      isProviderGeneratedImage: imageUrl => hasProviderGeneratedImageProof(
+        context,
+        [identity.sessionKey, ...(currentThread.parentSessionKeys || []), ...identity.parentSessionKeys],
+        imageUrl
+      ),
       identity: privacyIdentity,
       identityRoot: context.identityRoot,
       sessionMap,
@@ -334,6 +348,10 @@ async function handleRequestCore(request, response, context) {
       onArtifactComplete: context.onSanitizerArtifactComplete,
       onSchemaTrace: context.onSchemaTrace
     });
+    if (suffix === "/responses") {
+      injectHostedCodexTools(result.body, context.hostedToolPolicy);
+    }
+    const usesHostedTools = hasHostedCodexTools(result.body);
     const completeMap = { ...sessionMap, ...result.sessionMapAdditions };
     const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
       sessionKey: identity.sessionKey, provider: "codex", operation: "responses.create",
@@ -381,7 +399,8 @@ async function handleRequestCore(request, response, context) {
       body: result.body,
       sessionMap: completeMap,
       sessionKey: identity.sessionKey,
-      lineageHandle
+      lineageHandle,
+      usesHostedTools
     };
   });
 
@@ -396,7 +415,8 @@ async function handleRequestCore(request, response, context) {
     transformed.sessionMap,
     transformed.body.stream === true,
     transformed.sessionKey,
-    transformed.lineageHandle
+    transformed.lineageHandle,
+    transformed.usesHostedTools
   );
 }
 
@@ -445,6 +465,90 @@ async function proxyModels(request, response, context, suffix, search) {
   response.end(responseBody);
 }
 
+async function proxyImageGeneration(request, response, context, suffix, search, body) {
+  const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
+  const turnId = sanitizedHeaders["x-codex-image-turn-id"];
+  const sessionKey = turnId
+    ? `codex-image:${turnId}`
+    : `codex-image:request-${randomBytes(16).toString("hex")}`;
+  const privacyIdentity = sessionPrivacyIdentity(context.identityRoot, sessionKey);
+  const transformed = await context.serial.run(sessionKey, async () => {
+    throwIfAborted(context.requestSignal);
+    const currentVault = await context.vault.load(sessionKey);
+    const sessionMap = currentVault?.sessionMap || {};
+    const cache = sessionCache(context, sessionKey);
+    const result = await sanitizeCodexImageGenerationRequestBody(body, {
+      sanitizer: context.sanitizer,
+      identity: privacyIdentity,
+      identityRoot: context.identityRoot,
+      sessionMap,
+      cache,
+      policyFingerprint: context.policyFingerprint,
+      maxContextChars: context.maxContextChars,
+      maxContextTokens: context.maxContextTokens,
+      tokenCounter: context.tokenCounter,
+      signal: context.requestSignal,
+      onBatchComplete: context.onSanitizerBatchComplete,
+      onArtifactComplete: context.onSanitizerArtifactComplete
+    });
+    if (!sessionMapsEqual(sessionMap, result.sessionMap)) {
+      await context.vault.save(sessionKey, result.sessionMap);
+    }
+    await runVerificationStoreOperation(context, () => commitCacheWrites(
+      cache,
+      result.cacheWrites,
+      Number(context.maxCacheEntriesPerSession || 2048),
+      context.verificationStore
+    ));
+    if (typeof context.onSanitizedRequest === "function") {
+      await context.onSanitizedRequest(result.body, {
+        sessionKey,
+        route: "images_generations"
+      });
+    }
+    const lineageHandle = await recordLineageBestEffort(context.lineageRecorder, "protectedRequest", {
+      sessionKey,
+      provider: "codex",
+      operation: "images.generate",
+      model: result.body.model,
+      placeholders: Object.keys(result.sessionMap),
+      signal: context.requestSignal
+    });
+    return { body: result.body, lineageHandle };
+  });
+
+  const rawBody = Buffer.from(JSON.stringify(transformed.body));
+  const upstream = upstreamUrl(request.headers, context, suffix, search);
+  delete sanitizedHeaders["x-openai-internal-codex-responses-lite"];
+  const headers = upstreamHeaders(sanitizedHeaders, upstream, rawBody.length);
+  context.phase = "upstream_connect";
+  let upstreamSent = false;
+  let upstreamResponse;
+  try {
+    upstreamResponse = await requestCodexUpstream(upstream, "POST", headers, rawBody, {
+      signal: context.requestSignal,
+      timeoutMs: context.upstreamTimeoutMs,
+      onRequestSent: () => { upstreamSent = true; }
+    });
+  } catch (error) {
+    if (upstreamSent) await recordFailedProviderResponse(context.lineageRecorder, transformed.lineageHandle);
+    throw error;
+  }
+  context.phase = "upstream_response";
+  const statusCode = upstreamResponse.statusCode || 502;
+  await recordLineageBestEffort(context.lineageRecorder, "providerResponse", transformed.lineageHandle, {
+    success: statusCode >= 200 && statusCode < 300
+  });
+  const raw = await readBoundedHttpBody(
+    upstreamResponse,
+    Number(context.maxImageResponseBytes || DEFAULT_MAX_IMAGE_RESPONSE_BYTES),
+    { destroyOnLimit: true, idleTimeoutMs: context.upstreamIdleTimeoutMs }
+  );
+  forwardResponseHeaders(response, upstreamResponse.headers, false);
+  response.writeHead(statusCode);
+  response.end(raw);
+}
+
 async function proxyTransformed(
   request,
   response,
@@ -455,10 +559,12 @@ async function proxyTransformed(
   sessionMap,
   expectsSse,
   sessionKey,
-  lineageHandle
+  lineageHandle,
+  usesHostedTools
 ) {
   const upstream = upstreamUrl(request.headers, context, suffix, search);
   const sanitizedHeaders = sanitizeCodexMetadataHeaders(request.headers);
+  if (usesHostedTools) delete sanitizedHeaders["x-openai-internal-codex-responses-lite"];
   const headers = upstreamHeaders(sanitizedHeaders, upstream, body.length);
   context.phase = "upstream_connect";
   let upstreamSent = false;
@@ -554,7 +660,14 @@ async function proxySseResponse(
   statusCode,
   options = {}
 ) {
-  const restorer = new CodexSseRestorer(sessionMap);
+  const restorer = new CodexSseRestorer(sessionMap, {
+    onEvent: context.onProviderEvent,
+    onProviderGeneratedImage: result => rememberProviderGeneratedImageProof(
+      context,
+      options.sessionKey,
+      result
+    )
+  });
   const iterator = upstreamResponse[Symbol.asyncIterator]();
   const staged = [];
   const maxProbeBytes = Number(context.maxSseProbeBytes || 256 * 1024);
@@ -791,6 +904,7 @@ function safeRouteIdentifier(suffix) {
   if (suffix === "/responses") return "responses";
   if (suffix === "/responses/compact") return "responses_compact";
   if (suffix === "/models") return "models";
+  if (suffix === "/images/generations") return "images_generations";
   return "gateway";
 }
 
@@ -845,6 +959,69 @@ function runVerificationStoreOperation(context, operation) {
   });
 }
 
+function rememberProviderGeneratedImageProof(context, sessionKey, result) {
+  if (typeof sessionKey !== "string" || !sessionKey) return;
+  const contentHash = providerGeneratedResultHash(result);
+  if (!contentHash) return;
+  const cacheKey = providerGeneratedImageProofKey(sessionKey, contentHash);
+  try {
+    context.verificationStore.putVerification({
+      cacheKey,
+      contentHash,
+      artifactType: "provider_generated_image",
+      policyFingerprint: context.policyFingerprint,
+      sessionMapAdditions: {},
+      identityKeyId: context.identityRoot?.keyId || ""
+    });
+  } catch {
+    // Proof caching is an optimization. A write failure keeps the next image
+    // on the normal local sanitization path instead of weakening the boundary.
+  }
+}
+
+function hasProviderGeneratedImageProof(context, sessionKeys, imageUrl) {
+  const contentHash = providerGeneratedInputHash(imageUrl);
+  if (!contentHash) return false;
+  for (const sessionKey of [...new Set(sessionKeys.filter(value => typeof value === "string" && value))]) {
+    try {
+      const proof = context.verificationStore.getVerification(
+        providerGeneratedImageProofKey(sessionKey, contentHash),
+        context.policyFingerprint
+      );
+      if (proof?.artifactType === "provider_generated_image" && proof.contentHash === contentHash) {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+function providerGeneratedImageProofKey(sessionKey, contentHash) {
+  return verificationFingerprint({
+    boundary: "codex-provider-generated-image",
+    version: 1,
+    sessionKey,
+    contentHash
+  });
+}
+
+function providerGeneratedResultHash(result) {
+  if (typeof result !== "string" || !result || /[\r\n\0]/.test(result)) return null;
+  const dataUrl = /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(result);
+  const payload = dataUrl?.[1] || (/^[A-Za-z0-9+/]+={0,2}$/.test(result) ? result : null);
+  if (!payload) return null;
+  return createHash("sha256").update(payload).digest("hex");
+}
+
+function providerGeneratedInputHash(imageUrl) {
+  if (typeof imageUrl !== "string") return null;
+  const match = /^data:image\/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/i.exec(imageUrl);
+  if (!match?.[1]) return null;
+  return createHash("sha256").update(match[1]).digest("hex");
+}
+
 function sessionCache(context, sessionKey) {
   let memory = context.sessionCaches.get(sessionKey);
   if (!memory) {
@@ -896,6 +1073,55 @@ function commitCacheWrites(cache, writes = [], maxEntries = 2048, verificationSt
     if (oldest == null) break;
     cache.delete(oldest);
   }
+}
+
+function normalizeHostedToolPolicy(value) {
+  if (value == null) return Object.freeze({ webSearch: false, imageGeneration: false });
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("hostedToolPolicy must be an object.");
+  }
+  for (const key of Object.keys(value)) {
+    if (!new Set(["webSearch", "imageGeneration"]).has(key)) {
+      throw new TypeError(`Unsupported hosted Codex tool policy field: ${key}`);
+    }
+  }
+  for (const key of ["webSearch", "imageGeneration"]) {
+    if (value[key] != null && typeof value[key] !== "boolean") {
+      throw new TypeError(`hostedToolPolicy.${key} must be a boolean.`);
+    }
+  }
+  return Object.freeze({
+    webSearch: value.webSearch === true,
+    imageGeneration: value.imageGeneration === true
+  });
+}
+
+function injectHostedCodexTools(body, policy) {
+  if (!body || typeof body !== "object" || (!policy.webSearch && !policy.imageGeneration)) return;
+  if (body.tools == null) body.tools = [];
+  if (!Array.isArray(body.tools)) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_CONTROL",
+      "PrivacyAI blocked a non-array Codex tools field."
+    );
+  }
+  const types = new Set(body.tools.map(tool => tool?.type).filter(Boolean));
+  if (policy.webSearch && !types.has("web_search")) {
+    body.tools.push({
+      type: "web_search",
+      external_web_access: true,
+      search_content_types: ["text", "image"]
+    });
+  }
+  if (policy.imageGeneration && !types.has("image_generation")) {
+    body.tools.push({ type: "image_generation", output_format: "png" });
+  }
+}
+
+function hasHostedCodexTools(body) {
+  return Array.isArray(body?.tools) && body.tools.some(tool =>
+    tool?.type === "web_search" || tool?.type === "image_generation"
+  );
 }
 
 function mergeInheritedSessionMap(current, inherited) {

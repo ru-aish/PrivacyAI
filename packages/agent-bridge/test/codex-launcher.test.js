@@ -104,6 +104,10 @@ test("Codex gateway preflights static and rendered context before spawning", asy
   assert.equal(spawned.args.includes("--privacy-gateway"), false);
   assert.equal(gatewayOptions.maxContextChars, 13312);
   assert.equal(gatewayOptions.verificationStore, verificationStore);
+  assert.deepEqual(gatewayOptions.hostedToolPolicy, {
+    webSearch: false,
+    imageGeneration: true
+  });
   assert.equal(
     progress.some(event => event.message ===
       "Reused cached privacy decisions for 2 local startup file(s)"),
@@ -625,7 +629,12 @@ test("native launch lock rejects a duplicate live wrapper and recovers after rel
 
   await assert.rejects(
     acquireNativeLaunchLock("codex", root, options),
-    error => error?.code === "PRIVACYAI_AGENT_ALREADY_RUNNING" && error.ownerPid === process.pid
+    error =>
+      error?.code === "PRIVACYAI_AGENT_ALREADY_RUNNING" &&
+      error.ownerPid === process.pid &&
+      error.publicMessage ===
+        "PrivacyAI already has an active codex session for this working directory. " +
+        "Close that session before starting another one."
   );
 
   await first.release();
@@ -637,7 +646,12 @@ test("native launch lock rejects a duplicate live wrapper and recovers after rel
       ...options,
       findActiveNativeLaunch: async () => ({ pid: 4321 })
     }),
-    error => error?.code === "PRIVACYAI_AGENT_ALREADY_RUNNING" && error.ownerPid === 4321
+    error =>
+      error?.code === "PRIVACYAI_AGENT_ALREADY_RUNNING" &&
+      error.ownerPid === 4321 &&
+      error.publicMessage ===
+        "PrivacyAI already has an active codex session for this working directory. " +
+        "Close that session before starting another one."
   );
 });
 

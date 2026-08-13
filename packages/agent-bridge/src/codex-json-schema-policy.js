@@ -14,12 +14,13 @@ const CODEX_JSON_SCHEMA_TYPES = new Set([
   "string"
 ]);
 
-export function collectCodexJsonSchema(schema, path, sessionMap = {}) {
+export function collectCodexJsonSchema(schema, path, sessionMap = {}, options = {}) {
   return collectToolSchemaAnnotations(schema, path, sessionMap, {
     schemaKind: path.includes("parameters") ? "tool_parameters" : "text_format",
     allowedTypes: CODEX_JSON_SCHEMA_TYPES,
     invalidSchemaError,
     protectedValueError: immutableProtectedValueError,
+    onImmutableString: options.onImmutableString,
     annotationSlot: ({ path: slotPath, value, trace }) => ({
       path: slotPath,
       value,
