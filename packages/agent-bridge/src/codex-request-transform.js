@@ -1340,13 +1340,17 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         );
       }
       tool.tools.forEach((child, index) => {
-        if (child?.type !== "function") {
+        if (child?.type !== "function" && child?.type !== "custom") {
           throw gatewayError(
             "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION",
-            "PrivacyAI supports only function tools inside Codex namespaces."
+            "PrivacyAI supports only function and custom tools inside Codex namespaces."
           );
         }
-        collectToolDefinition(child, slots, [...path, "tools", index], { ...options, nested: true });
+        collectToolDefinition(child, slots, [...path, "tools", index], {
+          ...options,
+          nested: true,
+          namespaceChild: true
+        });
       });
       return;
     case "tool_search":
@@ -1378,7 +1382,7 @@ function collectToolDefinition(tool, slots, path, options = {}) {
       );
       return;
     case "custom":
-      if (options.nested) {
+      if (options.nested && !options.namespaceChild) {
         throw gatewayError(
           "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION",
           "PrivacyAI blocked a nested Codex custom tool."
