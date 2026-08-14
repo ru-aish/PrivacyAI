@@ -594,7 +594,7 @@ test("the real binary exposes help and version without loading an agent", async 
 
   const version = await runProcess("node", [CLI, "--version"]);
   assert.equal(version.code, 0, version.stderr);
-  assert.equal(version.stdout.trim(), "privacyai 0.4.0");
+  assert.equal(version.stdout.trim(), "privacyai 0.4.1");
 });
 
 function ttyStreams() {

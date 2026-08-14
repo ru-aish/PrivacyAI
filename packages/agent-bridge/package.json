@@ -1,6 +1,6 @@
 {
   "name": "@privacy-ai/agent-bridge",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Local prompt and tool privacy engine for native agent CLIs.",
   "private": true,
   "type": "module",
@@ -25,7 +25,7 @@
     "test:e2e:agy-image-live": "PRIVACYAI_AGY_IMAGE_LIVE_E2E=1 node --test test/agy-image-live.e2e.test.js"
   },
   "dependencies": {
-    "@privacy-ai/sdk": "workspace:0.4.0"
+    "@privacy-ai/sdk": "workspace:0.4.1"
   },
   "engines": {
     "node": ">=18.18"

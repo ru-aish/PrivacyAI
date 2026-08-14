@@ -1,7 +1,17 @@
 {
   "name": "@privacy-ai/cli",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Canonical PrivacyAI command for protected agents, onboarding, diagnostics, cache, and lineage inspection.",
+  "keywords": [
+    "privacy",
+    "privacyai",
+    "ai",
+    "cli",
+    "openai",
+    "codex",
+    "pii",
+    "local-first"
+  ],
   "type": "module",
   "main": "./src/cli.js",
   "exports": {
@@ -24,8 +34,8 @@
     "postpack": "node scripts/package-runtime.js clean"
   },
   "dependencies": {
-    "@privacy-ai/agent-bridge": "workspace:0.4.0",
-    "@privacy-ai/sdk": "workspace:0.4.0"
+    "@privacy-ai/agent-bridge": "workspace:0.4.1",
+    "@privacy-ai/sdk": "workspace:0.4.1"
   },
   "repository": {
     "type": "git",

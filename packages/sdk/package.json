@@ -1,6 +1,6 @@
 {
   "name": "@privacy-ai/sdk",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Local-first privacy layer for OpenAI-compatible AI prompts.",
   "type": "module",
   "main": "./src/index.js",

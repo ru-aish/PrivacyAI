@@ -151,7 +151,7 @@ outbound firewall for arbitrary local extensions.
 
 ## Reusable SDK boundary
 
-The bridge reuses `@privacy-ai/sdk` v0.4.0 for:
+The bridge reuses `@privacy-ai/sdk` v0.4.1 for:
 
 - stable session-map normalization and collision-safe rebasing;
 - known-value sanitization and recursive restoration;

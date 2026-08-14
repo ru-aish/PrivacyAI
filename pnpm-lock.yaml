@@ -40,16 +40,16 @@ importers:
   packages/agent-bridge:
     dependencies:
       '@privacy-ai/sdk':
-        specifier: workspace:0.4.0
+        specifier: workspace:0.4.1
         version: link:../sdk
 
   packages/agent-tui:
     dependencies:
       '@privacy-ai/agent-bridge':
-        specifier: workspace:0.4.0
+        specifier: workspace:0.4.1
         version: link:../agent-bridge
       '@privacy-ai/sdk':
-        specifier: workspace:0.4.0
+        specifier: workspace:0.4.1
         version: link:../sdk
 
   packages/sdk:
