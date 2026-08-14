@@ -691,6 +691,139 @@ test("additional-tools accepts Codex roles while sanitizing definitions", async 
   );
 });
 
+test("Codex 0.147 namespace-wrapped additional tools accept validated custom exec", async () => {
+  const grammar = [
+    "start: command",
+    "command: /[^\\r\\n]+/"
+  ].join("\n");
+  const body = sampleRequest();
+  body.instructions = "safe";
+  body.tools = [];
+  body.input = [{
+    type: "additional_tools",
+    id: "additional-tools-codex-0147",
+    role: "developer",
+    tools: [{
+      type: "namespace",
+      name: "functions",
+      description: `Function tools for ${PRIVATE_EMAIL}`,
+      tools: [{
+        type: "custom",
+        name: "exec",
+        description: `Execute a shell command for ${PRIVATE_EMAIL}`,
+        format: { type: "grammar", syntax: "lark", definition: grammar }
+      }, {
+        type: "function",
+        name: "wait",
+        description: `Wait for ${PRIVATE_EMAIL}`,
+        strict: false,
+        parameters: {
+          type: "object",
+          properties: { cell_id: { type: "string" } },
+          required: ["cell_id"],
+          additionalProperties: false
+        }
+      }, {
+        type: "function",
+        name: "request_user_input",
+        description: "Request user input.",
+        strict: false,
+        parameters: {
+          type: "object",
+          properties: { prompt: { type: "string" } },
+          required: ["prompt"],
+          additionalProperties: false
+        }
+      }]
+    }]
+  }];
+
+  const result = await sanitizeCodexRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+  const namespace = result.body.input[0].tools[0];
+
+  assert.equal(namespace.type, "namespace");
+  assert.equal(namespace.name, "functions");
+  assert.equal(namespace.description, "Function tools for [EMAIL_1]");
+  assert.deepEqual(namespace.tools.map(tool => tool.type), ["custom", "function", "function"]);
+  assert.equal(namespace.tools[0].name, "exec");
+  assert.equal(namespace.tools[0].description, "Execute a shell command for [EMAIL_1]");
+  assert.equal(namespace.tools[0].format.definition, grammar);
+  assert.equal(namespace.tools[1].description, "Wait for [EMAIL_1]");
+});
+
+test("Codex namespace custom tools preserve fail-closed validation", async () => {
+  const protectedGrammar = sampleRequest();
+  protectedGrammar.instructions = "safe";
+  protectedGrammar.tools = [];
+  protectedGrammar.input = [{
+    type: "additional_tools",
+    role: "developer",
+    tools: [{
+      type: "namespace",
+      name: "functions",
+      description: "Function tools.",
+      tools: [{
+        type: "custom",
+        name: "exec",
+        description: "Execute a shell command.",
+        format: {
+          type: "grammar",
+          syntax: "lark",
+          definition: 'start: "' + PRIVATE_KEY + '"'
+        }
+      }]
+    }]
+  }];
+  await assert.rejects(
+    sanitizeCodexRequestBody(protectedGrammar, withTestIdentity({ sanitizer: deterministicSanitizer })),
+    error => error?.code === "PRIVACYAI_CODEX_TOOL_STRUCTURE_IMMUTABLE_PROTECTED_VALUE"
+  );
+
+  const unsupportedChild = sampleRequest();
+  unsupportedChild.instructions = "safe";
+  unsupportedChild.tools = [];
+  unsupportedChild.input = [{
+    type: "additional_tools",
+    role: "developer",
+    tools: [{
+      type: "namespace",
+      name: "functions",
+      description: "Function tools.",
+      tools: [{ type: "web_search" }]
+    }]
+  }];
+  await assert.rejects(
+    sanitizeCodexRequestBody(unsupportedChild, withTestIdentity({ sanitizer: deterministicSanitizer })),
+    error => error?.code === "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION"
+  );
+
+  const invalidCustom = sampleRequest();
+  invalidCustom.instructions = "safe";
+  invalidCustom.tools = [];
+  invalidCustom.input = [{
+    type: "additional_tools",
+    role: "developer",
+    tools: [{
+      type: "namespace",
+      name: "functions",
+      description: "Function tools.",
+      tools: [{
+        type: "custom",
+        name: "exec",
+        description: "Execute a shell command.",
+        format: { type: "grammar", syntax: "regex", definition: "start: command" }
+      }]
+    }]
+  }];
+  await assert.rejects(
+    sanitizeCodexRequestBody(invalidCustom, withTestIdentity({ sanitizer: deterministicSanitizer })),
+    error => error?.code === "PRIVACYAI_CODEX_INVALID_TOOL_DEFINITION"
+  );
+});
+
 test("protected tool-search names use reversible provider-safe aliases", async () => {
   const privateToolName = "browser_toggle_visibility";
   const body = sampleRequest();
