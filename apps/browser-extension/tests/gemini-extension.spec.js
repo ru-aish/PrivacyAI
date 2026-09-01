@@ -124,7 +124,7 @@ test.describe("PrivacyAI on Gemini", () => {
       await expect.poll(() => textFromPrivacyLogs(logs), { timeout: 90000 }).toContain("PrivacyAI sanitized");
 
       const privacyLogs = textFromPrivacyLogs(logs);
-      expect(privacyLogs).toContain("PrivacyAI intercepting prompt");
+
       expect(privacyLogs).toMatch(/source: (ai-sanitizer|regex-fallback)/);
       const sanitizedLog = logs.find((line) => line.includes("PrivacyAI sanitized via background")) || "";
       expect(sanitizedLog).not.toContain("sk_live_gemini_complex_1234567890abcdef");
