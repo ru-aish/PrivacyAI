@@ -729,6 +729,36 @@ test("Codex 0.152 internal message metadata preserves safe fields and strips loc
   );
 });
 
+test("Codex 0.153 strips local tool-result source telemetry before provider forwarding", async () => {
+  const body = sampleRequest();
+  body.input[0].internal_chat_message_metadata_passthrough = {
+    turn_id: "turn-019ff2e2",
+    cell_id: "cell-019ff2e2",
+    executed_tool_calls: [{
+      name: "functions.exec",
+      arguments: { command: "printf '%s' " + PRIVATE_KEY },
+      tool_result_sources: [{
+        type: "mcp_resource",
+        id: "private://" + PRIVATE_EMAIL
+      }]
+    }],
+    tool_calls_complete: true
+  };
+
+  const result = await sanitizeCodexRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+
+  assert.deepEqual(
+    result.body.input[0].internal_chat_message_metadata_passthrough,
+    { turn_id: "turn-019ff2e2" }
+  );
+  assert.equal(JSON.stringify(result.body).includes(PRIVATE_KEY), false);
+  assert.equal(JSON.stringify(result.body).includes(PRIVATE_EMAIL), false);
+  assert.equal(JSON.stringify(result.body).includes("tool_result_sources"), false);
+});
+
 test("Codex 0.152 internal message metadata rejects malformed and misaligned values", async () => {
   const cases = [
     { create_time: "1788375479.531" },

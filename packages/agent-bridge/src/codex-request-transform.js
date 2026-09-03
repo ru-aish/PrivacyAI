@@ -1826,7 +1826,10 @@ function validateAndStripInternalToolTelemetry(metadata) {
       );
     }
     for (const call of metadata.executed_tool_calls) {
-      assertOnlyKeys(call, new Set(["name", "arguments"]), "internal executed tool call");
+      // Executed-tool metadata is Codex-local warehouse telemetry. It is bounded
+      // above and stripped before provider forwarding, so future nested evidence
+      // fields must not turn harmless host-only protocol growth into a 422.
+      assertPlainObject(call, "internal executed tool call");
       if (typeof call.name !== "string" || call.name.length === 0 || call.name.length > 512) {
         throw gatewayError(
           "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",

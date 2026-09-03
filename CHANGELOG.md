@@ -31,7 +31,8 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files.
 - Publication uses the exact artifacts validated and smoke-installed in CI
   rather than rebuilding immediately before publish.
-- Live release review now exercises Codex CLI 0.152.1.
+- Live release review now exercises Codex CLI 0.153.0.
+- Codex 0.153 host-only `tool_result_sources` telemetry is accepted within bounded executed-tool metadata and stripped before provider forwarding, preventing false 422 privacy-boundary failures.
 
 ### Fixed
 

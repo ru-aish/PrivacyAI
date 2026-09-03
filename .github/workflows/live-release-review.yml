@@ -40,7 +40,7 @@ jobs:
       LIVE_ARTIFACTS: /tmp/privacyai-release-artifacts
       LIVE_INSTALL: /tmp/privacyai-release-install
       LIVE_EVIDENCE: /tmp/privacyai-live-evidence
-      CODEX_VERSION: "0.152.1"
+      CODEX_VERSION: "0.153.0"
       AGY_VERSION: "1.1.5"
       PRIVACYAI_CI_SANITIZER_BASE_URL: https://api.mistral.ai/v1
       PRIVACYAI_CI_SANITIZER_MODEL: ${{ vars.PRIVACYAI_CI_SANITIZER_MODEL }}

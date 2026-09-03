@@ -416,7 +416,7 @@ test("workflow pins agent versions and validates the candidate before repository
   const workflow = await readFile(new URL("../../.github/workflows/live-release-review.yml", import.meta.url), "utf8");
   assert.doesNotMatch(workflow, /codex_version|agy_version/);
   assert.doesNotMatch(workflow, /@openai\/codex@\$\{\{\s*inputs\./);
-  assert.match(workflow, /CODEX_VERSION: "0\.152\.1"/);
+  assert.match(workflow, /CODEX_VERSION: "0\.153\.0"/);
   assert.match(workflow, /AGY_VERSION: "1\.1\.5"/);
   assert.match(workflow, /sudo apt-get install --yes --no-install-recommends[\s\\]+[\s\S]*bubblewrap/);
   assert.match(workflow, /apparmor_parser -r \/etc\/apparmor\.d\/bwrap-userns-restrict/);
