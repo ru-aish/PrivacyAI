@@ -41,6 +41,13 @@ and outputs still pass through the privacy gateway correctly.
 The live release-review workflow remains pinned to Codex 0.144.5 and therefore
 does not enforce the supported 0.152.1 baseline.
 
+PrivacyAI's Linux Codex resolver also assumes the optional native platform
+package is nested below `@openai/codex`. npm may instead hoist that package as
+a sibling. In that ordinary layout PrivacyAI skips the requested healthy Codex
+binary and can silently launch an older binary later on `PATH`. The resolver
+must validate both layouts against the launcher version and native package
+marker before selecting the executable.
+
 ## Protocol handling
 
 ### Required message metadata
@@ -87,6 +94,12 @@ provider-identifier validation already used for calls. Tests must demonstrate a
 real Codex-produced shape or the fields will remain fail-closed; this prevents
 speculative widening of the protocol.
 
+Codex 0.152's `input_image.detail` value `original` is part of the supported
+image path and will be preserved after the image is sanitized. `input_audio`
+will remain explicitly fail-closed with `PRIVACYAI_CODEX_UNSUPPORTED_MEDIA` in
+both messages and tool output: PrivacyAI does not yet have a local audio
+sanitizer, so forwarding it would bypass the privacy boundary.
+
 ## Feature and argument policy
 
 PrivacyAI will keep provider-changing, remote, WebSocket, compression, and
@@ -128,6 +141,8 @@ Development follows red-green TDD.
 
 - Run tests against exact Codex 0.152.1, not whichever binary happens to be on
   `PATH`.
+- Prove both nested and npm-hoisted native platform-package layouts resolve to
+  the matching binary without falling back to an older installation.
 - Keep command execution, stdio MCP argument restoration/result sanitization,
   hosted Luna web/image tool declarations and events, and custom Lark grammar
   coverage.
@@ -138,8 +153,9 @@ Development follows red-green TDD.
 ### Release and human-path verification
 
 - Update live-release-review's Codex pin from 0.144.5 to 0.152.1.
-- Extend the packaged/global-install smoke so it performs exact startup prompt
-  verification rather than only checking `--version` and `--help`.
+- Use the authenticated packed-release workflow to perform exact startup prompt
+  verification; the credential-free global-install smoke remains responsible
+  for package identity and public CLI availability.
 - Run `privacyai doctor`, `privacyai state preflight`, the native Codex exec
   path, shell execution, MCP, custom grammar, hosted tools, and cleanup checks.
 - Use GPT-5.6 Luna as an independent user-like reviewer. Luna will exercise the
@@ -166,3 +182,4 @@ Development follows red-green TDD.
 - Permissive forwarding of unknown Codex fields.
 - Refactoring unrelated gateway or SDK code.
 - Enabling new browser, computer, remote, or WebSocket transports.
+- Forwarding Codex audio before PrivacyAI has a local audio sanitizer.
