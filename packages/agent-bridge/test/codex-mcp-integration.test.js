@@ -21,6 +21,7 @@ const PRIVATE_ARG = "mcp.gateway.private@example.test";
 const PRIVATE_RESULT = "sk-mcp-fake-result-987654321";
 const ARG_PLACEHOLDER = "[EMAIL_1]";
 const RESULT_PLACEHOLDER = "[API_KEY_1]";
+const PACKAGE_STYLE_SERVER_NAME = "npm:@privacy-ai/privacy.test";
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "privacy-mcp-server.js");
 
 test("stock Codex keeps a normal stdio MCP while gateway restores args and sanitizes results", { timeout: 60_000 }, async t => {
@@ -41,7 +42,7 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
   await writeFile(
     join(codexHome, "config.toml"),
     [
-      "[mcp_servers.privacy_test]",
+      `[mcp_servers.${JSON.stringify(PACKAGE_STYLE_SERVER_NAME)}]`,
       `command = ${JSON.stringify(process.execPath)}`,
       `args = [${JSON.stringify(FIXTURE)}]`,
       "enabled = true",
@@ -49,7 +50,7 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
       "tool_timeout_sec = 10",
       'default_tools_approval_mode = "approve"',
       "",
-      "[mcp_servers.privacy_test.env]",
+      `[mcp_servers.${JSON.stringify(PACKAGE_STYLE_SERVER_NAME)}.env]`,
       `PRIVACYAI_MCP_TEST_LOG = ${JSON.stringify(mcpLog)}`,
       `PRIVACYAI_MCP_PRIVATE_RESULT = ${JSON.stringify(PRIVATE_RESULT)}`,
       ""
@@ -82,7 +83,7 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
       );
       writeSse(response, [
         responseCreated("resp-mcp-search"),
-        toolSearchCall("search-mcp", { query: "privacy_test echo_private MCP tool", limit: 8 }),
+        toolSearchCall("search-mcp", { query: `${PACKAGE_STYLE_SERVER_NAME} echo_private MCP tool`, limit: 8 }),
         responseCompleted("resp-mcp-search")
       ]);
       return;
@@ -97,6 +98,10 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
         tool,
         `MCP tool not returned by native tool_search: ${summarizeTools(searchableTools)}`
       );
+      assert.match(tool.namespace, /^mcp__[A-Za-z0-9_]+$/);
+      for (const character of [":", "@", "/", ".", "-"]) {
+        assert.equal(tool.namespace.includes(character), false);
+      }
       writeSse(response, [
         responseCreated("resp-mcp-call"),
         functionCall("call-mcp", tool.name, { message: ARG_PLACEHOLDER }, tool.namespace),
@@ -136,7 +141,7 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
     "workspace-write",
     "exec",
     "--skip-git-repo-check",
-    `Call the privacy_test MCP echo tool with exactly ${PRIVATE_ARG}, then finish.`
+    `Call the ${PACKAGE_STYLE_SERVER_NAME} MCP echo tool with exactly ${PRIVATE_ARG}, then finish.`
   ], {
     cwd: workspace,
     env: {

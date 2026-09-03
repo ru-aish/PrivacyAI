@@ -31,11 +31,22 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files.
 - Publication uses the exact artifacts validated and smoke-installed in CI
   rather than rebuilding immediately before publish.
+- Live release review now exercises Codex CLI 0.153.0.
+- Codex 0.153 host-only `tool_result_sources` telemetry is accepted within bounded executed-tool metadata and stripped before provider forwarding, preventing false 422 privacy-boundary failures.
 
 ### Fixed
 
 - Release retries safely continue after a partial SDK-only publish by verifying
   registry integrity and skipping only an exact existing artifact.
+- Codex 0.152 startup requests now accept bounded creation-time and content-kind
+  metadata while removing local attempted-tool telemetry before provider
+  forwarding.
+- Codex history accepts encrypted function arguments and named function outputs,
+  and package-style MCP server names remain protected end to end.
+- Codex 0.152 image requests preserve the `original` detail mode after local
+  sanitization, while unsupported audio remains explicitly fail-closed.
+- Linux executable discovery now resolves both nested and npm-hoisted Codex
+  platform packages instead of falling back to an older installation on `PATH`.
 
 ## [0.0.2]
 

@@ -78,14 +78,14 @@ test("Codex images share SDK mappings with prompt text and preserve image detail
     }
   };
   const body = baseRequest([{ type: "message", role: "user", content: [
-    { type: "input_image", image_url: SOURCE_IMAGE, detail: "high" },
+    { type: "input_image", image_url: SOURCE_IMAGE, detail: "original" },
     { type: "input_text", text: `Fix the form owned by ${PRIVATE}` }
   ] }]);
 
   const result = await sanitizeCodexRequestBody(body, { sanitizer, imageSanitizer });
   assert.equal(calls, 1);
   assert.equal(result.body.input[0].content[0].image_url, SAFE_IMAGE);
-  assert.equal(result.body.input[0].content[0].detail, "high");
+  assert.equal(result.body.input[0].content[0].detail, "original");
   assert.equal(result.body.input[0].content[1].text, `Fix the form owned by ${PLACEHOLDER}`);
   assert.deepEqual(result.sessionMapAdditions, { [PLACEHOLDER]: PRIVATE });
   assert.equal(result.itemRecords.some(record => record.artifactType === "image"), false);
@@ -109,11 +109,11 @@ test("Codex sanitizes input images inside supported tool-output shapes", async (
     type: "custom_tool_call_output",
     call_id: "call-object-image",
     name: "inspect_image",
-    output: { content_items: [{ type: "input_image", image_url: SOURCE_IMAGE, detail: "low" }] }
+    output: { content_items: [{ type: "input_image", image_url: SOURCE_IMAGE, detail: "original" }] }
   }]);
   const objectResult = await sanitizeCodexRequestBody(objectOutput, { sanitizer, imageSanitizer });
   assert.equal(objectResult.body.input[0].output.content_items[0].image_url, SAFE_IMAGE);
-  assert.equal(objectResult.body.input[0].output.content_items[0].detail, "low");
+  assert.equal(objectResult.body.input[0].output.content_items[0].detail, "original");
 });
 
 test("Codex image count and detail validation stop before sanitization", async () => {

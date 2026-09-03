@@ -229,6 +229,8 @@ test("argument guards preserve normal Codex workflows while blocking provider by
   assert.throws(() => validateNativeArguments("codex", ["-c", "model_provider=\"other\""]), /model-provider/);
   assert.throws(() => validateNativeArguments("codex", ["--config", "openai_base_url=\"https://example.test\""]), /model-provider/);
   assert.throws(() => validateNativeArguments("codex", ["--enable", "responses_websockets"]), /bypasses local restoration/);
+  assert.throws(() => validateNativeArguments("codex", ["--enable", "browser_use_external"]), /bypasses local restoration/);
+  assert.throws(() => validateNativeArguments("codex", ["--enable=browser_use_full_cdp_access"]), /bypasses local restoration/);
   assert.throws(() => validateNativeArguments("codex", ["-c", "features.apps=true"]), /provider-hosted/);
   assert.throws(() => validateNativeArguments("codex", ["-ip"]), /combined or attached Codex short options/);
   assert.throws(() => validateNativeArguments("codex", ["-mresume"]), /combined or attached Codex short options/);
@@ -1458,12 +1460,20 @@ test("rendered Codex startup audit primes exact gateway item verification", asyn
         {
           type: "message",
           role: "developer",
-          content: [{ type: "input_text", text: "stable rendered startup instructions" }]
+          content: [{ type: "input_text", text: "stable rendered startup instructions" }],
+          internal_chat_message_metadata_passthrough: {
+            create_time: 1_788_375_479.531,
+            content_item_kinds: ["generic.developer_instructions"]
+          }
         },
         {
           type: "message",
           role: "user",
-          content: [{ type: "input_text", text: prompt }]
+          content: [{ type: "input_text", text: prompt }],
+          internal_chat_message_metadata_passthrough: {
+            create_time: 1_788_375_480.125,
+            content_item_kinds: ["user.text"]
+          }
         }
       ];
       return capturedPayload;

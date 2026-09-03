@@ -80,6 +80,13 @@ const RESERVED_METADATA_FIELDS = new Set([
 const PROVIDER_IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]+$/;
 const PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH = 64;
 const DEFAULT_MAX_IMAGES_PER_REQUEST = 8;
+const MAX_INTERNAL_CONTENT_ITEM_KINDS = 1_024;
+const MAX_INTERNAL_CONTENT_ITEM_KIND_LENGTH = 256;
+const MAX_INTERNAL_CREATE_TIME_SECONDS = 8_640_000_000_000;
+const MAX_INTERNAL_EXECUTED_TOOL_CALLS = 256;
+const MAX_INTERNAL_EXECUTED_TOOL_CALL_METADATA_BYTES = 32 * 1_024;
+const MAX_ENCRYPTED_FUNCTION_ARGS = 256;
+const MAX_ENCRYPTED_FUNCTION_ARG_LENGTH = 256 * 1_024;
 const SAFE_TOOL_ARGUMENT_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const UNSAFE_TOOL_ARGUMENT_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const LEGACY_CODEX_PROTOCOL_KEYS = new Map([
@@ -720,6 +727,10 @@ export function restoreResponseItem(item, sessionMap = {}) {
       item.arguments = restoreValue(item.arguments, sessionMap);
       break;
     case "function_call_output":
+      item.name = restoreMaybeString(item.name, sessionMap);
+      item.namespace = restoreMaybeString(item.namespace, sessionMap);
+      item.output = restoreOutputPayload(item.output, sessionMap);
+      break;
     case "custom_tool_call_output":
       item.output = restoreOutputPayload(item.output, sessionMap);
       break;
@@ -973,6 +984,7 @@ function collectResponseItem(item, slots, path, context = {}) {
           "name",
           "namespace",
           "arguments",
+          "encrypted_function_args",
           "call_id",
           "status",
           "internal_chat_message_metadata_passthrough"
@@ -984,6 +996,12 @@ function collectResponseItem(item, slots, path, context = {}) {
       collectOptionalProviderIdentifier(item, "namespace", slots, path);
       requireProtocolIdentity(item.call_id, "function call id");
       collectJsonStringField(item, "arguments", slots, path);
+      validateOpaqueStringArray(
+        item.encrypted_function_args,
+        "encrypted function arguments",
+        MAX_ENCRYPTED_FUNCTION_ARGS,
+        MAX_ENCRYPTED_FUNCTION_ARG_LENGTH
+      );
       return;
     case "custom_tool_call":
       validateResponseItemShape(
@@ -1016,6 +1034,8 @@ function collectResponseItem(item, slots, path, context = {}) {
           "type",
           "id",
           "call_id",
+          "name",
+          "namespace",
           "output",
           "status",
           "internal_chat_message_metadata_passthrough"
@@ -1023,7 +1043,8 @@ function collectResponseItem(item, slots, path, context = {}) {
         "function_call_output"
       );
       validateStatus(item.status, "function output status", false);
-      requireProtocolIdentity(item.call_id, "function output call id");
+      collectOptionalProviderIdentifier(item, "name", slots, path);
+      collectOptionalProviderIdentifier(item, "namespace", slots, path);
       collectOutputPayload(item.output, slots, [...path, "output"]);
       return;
     case "custom_tool_call_output":
@@ -1100,12 +1121,12 @@ function collectContentItems(content, slots, path) {
       if (typeof entry.image_url !== "string") {
         throw gatewayError("PRIVACYAI_CODEX_INVALID_IMAGE", "PrivacyAI blocked an image without a string data URL.");
       }
-      if (entry.detail != null && !new Set(["auto", "low", "high"]).has(entry.detail)) {
+      if (entry.detail != null && !new Set(["auto", "low", "high", "original"]).has(entry.detail)) {
         throw gatewayError("PRIVACYAI_CODEX_INVALID_IMAGE", "PrivacyAI blocked an image with unsupported detail.");
       }
       return;
     }
-    if (new Set(["output_image", "input_file", "computer_screenshot"]).has(entry.type)) {
+    if (new Set(["output_image", "input_audio", "input_file", "computer_screenshot"]).has(entry.type)) {
       throw gatewayError(
         "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA",
         `PrivacyAI does not support Codex media content type: ${entry.type}`
@@ -1235,10 +1256,16 @@ function collectToolOutputContentItems(content, slots, path) {
       if (typeof entry.image_url !== "string") {
         throw gatewayError("PRIVACYAI_CODEX_INVALID_IMAGE", "PrivacyAI blocked a tool image without a string data URL.");
       }
-      if (entry.detail != null && !new Set(["auto", "low", "high"]).has(entry.detail)) {
+      if (entry.detail != null && !new Set(["auto", "low", "high", "original"]).has(entry.detail)) {
         throw gatewayError("PRIVACYAI_CODEX_INVALID_IMAGE", "PrivacyAI blocked a tool image with unsupported detail.");
       }
       return;
+    }
+    if (entry.type === "input_audio") {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA",
+        "PrivacyAI does not support Codex media content type: input_audio"
+      );
     }
     throw gatewayError(
       "PRIVACYAI_CODEX_UNSUPPORTED_CONTENT",
@@ -1713,13 +1740,134 @@ function validateResponseItemShape(item, allowed, label) {
 function sanitizeInternalMessageMetadata(item) {
   const key = "internal_chat_message_metadata_passthrough";
   if (item[key] == null) return;
-  assertPlainObject(item[key], "internal chat metadata");
-  assertOnlyKeys(item[key], new Set(["turn_id"]), "internal chat metadata");
-  if (item[key].turn_id == null) {
-    delete item[key];
-    return;
+  const metadata = item[key];
+  assertPlainObject(metadata, "internal chat metadata");
+  assertOnlyKeys(
+    metadata,
+    new Set([
+      "turn_id",
+      "create_time",
+      "content_item_kinds",
+      "cell_id",
+      "executed_tool_calls",
+      "tool_calls_complete"
+    ]),
+    "internal chat metadata"
+  );
+  if (metadata.turn_id != null) {
+    assertProtocolToken(metadata.turn_id, "internal turn id", 256);
   }
-  assertProtocolToken(item[key].turn_id, "internal turn id", 256);
+  if (
+    metadata.create_time != null &&
+    (
+      typeof metadata.create_time !== "number" ||
+      !Number.isFinite(metadata.create_time) ||
+      metadata.create_time < 0 ||
+      metadata.create_time > MAX_INTERNAL_CREATE_TIME_SECONDS
+    )
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked an invalid Codex internal message creation time."
+    );
+  }
+  if (metadata.content_item_kinds != null) {
+    validateOpaqueStringArray(
+      metadata.content_item_kinds,
+      "internal content item kinds",
+      MAX_INTERNAL_CONTENT_ITEM_KINDS,
+      MAX_INTERNAL_CONTENT_ITEM_KIND_LENGTH,
+      value => /^[A-Za-z0-9._:@+\/-]+$/.test(value)
+    );
+    if (
+      !Array.isArray(item.content) ||
+      metadata.content_item_kinds.length !== item.content.length
+    ) {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        "PrivacyAI blocked Codex internal content classifications that do not align with message content."
+      );
+    }
+  }
+  for (const field of ["turn_id", "create_time", "content_item_kinds"]) {
+    if (metadata[field] == null) delete metadata[field];
+  }
+  validateAndStripInternalToolTelemetry(metadata);
+  if (Object.keys(metadata).length === 0) {
+    delete item[key];
+  }
+}
+
+function validateAndStripInternalToolTelemetry(metadata) {
+  if (metadata.cell_id != null) {
+    assertProtocolToken(metadata.cell_id, "internal tool cell id", 512);
+  }
+  if (metadata.tool_calls_complete != null && typeof metadata.tool_calls_complete !== "boolean") {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      "PrivacyAI blocked invalid Codex internal tool completion metadata."
+    );
+  }
+  if (metadata.executed_tool_calls != null) {
+    if (
+      !Array.isArray(metadata.executed_tool_calls) ||
+      metadata.executed_tool_calls.length > MAX_INTERNAL_EXECUTED_TOOL_CALLS
+    ) {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        "PrivacyAI blocked invalid Codex internal executed-tool metadata."
+      );
+    }
+    const serialized = JSON.stringify(metadata.executed_tool_calls);
+    if (Buffer.byteLength(serialized, "utf8") > MAX_INTERNAL_EXECUTED_TOOL_CALL_METADATA_BYTES) {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        "PrivacyAI blocked oversized Codex internal executed-tool metadata."
+      );
+    }
+    for (const call of metadata.executed_tool_calls) {
+      // Executed-tool metadata is Codex-local warehouse telemetry. It is bounded
+      // above and stripped before provider forwarding, so future nested evidence
+      // fields must not turn harmless host-only protocol growth into a 422.
+      assertPlainObject(call, "internal executed tool call");
+      if (typeof call.name !== "string" || call.name.length === 0 || call.name.length > 512) {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+          "PrivacyAI blocked an invalid Codex internal executed-tool name."
+        );
+      }
+      if (!Object.hasOwn(call, "arguments")) {
+        throw gatewayError(
+          "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+          "PrivacyAI blocked Codex internal executed-tool metadata without arguments."
+        );
+      }
+    }
+  }
+  delete metadata.cell_id;
+  delete metadata.executed_tool_calls;
+  delete metadata.tool_calls_complete;
+}
+
+function validateOpaqueStringArray(value, label, maxItems, maxItemLength, predicate = () => true) {
+  if (value == null) return;
+  if (!Array.isArray(value) || value.length > maxItems) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      `PrivacyAI blocked an invalid Codex ${label}.`
+    );
+  }
+  if (value.some(entry => (
+    typeof entry !== "string" ||
+    entry.length === 0 ||
+    entry.length > maxItemLength ||
+    !predicate(entry)
+  ))) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      `PrivacyAI blocked an invalid Codex ${label}.`
+    );
+  }
 }
 
 function validateProviderItemMetadata(value, label) {

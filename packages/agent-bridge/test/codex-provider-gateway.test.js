@@ -469,6 +469,28 @@ test("Codex request transformation rejects unknown fields, media, unknown items,
     error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA"
   );
 
+  const audioMessage = sampleRequest();
+  audioMessage.input = [{
+    type: "message",
+    role: "user",
+    content: [{ type: "input_audio", input_audio: { data: "AAAA", format: "wav" } }]
+  }];
+  await assert.rejects(
+    sanitizeCodexRequestBody(audioMessage, withTestIdentity({ sanitizer: deterministicSanitizer })),
+    error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA"
+  );
+
+  const audioToolOutput = sampleRequest();
+  audioToolOutput.input = [{
+    type: "function_call_output",
+    call_id: "audio-output",
+    output: [{ type: "input_audio", input_audio: { data: "AAAA", format: "wav" } }]
+  }];
+  await assert.rejects(
+    sanitizeCodexRequestBody(audioToolOutput, withTestIdentity({ sanitizer: deterministicSanitizer })),
+    error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_MEDIA"
+  );
+
   const unknown = sampleRequest();
   unknown.input = [{ type: "future_tool_call", secret: PRIVATE_EMAIL }];
   await assert.rejects(
@@ -661,6 +683,148 @@ test("Codex tool and history shapes reject unknown keys while preserving local c
   assert.equal(action.working_directory, "/tmp/[EMAIL_1]");
   assert.deepEqual(action.env, { "[EMAIL_1]": "[API_KEY_1]" });
   assert.equal(action.user, "[EMAIL_1]");
+});
+
+test("Codex 0.152 internal message metadata preserves safe fields and strips local tool telemetry", async () => {
+  const body = sampleRequest();
+  body.input[0].internal_chat_message_metadata_passthrough = {
+    turn_id: "turn-019ff2e2",
+    create_time: 1_788_375_479.531,
+    content_item_kinds: ["user.text"],
+    cell_id: "cell-019ff2e2",
+    executed_tool_calls: [{
+      name: "functions.exec",
+      arguments: { command: `printf '%s' '${PRIVATE_KEY}'` }
+    }],
+    tool_calls_complete: true
+  };
+
+  const result = await sanitizeCodexRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+  assert.deepEqual(
+    result.body.input[0].internal_chat_message_metadata_passthrough,
+    {
+      turn_id: "turn-019ff2e2",
+      create_time: 1_788_375_479.531,
+      content_item_kinds: ["user.text"]
+    }
+  );
+  assert.equal(JSON.stringify(result.body).includes(PRIVATE_KEY), false);
+
+  const telemetryOnly = sampleRequest();
+  telemetryOnly.input[0].internal_chat_message_metadata_passthrough = {
+    cell_id: "cell-local-only",
+    executed_tool_calls: [],
+    tool_calls_complete: false
+  };
+  const telemetryOnlyResult = await sanitizeCodexRequestBody(
+    telemetryOnly,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+  assert.equal(
+    Object.hasOwn(telemetryOnlyResult.body.input[0], "internal_chat_message_metadata_passthrough"),
+    false
+  );
+});
+
+test("Codex 0.153 strips local tool-result source telemetry before provider forwarding", async () => {
+  const body = sampleRequest();
+  body.input[0].internal_chat_message_metadata_passthrough = {
+    turn_id: "turn-019ff2e2",
+    cell_id: "cell-019ff2e2",
+    executed_tool_calls: [{
+      name: "functions.exec",
+      arguments: { command: "printf '%s' " + PRIVATE_KEY },
+      tool_result_sources: [{
+        type: "mcp_resource",
+        id: "private://" + PRIVATE_EMAIL
+      }]
+    }],
+    tool_calls_complete: true
+  };
+
+  const result = await sanitizeCodexRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+
+  assert.deepEqual(
+    result.body.input[0].internal_chat_message_metadata_passthrough,
+    { turn_id: "turn-019ff2e2" }
+  );
+  assert.equal(JSON.stringify(result.body).includes(PRIVATE_KEY), false);
+  assert.equal(JSON.stringify(result.body).includes(PRIVATE_EMAIL), false);
+  assert.equal(JSON.stringify(result.body).includes("tool_result_sources"), false);
+});
+
+test("Codex 0.152 internal message metadata rejects malformed and misaligned values", async () => {
+  const cases = [
+    { create_time: "1788375479.531" },
+    { create_time: -1 },
+    { create_time: 8_640_000_000_001 },
+    { content_item_kinds: "user.text" },
+    { content_item_kinds: [] },
+    { content_item_kinds: ["bad kind"] },
+    { cell_id: "bad local id" },
+    { executed_tool_calls: "not-an-array" },
+    { executed_tool_calls: [{ name: "functions.exec" }] },
+    { tool_calls_complete: "true" },
+    { content_item_kinds: ["user.text"], future_private_field: PRIVATE_EMAIL }
+  ];
+
+  for (const metadata of cases) {
+    const body = sampleRequest();
+    body.input[0].internal_chat_message_metadata_passthrough = metadata;
+    await assert.rejects(
+      sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
+      error => new Set([
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        "PRIVACYAI_CODEX_INVALID_PROTOCOL_TOKEN",
+        "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
+      ]).has(error?.code),
+      JSON.stringify(metadata)
+    );
+  }
+});
+
+test("Codex 0.152 function-call history accepts encrypted args and named unpaired outputs", async () => {
+  const body = sampleRequest();
+  body.input = [{
+    type: "function_call",
+    call_id: "call-encrypted",
+    name: "spawn_agent",
+    namespace: "collaboration",
+    arguments: JSON.stringify({ message: "safe", task_name: "worker" }),
+    encrypted_function_args: ["opaque:v1/+/="]
+  }, {
+    type: "function_call_output",
+    name: "notifications",
+    namespace: "host",
+    output: `owner=${PRIVATE_EMAIL}`
+  }];
+
+  const result = await sanitizeCodexRequestBody(
+    body,
+    withTestIdentity({ sanitizer: deterministicSanitizer })
+  );
+  assert.deepEqual(result.body.input[0].encrypted_function_args, ["opaque:v1/+/="]);
+  assert.equal(result.body.input[1].name, "notifications");
+  assert.equal(result.body.input[1].namespace, "host");
+  assert.equal(result.body.input[1].output, "owner=[EMAIL_1]");
+});
+
+test("Codex 0.152 encrypted function args reject malformed values", async () => {
+  for (const encrypted of ["opaque", [""], [42]]) {
+    const body = sampleRequest();
+    body.input[2].encrypted_function_args = encrypted;
+    await assert.rejects(
+      sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer })),
+      error => error?.code === "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+      JSON.stringify(encrypted)
+    );
+  }
 });
 
 test("additional-tools accepts Codex roles while sanitizing definitions", async () => {
@@ -3700,7 +3864,13 @@ test("Codex provider args force loopback Responses transport while preserving na
   assert.match(provider, /request_max_retries=0/);
   assert.match(provider, /stream_max_retries=0/);
   assert.equal(args.includes('web_search="disabled"'), false);
-  for (const feature of ["enable_request_compression", "responses_websockets", "apps"]) {
+  for (const feature of [
+    "enable_request_compression",
+    "responses_websockets",
+    "apps",
+    "browser_use_external",
+    "browser_use_full_cdp_access"
+  ]) {
     const index = args.indexOf(feature);
     assert.equal(index > 0 && args[index - 1] === "--disable", true, feature);
   }

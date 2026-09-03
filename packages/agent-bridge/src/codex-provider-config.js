@@ -11,6 +11,8 @@ export const CODEX_GATEWAY_DISABLED_FEATURES = Object.freeze([
   "enable_mcp_apps",
   "in_app_browser",
   "browser_use",
+  "browser_use_external",
+  "browser_use_full_cdp_access",
   "computer_use",
   "remote_plugin"
 ]);

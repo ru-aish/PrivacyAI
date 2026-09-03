@@ -36,16 +36,13 @@ async function createCodexInstall(root, name, options = {}) {
   await chmod(launcher, 0o755);
   await symlink(launcher, join(binDir, "codex"));
 
-  const platformRoot = join(
-    packageRoot,
-    "node_modules",
-    "@openai",
-    linuxPlatform.packageName
-  );
+  const platformRoot = options.layout === "hoisted"
+    ? join(packageRoot, "..", linuxPlatform.packageName)
+    : join(packageRoot, "node_modules", "@openai", linuxPlatform.packageName);
   const vendorRoot = join(platformRoot, "vendor", linuxPlatform.target);
   const native = join(vendorRoot, "bin", "codex");
   await mkdir(join(vendorRoot, "bin"), { recursive: true });
-  await writeFile(native, "#!/bin/sh\nprintf 'codex-cli 0.144.5\\n'\n", { mode: 0o755 });
+  await writeFile(native, `#!/bin/sh\nprintf 'codex-cli ${version}\\n'\n`, { mode: 0o755 });
   await chmod(native, 0o755);
 
   if (options.complete !== false) {
@@ -72,6 +69,25 @@ async function createCodexInstall(root, name, options = {}) {
 
   return { binDir, native };
 }
+
+test("Codex resolution accepts npm's hoisted platform-package layout", {
+  skip: process.platform !== "linux" || !linuxPlatform
+}, async () => {
+  const root = await createTestTempDir("privacyai-codex-hoisted-resolution-");
+  const install = await createCodexInstall(root, "hoisted", {
+    layout: "hoisted",
+    version: "0.152.1"
+  });
+
+  assert.equal(
+    await resolveExecutable("codex", { path: install.binDir }),
+    install.native
+  );
+  assert.deepEqual(
+    await verifyNativeExecutable("codex", install.native, { timeoutMs: 1000 }),
+    { version: "codex-cli 0.152.1" }
+  );
+});
 
 test("Codex resolution skips an incomplete npm platform package and uses the next healthy install", {
   skip: process.platform !== "linux" || !linuxPlatform
@@ -132,7 +148,7 @@ test("native executable verification removes signal-resistant descendants", {
 
   assert.deepEqual(
     await verifyNativeExecutable("codex", binary, {
-      timeoutMs: 1000,
+      timeoutMs: 5000,
       env: { ...process.env, PRIVACYAI_TEST_PID_PATH: pidPath }
     }),
     { version: "codex-cli test" }

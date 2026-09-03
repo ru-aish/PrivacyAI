@@ -145,28 +145,34 @@ async function resolveCodexNpmCandidate(entrypoint) {
     return { native: null, recognizedPackage: false };
   }
 
-  const platformRoot = join(packageRoot, "node_modules", "@openai", platform.packageName);
-  const vendorRoot = join(platformRoot, "vendor", platform.target);
-  const native = join(vendorRoot, "bin", "codex");
-  try {
-    const platformPackage = JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8"));
-    const packageMarker = JSON.parse(await readFile(join(vendorRoot, "codex-package.json"), "utf8"));
-    if (
-      typeof launcherPackage.version !== "string" ||
-      platformPackage?.name !== "@openai/codex" ||
-      platformPackage?.version !== `${launcherPackage.version}-${platform.packageVersionSuffix}` ||
-      packageMarker?.layoutVersion !== 1 ||
-      packageMarker?.version !== launcherPackage.version ||
-      packageMarker?.target !== platform.target ||
-      packageMarker?.entrypoint !== "bin/codex"
-    ) {
-      return { native: null, recognizedPackage: true };
+  const platformRoots = [
+    join(packageRoot, "node_modules", "@openai", platform.packageName),
+    join(packageRoot, "..", platform.packageName)
+  ];
+  for (const platformRoot of platformRoots) {
+    const vendorRoot = join(platformRoot, "vendor", platform.target);
+    const native = join(vendorRoot, "bin", "codex");
+    try {
+      const platformPackage = JSON.parse(await readFile(join(platformRoot, "package.json"), "utf8"));
+      const packageMarker = JSON.parse(await readFile(join(vendorRoot, "codex-package.json"), "utf8"));
+      if (
+        typeof launcherPackage.version !== "string" ||
+        platformPackage?.name !== "@openai/codex" ||
+        platformPackage?.version !== `${launcherPackage.version}-${platform.packageVersionSuffix}` ||
+        packageMarker?.layoutVersion !== 1 ||
+        packageMarker?.version !== launcherPackage.version ||
+        packageMarker?.target !== platform.target ||
+        packageMarker?.entrypoint !== "bin/codex"
+      ) {
+        continue;
+      }
+      await access(native, constants.X_OK);
+      return { native, recognizedPackage: true };
+    } catch {
+      // npm may nest the optional platform package or hoist it next to @openai/codex.
     }
-    await access(native, constants.X_OK);
-    return { native, recognizedPackage: true };
-  } catch {
-    return { native: null, recognizedPackage: true };
   }
+  return { native: null, recognizedPackage: true };
 }
 
 function codexExecutableFailure(flavor, stderr, code, signal) {
