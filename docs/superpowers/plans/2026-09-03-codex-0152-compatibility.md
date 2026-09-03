@@ -150,7 +150,7 @@ Give Luna the built CLI path, exact commands, synthetic secrets, and request
 evidence location. Require a concise PASS/FAIL report for startup, shell, MCP,
 hosted tools, diagnostics, privacy, and cleanup.
 
-- [ ] **Step 5: Review, commit, push, and open PR**
+- [x] **Step 5: Review, commit, push, and open PR**
 
 Request independent code review against `origin/main`, resolve all critical and
 important findings, commit the final verified tree, push
