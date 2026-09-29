@@ -1,7 +1,7 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,7 @@ const PROMPT_HOOK = fileURLToPath(new URL("../bin/privacyai-prompt-hook.js", imp
 const AGENT_HOOK = fileURLToPath(new URL("../bin/privacyai-agent-hook.js", import.meta.url));
 
 test("Ministral 3 3B protects the prompt and Bash lifecycle end to end", { skip: !enabled }, async t => {
-  const root = await mkdtemp(join(tmpdir(), "privacyai-ministral-e2e-"));
+  const root = await createTestTempDir("privacyai-ministral-e2e-");
   const runtimeDir = join(root, "runtime");
   const vaultDir = join(root, "vault");
   const configPath = join(root, "config.json");

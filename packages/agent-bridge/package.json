@@ -1,25 +1,31 @@
 {
   "name": "@privacy-ai/agent-bridge",
-  "version": "0.0.1",
-  "description": "Local prompt and all-tool privacy engine for native agent CLIs.",
+  "version": "0.4.1",
+  "description": "Local prompt and tool privacy engine for native agent CLIs.",
+  "private": true,
   "type": "module",
   "main": "./src/index.js",
   "exports": {
     ".": "./src/index.js",
-    "./cli": "./src/cli.js"
+    "./cli": "./src/cli.js",
+    "./lineage": "./src/lineage/index.js",
+    "./providers": "./src/provider-registry.js"
   },
   "bin": {
     "privacyai-agent-hook": "./bin/privacyai-agent-hook.js",
-    "privacyai-prompt-hook": "./bin/privacyai-prompt-hook.js"
+    "privacyai-prompt-hook": "./bin/privacyai-prompt-hook.js",
+    "privacyai-agy-hook": "./bin/privacyai-agy-hook.js"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:e2e:ministral": "PRIVACYAI_OLLAMA_E2E=1 node --test test/ministral-ollama.e2e.test.js",
     "test:e2e:lmstudio": "PRIVACYAI_LM_STUDIO_E2E=1 node --test test/lmstudio.e2e.test.js",
-    "test:e2e:claude": "PRIVACYAI_CLAUDE_NATIVE_E2E=1 node --test test/native-claude.e2e.test.js"
+    "test:e2e:claude": "PRIVACYAI_CLAUDE_NATIVE_E2E=1 node --test test/native-claude.e2e.test.js",
+    "test:e2e:codex-live": "PRIVACYAI_CODEX_LIVE_E2E=1 node --test test/codex-live.e2e.test.js",
+    "test:e2e:agy-image-live": "PRIVACYAI_AGY_IMAGE_LIVE_E2E=1 node --test test/agy-image-live.e2e.test.js"
   },
   "dependencies": {
-    "@privacy-ai/sdk": "workspace:0.0.2"
+    "@privacy-ai/sdk": "workspace:0.4.1"
   },
   "engines": {
     "node": ">=18.18"

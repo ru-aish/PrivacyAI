@@ -1,31 +1,140 @@
-# PrivacyAI native agent wrapper
+# PrivacyAI CLI
 
-This is the user-facing package for PrivacyAI's protected Claude Code and Codex
-commands. It launches the user's existing CLI inside a transparent local PTY;
-it does not replace the TUI, provider login, subscription, or inference route.
+`@privacy-ai/cli` publishes the single user-facing `privacyai` command. It owns
+onboarding, diagnostics, protected agent launchers, cache and lineage inspection,
+and explicit local-state operations. Users do not install separate PrivacyAI agent packages.
 
 ```bash
-npm install --global @privacy-ai/agent-tui
+npm install --global @privacy-ai/cli
 privacyai onboard
-privacyai claude
-privacyai codex
+privacyai doctor
+privacyai agent claude
+privacyai agent codex
+privacyai agent agy --print "Summarize this safely"
 ```
 
-During onboarding, PrivacyAI scans Ollama and a running LM Studio local server,
-then lists every usable downloaded LLM/VLM in one numbered menu. Embedding-only
-models are excluded. Ministral 3 3B remains recommended; select any Ollama or LM
-Studio entry by number, or type another Ollama model name to download it.
+The direct launcher forms remain supported migration aliases:
 
-The wrapper registers wildcard pre/post hooks for every tool event exposed by
-the native CLI. Placeholder values are restored recursively before built-in,
-app, plugin, and MCP tools execute, then known real values are sanitized in tool
-results before they return to the task model. Claude hook-disabling launch modes
-such as `--bare` and `--safe-mode` are rejected; a failed Claude tool result that
-cannot be rewritten safely is stopped before the next model request.
+```bash
+privacyai claude
+privacyai codex
+privacyai agy
+privacyai antigravity
+```
 
-The implementation lives in `@privacy-ai/agent-bridge`; this package owns only
-the public `privacyai` command so there is one install surface and one tested
-privacy engine.
+Users migrating from `@privacy-ai/agent-tui` should uninstall that package and
+install `@privacy-ai/cli`. The global binary remains `privacyai`.
 
-Current platform support: Linux and macOS. Windows requires a ConPTY backend
-and is intentionally rejected rather than falling back to an unsafe wrapper.
+## Command hierarchy
+
+```text
+privacyai onboard
+privacyai doctor [--json]
+privacyai agent <claude|codex|agy> [...]
+privacyai cache [summary|list|show] [--limit N] [--json]
+privacyai lineage [summary|list|show|mutations] [--limit N] [--json]
+privacyai state [preflight|plan] [--json]
+privacyai state backup <directory> [--json]
+privacyai state migrate --backup <directory> [--json]
+privacyai state repair --backup <directory> [--json]
+privacyai state restore <directory> [--replace] [--replace-identity] [--json]
+```
+
+`setup` remains an alias for `onboard`, and `diagnostics` remains an alias for
+`doctor`.
+
+Exit codes are stable for scripts:
+
+- `0`: success
+- `1`: operational or health failure
+- `2`: invalid command or arguments
+- `3`: onboarding/configuration required
+- `4`: requested cache or lineage record not found
+
+Onboarding requires an interactive terminal and fails immediately instead of
+waiting for input when stdin or stdout is not a TTY.
+
+## Configuration discovery
+
+PrivacyAI uses one configuration file. Discovery order is explicit:
+
+1. An explicit path supplied by an embedding API.
+2. `PRIVACYAI_CONFIG_FILE`.
+3. `PRIVACYAI_CONFIG_DIR/config.json`.
+4. `~/.config/privacyai/config.json`.
+
+The first selected path is authoritative. An invalid or unreadable file fails
+with a safe validation error; PrivacyAI does not silently fall through to a
+lower-precedence configuration.
+
+## Diagnostics
+
+`privacyai doctor` checks the saved local-model configuration, model readiness,
+platform details, and installed Claude Code, Codex, and AGY executables. Missing
+agent executables are reported but do not prevent use of another supported
+agent. A broken installed executable or unavailable configured model fails the
+check. Doctor also reports local-state upgrade, repair, and recovery readiness
+using the same privacy-safe preflight service as `privacyai state`.
+
+## Cache and lineage inspection
+
+Inspection commands open the existing context database in SQLite read-only,
+query-only mode. They never create, migrate, prune, clear, or update local
+state. Output contains only metadata such as opaque identifiers, hashes,
+counts, statuses, and timestamps; session-map originals are never returned.
+
+```bash
+privacyai cache summary
+privacyai cache list --limit 20 --json
+privacyai cache show <cache-key>
+privacyai lineage summary
+privacyai lineage show <session-key> --json
+privacyai lineage mutations --limit 20
+```
+
+## Local-state operations
+
+`privacyai state preflight` and `privacyai state plan` are read-only. Backups,
+migrations, repairs, and restores require explicit commands and bounded
+destinations. Migration and repair always create a verified backup first.
+Restore needs `--replace` when it overwrites existing state, and replacing
+installation identity needs the separate `--replace-identity` acknowledgement.
+No command silently resets, rotates, or regenerates identity. See [`docs/state-operations.md`](../../docs/state-operations.md)
+for schemas, guarantees, recovery behavior, and limitations.
+
+## Protected agents
+
+### Codex
+
+`privacyai agent codex` keeps stock Codex and the user's normal `CODEX_HOME`,
+including history, skills, plugins, user MCP servers, configuration, and login.
+Supported Responses traffic passes through the nonce-protected localhost
+PrivacyAI gateway. Resume and fork through the wrapper so they retain that
+boundary. `--privacy-strict` remains the prompt-only fallback.
+
+### Claude Code
+
+Claude Code uses native prompt and tool lifecycle hooks plus startup-context
+isolation. Supported tool inputs are restored locally and successful structured
+results are classified before becoming model-visible. A failure path that
+cannot be replaced safely stops before another model request.
+
+### AGY / Antigravity
+
+`privacyai agent agy` launches the installed AGY client through PrivacyAI's
+protected transport. `privacyai antigravity` is retained as a compatibility
+alias, and `--privacy-strict --print "..."` remains the prompt-only fallback.
+
+## Package boundary
+
+The internal `@privacy-ai/agent-bridge` workspace package is marked private.
+Use ordinary `npm publish` for a registry release, or run
+`npm run pack:production -- [npm pack options]` to build a local release
+tarball. Both paths copy the runtime source and hook binaries into the package,
+rewrite the packed manifest to depend only on the public SDK, and restore the
+workspace manifest and staging files after npm exits. The production pack
+wrapper also performs synchronous `finally` cleanup when tarball creation
+fails. Publish the matching SDK release before the CLI release.
+
+Current platform support is Linux and macOS. Windows remains blocked until an
+equivalent tested boundary is available.

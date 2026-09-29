@@ -1,0 +1,137 @@
+name: Deployment assurance
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/deployment-assurance.yml"
+      - "docs/deployment-assurance.md"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "scripts/deployment-assurance/**"
+      - "packages/agent-tui/**"
+      - "packages/agent-bridge/**"
+      - "packages/sdk/**"
+  push:
+    branches: [main, feature/wave3-deployment-assurance]
+    paths:
+      - ".github/workflows/deployment-assurance.yml"
+      - "docs/deployment-assurance.md"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "scripts/deployment-assurance/**"
+      - "packages/agent-tui/**"
+      - "packages/agent-bridge/**"
+      - "packages/sdk/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deployment-assurance-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installed-release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      CI: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - name: Check patch whitespace
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          base=origin/main
+          if [ "$GITHUB_EVENT_NAME" = "push" ] &&
+             [ -n "$BEFORE_SHA" ] &&
+             [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            base="$BEFORE_SHA"
+          fi
+          git diff --check "$base"...HEAD
+
+      - name: Test installed deployment lifecycle
+        run: |
+          set -o pipefail
+          pnpm test:deployment-assurance 2>&1 | tee deployment-assurance.log
+
+      - name: Test focused security and reliability regressions
+        run: >-
+          node --test
+          packages/agent-bridge/test/config-store-security.test.js
+          packages/agent-bridge/test/executable.test.js
+          packages/agent-bridge/test/process-supervisor.test.js
+          packages/agent-bridge/test/provider-registry.test.js
+          packages/agent-bridge/test/privacy-identity.test.js
+          packages/agent-bridge/test/lineage.test.js
+          packages/agent-bridge/test/lineage-review.test.js
+          packages/agent-bridge/test/cli-product.test.js
+
+      - name: Verify production publish dry-run and cleanup
+        run: |
+          (
+            cd packages/agent-tui
+            npm publish --dry-run --access public
+          )
+          test ! -e packages/agent-tui/vendor
+          test ! -e packages/agent-tui/.privacyai-package.json.pack-backup
+          test ! -e packages/agent-tui/.privacyai-package-watch
+
+      - name: Test canonical CLI package
+        run: pnpm --filter @privacy-ai/cli test
+
+      - name: Test full workspace
+        run: pnpm -r test
+
+      - name: Upload failed assurance log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-assurance-log
+          path: deployment-assurance.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  macos-installed-storage-gate:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    env:
+      CI: "true"
+      PRIVACYAI_ASSURANCE_SCOPE: platform-storage
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - name: Test macOS installed storage lifecycle
+        run: pnpm test:deployment-assurance
+      - name: Test macOS configuration storage boundaries
+        run: node --test packages/agent-bridge/test/config-store-security.test.js

@@ -1,6 +1,12 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 
+import {
+  DEFAULT_CLASSIFIER_CONCURRENCY,
+  DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
+  DEFAULT_OLLAMA_KEEP_ALIVE,
+  OLLAMA_MEMORY_FALLBACK_CONTEXT_TOKENS
+} from "@privacy-ai/sdk";
 import { savePrivacyConfig } from "./config-store.js";
 import { resolveExecutable } from "./executable.js";
 import { checkPrivacyModel } from "./model-health.js";
@@ -138,7 +144,10 @@ export async function runOnboarding(options = {}) {
         model: choice.name,
         apiKey: choice.apiKey || "not-required",
         timeoutMs: choice.provider === "lm-studio" ? 180000 : 60000,
-        numCtx: 4096,
+        numCtx: DEFAULT_LOCAL_MODEL_CONTEXT_TOKENS,
+        fallbackNumCtx: OLLAMA_MEMORY_FALLBACK_CONTEXT_TOKENS,
+        keepAlive: DEFAULT_OLLAMA_KEEP_ALIVE,
+        classifierConcurrency: DEFAULT_CLASSIFIER_CONCURRENCY,
         onboardedAt: new Date().toISOString()
       },
       { path: options.configPath }

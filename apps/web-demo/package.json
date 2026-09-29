@@ -5,9 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "node server.mjs",
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
+    "@privacy-ai/agent-bridge": "workspace:*",
     "@privacy-ai/sdk": "workspace:*"
   },
   "engines": {

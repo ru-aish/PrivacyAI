@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
-let runPrivacyAiCli;
-try {
-  ({ runPrivacyAiCli } = await import("@privacy-ai/agent-bridge/cli"));
-} catch (error) {
-  if (error?.code !== "ERR_MODULE_NOT_FOUND") throw error;
-  // Monorepo development fallback before workspace dependencies are installed.
-  ({ runPrivacyAiCli } = await import("../../agent-bridge/src/cli.js"));
-}
+import { readFile } from "node:fs/promises";
 
-process.exitCode = await runPrivacyAiCli();
+import { runPrivacyAiCli } from "../src/cli.js";
+
+const manifest = JSON.parse(
+  await readFile(new URL("../package.json", import.meta.url), "utf8")
+);
+
+process.exitCode = await runPrivacyAiCli(process.argv.slice(2), {
+  version: manifest.version
+});

@@ -1,4 +1,11 @@
 /**
+ * Canonical placeholder-to-original session map. Placeholder matching is exact
+ * for restoration; original matching is case-insensitive for sanitization.
+ *
+ * @typedef {Record<string, string>} SessionMap
+ */
+
+/**
  * @typedef {Object} Detection
  * @property {string} type
  * @property {string} value
@@ -13,7 +20,7 @@
  * @property {string} originalText
  * @property {string} sanitizedText
  * @property {Detection[]} detections
- * @property {Record<string, string>} sessionMap
+ * @property {SessionMap} sessionMap
  */
 
 /**
@@ -23,7 +30,6 @@
  * @property {string} modelText
  * @property {string} finalText
  * @property {Detection[]} detections
- * @property {Record<string, string>} sessionMap
+ * @property {SessionMap} sessionMap
  * @property {Object} provider
  */
-

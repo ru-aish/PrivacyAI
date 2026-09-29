@@ -1,0 +1,62 @@
+name: Provider adapters
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/provider-adapters.yml"
+      - "packages/agent-bridge/**"
+      - "packages/sdk/**"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-adapters-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Check patch whitespace
+        run: git diff --check origin/${{ github.base_ref }}...HEAD
+      - name: Test provider registry and CLI dispatch
+        env:
+          PRIVACYAI_CONTEXT_DB: ${{ runner.temp }}/privacyai-provider-focused.sqlite3
+        run: >-
+          node --test
+          packages/agent-bridge/test/provider-registry.test.js
+          packages/agent-bridge/test/cli.test.js
+      - name: Smoke public provider exports
+        working-directory: packages/agent-bridge
+        run: >-
+          node --input-type=module -e
+          'const root = await import("@privacy-ai/agent-bridge");
+          const providers = await import("@privacy-ai/agent-bridge/providers");
+          if (root.getProviderAdapter !== providers.getProviderAdapter) process.exit(1);
+          if (providers.listProviderAdapters().map(({ id }) => id).join(",") !== "claude,codex,antigravity") process.exit(1);'
+      - name: Test complete agent bridge
+        env:
+          PRIVACYAI_CONTEXT_DB: ${{ runner.temp }}/privacyai-provider-bridge.sqlite3
+        run: pnpm --filter @privacy-ai/agent-bridge test
+      - name: Test complete workspace
+        env:
+          PRIVACYAI_CONTEXT_DB: ${{ runner.temp }}/privacyai-provider-workspace.sqlite3
+        run: pnpm -r test

@@ -2,40 +2,102 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+import { rebaseSessionAdditions as rebaseSdkSessionAdditions } from "@privacy-ai/sdk";
 import { SessionVault } from "./session-vault.js";
+import {
+  openInstallationPrivacyIdentity,
+  sessionPrivacyIdentity
+} from "./privacy-identity.js";
 
 export const REINJECT_MARKER_PREFIX = "PRIVACYAI_REINJECT:";
+
+const SAFE_NATIVE_SLASH_COMMANDS = new Set([
+  "clear",
+  "doctor",
+  "help",
+  "login",
+  "logout",
+  "model",
+  "permissions",
+  "status",
+  "theme"
+]);
 
 export async function processPromptSubmission(event, options = {}) {
   validatePromptEvent(event);
   const runtimeDir = resolveRequiredRuntimeDir(options.runtimeDir);
   const prompt = event.prompt;
   const sessionId = event.session_id;
+  const identityRoot = await openInstallationPrivacyIdentity(options);
+  const privacyIdentity = sessionPrivacyIdentity(identityRoot, sessionId);
 
-  if (isNativeSlashCommand(prompt)) return null;
-  if (await consumeAllowance(runtimeDir, sessionId, prompt)) return null;
+  const nativeIngress = nativeContextIngress(prompt);
+  if (nativeIngress) {
+    return {
+      output: {
+        decision: "block",
+        reason:
+          `PrivacyAI blocked ${nativeIngress} because the native client expands it after prompt ` +
+          "sanitization and before provider submission."
+      }
+    };
+  }
+
+  const slashCommand = nativeSlashCommandName(prompt);
+  if (slashCommand) {
+    if (SAFE_NATIVE_SLASH_COMMANDS.has(slashCommand) && isNativeSlashCommand(prompt)) return null;
+    return {
+      output: {
+        decision: "block",
+        reason:
+          `PrivacyAI blocked /${slashCommand} because native slash commands can inject files, ` +
+          "history, diffs, or other context after prompt sanitization."
+      }
+    };
+  }
+  if (await consumeAllowance(runtimeDir, sessionId, prompt, { identityRoot })) return null;
 
   if (typeof options.sanitizer !== "function") {
     throw new TypeError("Prompt flow requires a sanitizer function.");
   }
 
-  const vault = options.vault || new SessionVault(options);
-  const current = await vault.load(sessionId);
-  const result = await options.sanitizer(prompt);
-  const rebased = rebaseSessionAdditions(
-    result?.sanitizedPrompt,
-    result?.sessionMap || {},
-    current.sessionMap
-  );
-  const sanitizedPrompt = rebased.sanitizedPrompt;
-  const sessionMap = rebased.sessionMap;
-
-  if (typeof sanitizedPrompt !== "string") {
+  const vault = options.vault || new SessionVault({ ...options, identityRoot });
+  const result = await options.sanitizer(prompt, {
+    identity: privacyIdentity,
+    artifactType: "native_prompt"
+  });
+  if (typeof result?.sanitizedPrompt !== "string") {
     throw new TypeError("Sanitizer did not return sanitizedPrompt.");
   }
-  if (sanitizedPrompt === prompt && Object.keys(sessionMap).length === 0) return null;
 
-  await vault.save(sessionId, { ...current.sessionMap, ...sessionMap });
+  const rawSessionMap = normalizePromptSessionMap(result.sessionMap);
+  const currentSnapshot = await vault.load(sessionId);
+  assertPromptContainsNoMappedOriginals(result.sanitizedPrompt, {
+    ...currentSnapshot.sessionMap,
+    ...rawSessionMap
+  });
+  if (result.sanitizedPrompt === prompt && Object.keys(rawSessionMap).length === 0) {
+    return null;
+  }
+
+  let sanitizedPrompt;
+  let sessionMap;
+  await vault.update(sessionId, current => {
+    const rebased = rebaseSessionAdditions(
+      result.sanitizedPrompt,
+      rawSessionMap,
+      current.sessionMap
+    );
+    sanitizedPrompt = rebased.sanitizedPrompt;
+    sessionMap = rebased.sessionMap;
+    assertPromptContainsNoMappedOriginals(sanitizedPrompt, {
+      ...current.sessionMap,
+      ...sessionMap
+    });
+    return { ...current.sessionMap, ...sessionMap };
+  });
+
+  if (sanitizedPrompt === prompt && Object.keys(sessionMap).length === 0) return null;
 
   const id = randomUUID();
   await writePrivateJson(join(runtimeDir, "pending", `${id}.json`), {
@@ -44,7 +106,7 @@ export async function processPromptSubmission(event, options = {}) {
     sanitizedPrompt,
     createdAt: new Date().toISOString()
   });
-  await createAllowance(runtimeDir, sessionId, sanitizedPrompt);
+  await createAllowance(runtimeDir, sessionId, sanitizedPrompt, { identityRoot });
 
   return {
     id,
@@ -59,56 +121,18 @@ export async function processPromptSubmission(event, options = {}) {
 }
 
 export function rebaseSessionAdditions(sanitizedPrompt, additions = {}, existing = {}) {
-  if (typeof sanitizedPrompt !== "string") {
-    throw new TypeError("Sanitizer did not return sanitizedPrompt.");
-  }
-
-  let text = sanitizedPrompt;
-  const sessionMap = {};
-  const occupied = new Set([...Object.keys(existing), ...Object.keys(additions)]);
-
-  for (const [dummy, original] of Object.entries(additions)) {
-    if (typeof dummy !== "string" || typeof original !== "string" || !dummy || !original) continue;
-
-    let target = dummy;
-    if (Object.hasOwn(existing, dummy) && existing[dummy] !== original) {
-      target = allocatePrivatePlaceholder(dummy, occupied);
-      text = text.split(dummy).join(target);
-    }
-    occupied.add(target);
-    sessionMap[target] = original;
-  }
-
-  return { sanitizedPrompt: text, sessionMap };
+  const result = rebaseSdkSessionAdditions(sanitizedPrompt, additions, existing);
+  return { sanitizedPrompt: result.sanitizedText, sessionMap: result.sessionMap };
 }
 
-function allocatePrivatePlaceholder(dummy, occupied) {
-  const match = dummy.match(/^\[([A-Z][A-Z0-9_]*)_(\d+)\]$/);
-  const type = match?.[1] || inferPlaceholderType(dummy);
-  let index = match ? Number(match[2]) + 1 : 1;
-  let candidate = `[${type}_${index}]`;
-  while (occupied.has(candidate)) {
-    index += 1;
-    candidate = `[${type}_${index}]`;
-  }
-  return candidate;
-}
-
-function inferPlaceholderType(dummy) {
-  if (/api|key|token|secret|credential/i.test(dummy)) return "API_KEY";
-  if (/email/i.test(dummy)) return "EMAIL";
-  if (/phone|555/.test(dummy)) return "PHONE";
-  return "PRIVATE_VALUE";
-}
-
-export async function createAllowance(runtimeDir, sessionId, prompt) {
-  const path = allowancePath(runtimeDir, sessionId, prompt);
+export async function createAllowance(runtimeDir, sessionId, prompt, options = {}) {
+  const path = allowancePath(runtimeDir, sessionId, prompt, options);
   await writePrivateJson(path, { createdAt: Date.now() });
   return path;
 }
 
-export async function consumeAllowance(runtimeDir, sessionId, prompt) {
-  const path = allowancePath(runtimeDir, sessionId, prompt);
+export async function consumeAllowance(runtimeDir, sessionId, prompt, options = {}) {
+  const path = allowancePath(runtimeDir, sessionId, prompt, options);
   try {
     const record = JSON.parse(await readFile(path, "utf8"));
     await rm(path, { force: true });
@@ -119,13 +143,60 @@ export async function consumeAllowance(runtimeDir, sessionId, prompt) {
   }
 }
 
-export function allowancePath(runtimeDir, sessionId, prompt) {
-  const digest = createHash("sha256").update(`${sessionId}\0${prompt}`).digest("hex");
+export function allowancePath(runtimeDir, sessionId, prompt, options = {}) {
+  const material = { version: 1, sessionId: String(sessionId), prompt: String(prompt) };
+  const digest = options.identityRoot?.digest
+    ? options.identityRoot.digest("runtime:prompt-allowance", material)
+    : createHash("sha256").update(`${sessionId}\0${prompt}`).digest("hex");
   return join(resolveRequiredRuntimeDir(runtimeDir), "allow", `${digest}.json`);
 }
 
 export function isNativeSlashCommand(prompt) {
   return /^\s*\/[A-Za-z][A-Za-z0-9_-]*\s*$/.test(prompt);
+}
+
+function normalizePromptSessionMap(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([placeholder, original]) =>
+        typeof placeholder === "string" &&
+        typeof original === "string" &&
+        placeholder.length > 0 &&
+        original.length > 0 &&
+        placeholder !== original
+    )
+  );
+}
+
+function assertPromptContainsNoMappedOriginals(prompt, sessionMap) {
+  let leakCount = 0;
+  const normalizedPrompt = prompt.toLocaleLowerCase("en-US");
+  for (const original of Object.values(sessionMap)) {
+    if (normalizedPrompt.includes(original.toLocaleLowerCase("en-US"))) leakCount += 1;
+  }
+  if (leakCount === 0) return;
+
+  const error = new Error(
+    `PrivacyAI blocked prompt reinjection because ${leakCount} protected value(s) remained.`
+  );
+  error.code = "PRIVACYAI_PROMPT_LEAK";
+  error.leakCount = leakCount;
+  throw error;
+}
+
+function nativeContextIngress(prompt) {
+  const value = String(prompt);
+  if (/^\s*!/.test(value)) return "a native shell escape";
+  if (/(^|[\s([{"'])@[^\s)\]}"',]+/.test(value)) {
+    return "a native file/context mention";
+  }
+  return null;
+}
+
+function nativeSlashCommandName(prompt) {
+  const match = String(prompt).match(/^\s*\/([A-Za-z][A-Za-z0-9_-]*)/);
+  return match ? match[1].toLowerCase() : null;
 }
 
 async function writePrivateJson(path, value) {

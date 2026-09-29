@@ -1,4 +1,4 @@
-> **Implementation update — July 11, 2026:** The earlier transport-proxy option in this research note was not adopted. The working prototype now keeps official provider routing untouched and uses native `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` hooks plus a transparent PTY. See `docs/native-agent-tui-wrapper.md`.
+> **Implementation update — July 2026:** This document records the earlier hook investigation. Codex now uses stock Codex through a bidirectional loopback Responses gateway. AGY now uses stock Antigravity through a process-scoped selective HTTPS boundary that preserves native tools and sanitizes the supported model request/response path. Prompt-only strict modes remain explicit fail-closed fallbacks. Claude retains its host-specific P0 boundary. See `docs/native-agent-tui-wrapper.md` for the current contract.
 
 # Agent CLI privacy layer: verified design for Claude Code and Codex
 

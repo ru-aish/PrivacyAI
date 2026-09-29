@@ -1,0 +1,67 @@
+name: Deterministic privacy identity
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches:
+      - feature/wave2-deterministic-privacy-identity
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Prepare isolated state
+        run: |
+          mkdir -p "$RUNNER_TEMP/privacyai"
+          echo "PRIVACYAI_CONTEXT_DB=$RUNNER_TEMP/privacyai/context-v4.db" >> "$GITHUB_ENV"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Focused identity and migration regressions
+        run: >-
+          node --test
+          packages/sdk/test/identity.test.js
+          packages/agent-bridge/test/privacy-identity.test.js
+          packages/agent-bridge/test/context-repository.test.js
+          packages/agent-bridge/test/context-verification-store.test.js
+          packages/agent-bridge/test/startup-cache.test.js
+      - run: pnpm --filter @privacy-ai/sdk test
+      - run: pnpm --filter @privacy-ai/agent-bridge test
+      - name: Full isolated workspace tests
+        run: pnpm -r test
+      - run: node --check packages/agent-bridge/src/privacy-identity.js
+      - run: git diff --check
+
+  windows-storage-fails-closed:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Verify persistent identity storage fails before writes
+        run: >-
+          node --test
+          --test-name-pattern="persistent identity storage fails closed on Windows before filesystem writes"
+          packages/agent-bridge/test/privacy-identity.test.js

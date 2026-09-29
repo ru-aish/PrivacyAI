@@ -2,7 +2,7 @@
 
 PrivacyAI is a local-first privacy and sanitization layer that intercepts and redacts Personally Identifiable Information (PII), credentials, and sensitive data before they are sent to AI chat models (like ChatGPT, Claude, and Gemini).
 
-It consists of a developer SDK (`@privacy-ai/sdk`), a browser extension to protect your daily chat workflows, and a local web demonstration.
+It consists of a developer SDK (`@privacy-ai/sdk`), a browser extension to protect your daily chat workflows, a canonical agent CLI (`@privacy-ai/cli`), and a local web demonstration.
 
 ---
 
@@ -50,7 +50,7 @@ Install dependencies, configure your local environment, and setup your chosen AI
 ```bash
 npm run setup
 ```
-*(This script works on macOS, Linux, and Windows).*
+*(The workspace setup script works on macOS, Linux, and Windows. The native agent bridge and its persistent installation-identity storage currently support Linux and macOS only; Windows fails closed before key creation or rotation.)*
 
 ### 2. Build the Workspace
 To build the SDK and the browser extension:
@@ -78,6 +78,9 @@ Verify the code integrity by running the test suites:
 # Run SDK unit tests
 pnpm -F @privacy-ai/sdk test
 
+# Run the canonical CLI tests
+pnpm -F @privacy-ai/cli test
+
 # Run Browser Extension E2E tests (requires Playwright)
 pnpm -F @privacy-ai/browser-extension test:e2e
 ```
@@ -91,7 +94,7 @@ You can also use the core library directly in your own JavaScript/Node projects:
 ```javascript
 import { PrivacySanitizer } from "@privacy-ai/sdk";
 
-const sanitizer = new PrivacySanitizer({ provider: 'regex' });
+const sanitizer = new PrivacySanitizer({ provider: "regex" });
 const { safePrompt, sessionMap } = await sanitizer.sanitize(
   "Hello, my email is jane@example.com."
 );
@@ -105,31 +108,64 @@ console.log(safePrompt);
 ## 📂 Project References
 
 * **SDK Library:** [packages/sdk/README.md](packages/sdk/README.md)
+* **Canonical CLI:** [packages/agent-tui/README.md](packages/agent-tui/README.md)
+* **Install and upgrade:** [docs/installing-and-upgrading.md](docs/installing-and-upgrading.md)
+* **Release process:** [docs/releasing.md](docs/releasing.md)
+* **Changelog:** [CHANGELOG.md](CHANGELOG.md)
 * **Web Demo:** [apps/web-demo/README.md](apps/web-demo/README.md)
 * **Extension Source:** [apps/browser-extension/README.md](apps/browser-extension/README.md)
 * **Architecture Docs:** [docs/architecture.md](docs/architecture.md)
+* **Local-State Operations:** [docs/state-operations.md](docs/state-operations.md)
+* **P0 Visual Review:** [interactive problem → solution walkthrough](docs/p0-context-privacy-review.html) · [mobile preview](docs/p0-context-privacy-review-preview.png)
 * **Code Examples:** [examples/README.md](examples/README.md)
-## Native Claude Code and Codex protection
 
-PrivacyAI can wrap the user's existing agent CLI without proxying inference or
-replacing its terminal interface:
+## Native Claude Code, Codex, and Antigravity protection
+
+PrivacyAI exposes one global package and one command for all supported agents,
+onboarding, diagnostics, cache and lineage inspection, and explicit local-state operations:
 
 ```bash
-npm install --global @privacy-ai/agent-tui
+npm install --global @privacy-ai/cli@latest
+privacyai --version
 privacyai onboard
-privacyai claude
-privacyai codex
+privacyai doctor
+privacyai state preflight
+privacyai agent claude
+privacyai agent codex
+privacyai agent agy --print "your prompt"
 ```
 
-Onboarding scans both Ollama and a running LM Studio local server and lets the
-user choose any usable downloaded language model. The original prompt is then
-sanitized locally before the official CLI sends it. Placeholder values are then
-restored recursively immediately before any hooked built-in, app, plugin, or MCP
-tool executes, and known real values in successful tool results are sanitized
-before returning to the task model. Claude hook-disabling modes are rejected,
-and a failed Claude tool result containing a known original is stopped before a
-next provider request. Native local session history may retain real values by
-design; the remote provider receives the sanitized conversation. Current
-support is Linux and macOS; file contents, project instructions, skills, and
-other context injected before the prompt hook remain outside this boundary.
-See `docs/native-agent-tui-wrapper.md` for the design and verified results.
+The CLI currently supports Linux and macOS on Node.js 18.18 or newer. Upgrade,
+rollback, migration, global-permission, and interrupted-install recovery steps
+are documented in [Installing and upgrading](docs/installing-and-upgrading.md).
+
+The earlier direct forms (`privacyai claude`, `privacyai codex`, `privacyai agy`,
+and `privacyai antigravity`) remain supported compatibility aliases. Users do
+not install separate PrivacyAI agent packages.
+
+Codex defaults to a bidirectional loopback Responses gateway. It keeps the
+normal `CODEX_HOME`, account, model, history, skills, plugins, user MCP servers,
+filesystem, shell, patch, Git, resume, fork, exec, and review workflows. On
+Unix-like systems, inside an interactive protected Codex TUI, `/resume`,
+`/resume --all`, `/resume --last`, `/fork`, `/fork --all`, and `/fork --last`
+restart stock Codex through the same protected gateway. The shell forms
+`privacyai agent codex resume ...` and `privacyai agent codex fork ...` remain
+available. Running raw `codex resume` or `codex fork` bypasses PrivacyAI and may
+submit unsanitized local history. Model-visible request content is sanitized
+locally; streamed assistant text and completed tool arguments are restored
+before stock Codex consumes them. The prior prompt-only mode remains available
+with `privacyai agent codex --privacy-strict`.
+
+Claude Code continues to use startup isolation plus supported native prompt/tool
+hooks. AGY defaults to a process-scoped selective HTTPS boundary around the
+stock CLI: normal files, terminal, browser, MCPs, account, model, and native tool
+execution remain available while supported model-bound text/JSON is sanitized
+locally and streamed output is restored before AGY consumes it. The earlier
+fresh one-shot, tool-denied behavior remains available as
+`privacyai agent agy --privacy-strict`. All hosts fail closed when a
+provider-facing boundary cannot be verified. See
+`docs/native-agent-tui-wrapper.md` for architecture, tests, and limitations.
+
+`privacyai cache` and `privacyai lineage` inspect only metadata from the existing
+local context database in read-only mode. They never print session-map originals
+or initialize, migrate, clear, or prune state.

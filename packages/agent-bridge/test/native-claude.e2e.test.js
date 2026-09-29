@@ -1,9 +1,9 @@
+import { createTestTempDir } from "./test-temp-dir.js";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -23,7 +23,7 @@ test(
 );
 
 async function runScenario({ failure }) {
-  const root = await mkdtemp(join(tmpdir(), `privacyai-claude-${failure ? "failure" : "success"}-`));
+  const root = await createTestTempDir(`privacyai-claude-${failure ? "failure" : "success"}-`);
   const settingsPath = join(root, "settings.json");
   const mcpConfigPath = join(root, "mcp.json");
   const mcpScriptPath = join(root, "fake-mail-mcp.mjs");

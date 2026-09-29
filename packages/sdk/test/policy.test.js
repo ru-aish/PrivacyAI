@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { extractProtectedSpans, findProtectedSpan, findRedactableSubspans } from "../src/policy/span-policy.js";
 import { shouldRedact, classifyDetections } from "../src/policy/redaction-policy.js";
 import { RedactionPlan } from "../src/redaction-plan.js";
+import { allocateUniqueDummy, generateDummy } from "../src/dummy-data.js";
 import { RegexDetector } from "../src/detectors/regex.js";
 
 test("extractProtectedSpans finds URLs", () => {
@@ -113,6 +114,43 @@ test("RedactionPlan preserves protected spans while redacting sensitive content"
 
   assert.doesNotMatch(result.sanitizedText, /john@example\.com/);
   assert.match(result.sanitizedText, /https:\/\/github\.com/);
+});
+
+test("RedactionPlan allocates unbounded identity dummies after built-in pools are exhausted", () => {
+  const cases = [
+    ["PERSON", 8, "Person 10"],
+    ["ORGANIZATION", 7, "Organization 9"],
+    ["LOCATION", 7, "Location 9"]
+  ];
+
+  for (const [type, poolSize, expected] of cases) {
+    const existing = [
+      ...Array.from({ length: poolSize }, (_, index) => generateDummy(type, index + 1)),
+      generateDummy(type, poolSize + 1)
+    ];
+    const plan = new RedactionPlan(existing.join(" | "));
+    assert.equal(plan.createUniqueDummy(type, 1), expected);
+  }
+});
+
+test("dummy generators remain unique beyond their previous formatting boundaries", () => {
+  const oldWrapBoundaries = [
+    ["SSN", 1, 10001],
+    ["CREDIT_CARD", 1, 10001],
+    ["ZIP", 1, 100001],
+    ["MRN", 1, 100001]
+  ];
+
+  for (const [type, first, wrapped] of oldWrapBoundaries) {
+    assert.notEqual(generateDummy(type, first), generateDummy(type, wrapped), type);
+  }
+});
+
+test("unique dummy allocation fails closed instead of spinning forever", () => {
+  assert.throws(
+    () => allocateUniqueDummy("PERSON", 1, () => true, { maxAttempts: 3 }),
+    error => error?.code === "PRIVACYAI_DUMMY_ALLOCATION_EXHAUSTED"
+  );
 });
 
 test("RedactionPlan redacts URL credentials without destroying the URL", () => {

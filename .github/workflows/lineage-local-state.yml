@@ -1,0 +1,70 @@
+name: Lineage local state
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/lineage-local-state.yml"
+      - "docs/lineage-local-state.md"
+      - "packages/agent-bridge/**"
+      - "packages/sdk/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lineage-local-state-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Check changed files
+        run: git diff --check origin/${{ github.base_ref }}...HEAD
+      - name: Check lineage syntax
+        run: |
+          node --check packages/agent-bridge/src/lineage/domain.js
+          node --check packages/agent-bridge/src/lineage/schema.js
+          node --check packages/agent-bridge/src/lineage/sqlite-repository.js
+          node --check packages/agent-bridge/src/lineage/open.js
+          node --check packages/agent-bridge/src/lineage/index.js
+          node --check packages/agent-bridge/test/fixtures/lineage-child.js
+          node --check packages/agent-bridge/test/lineage.test.js
+          node --check packages/agent-bridge/test/lineage-review.test.js
+      - name: Test immutable lineage repository
+        run: node --test packages/agent-bridge/test/lineage.test.js packages/agent-bridge/test/lineage-review.test.js
+      - name: Test SDK contracts
+        run: pnpm --filter @privacy-ai/sdk test
+      - name: Test agent bridge
+        shell: bash
+        run: |
+          set +e
+          pnpm --filter @privacy-ai/agent-bridge test > agent-bridge-test.log 2>&1
+          status=$?
+          tail -n 120 agent-bridge-test.log
+          exit "$status"
+      - name: Upload agent bridge test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-bridge-test-log
+          path: agent-bridge-test.log
+          if-no-files-found: error
+          retention-days: 3
+      - name: Test product shell integration
+        if: always()
+        run: pnpm --filter @privacy-ai/agent-tui test
