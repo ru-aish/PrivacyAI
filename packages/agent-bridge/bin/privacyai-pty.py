@@ -4,7 +4,7 @@
 The child owns a real pseudo-terminal, so its native TUI, slash commands,
 keyboard handling, colors, and permission dialogs remain unchanged. The bridge
 watches output for PrivacyAI reinjection markers and can restart a protected
-Codex TUI when the user enters an exact local /resume or /fork command.
+Codex TUI when the user enters an exact local /resume command.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from pathlib import Path
 
 MARKER = re.compile(rb"\[PRIVACYAI_REINJECT:([0-9a-fA-F-]{36})\]")
 SESSION_ACTION = re.compile(
-    rb"^\s*/(resume|fork)(?:\s+(--last|--all|[A-Za-z0-9][A-Za-z0-9._:-]{0,255}))?\s*$"
+    rb"^\s*/(resume)(?:\s+(--last|--all|[A-Za-z0-9][A-Za-z0-9._: -]{0,254}))?\s*$"
 )
 MAX_SCAN_BYTES = 16384
 MAX_SESSION_ACTION_BYTES = 512
@@ -124,7 +124,7 @@ def parse_session_action(value: bytes) -> dict[str, object] | None:
     return {
         "version": 1,
         "action": match.group(1).decode("ascii"),
-        "selector": selector.decode("ascii") if selector else None,
+        "selector": selector.decode("ascii").strip() if selector else None,
     }
 
 

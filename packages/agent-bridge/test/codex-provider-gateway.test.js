@@ -157,6 +157,55 @@ test("Codex body metadata drops private IDs, nested analytics, and WebSocket tra
   assert.equal(JSON.stringify(result.body.client_metadata).includes(PRIVATE_KEY), false);
 });
 
+test("Codex internal message metadata accepts current stock timestamp and content classifications", async () => {
+  const body = sampleRequest();
+  body.input[0].internal_chat_message_metadata_passthrough = {
+    turn_id: "auto-compact-0",
+    create_time: 1790716396.5951645,
+    content_item_kinds: ["user.text"]
+  };
+
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: deterministicSanitizer,
+    fallbackSessionId: "fallback"
+  });
+
+  assert.deepEqual(
+    result.body.input[0].internal_chat_message_metadata_passthrough,
+    {
+      turn_id: "auto-compact-0",
+      create_time: 1790716396.5951645,
+      content_item_kinds: ["user.text"]
+    }
+  );
+
+  const unsupported = sampleRequest();
+  unsupported.input[0].internal_chat_message_metadata_passthrough = {
+    turn_id: "turn-safe",
+    executed_tool_calls: []
+  };
+  await assert.rejects(
+    sanitizeCodexRequestBody(unsupported, {
+      sanitizer: deterministicSanitizer,
+      fallbackSessionId: "fallback"
+    }),
+    error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
+  );
+
+  const misaligned = sampleRequest();
+  misaligned.input[0].internal_chat_message_metadata_passthrough = {
+    create_time: 1790716396,
+    content_item_kinds: ["user.text", "agents_md.instructions"]
+  };
+  await assert.rejects(
+    sanitizeCodexRequestBody(misaligned, {
+      sanitizer: deterministicSanitizer,
+      fallbackSessionId: "fallback"
+    }),
+    error => error?.code === "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE"
+  );
+});
+
 test("Codex request transformation sanitizes model-visible fields and preserves protocol identity", async () => {
   const body = sampleRequest();
   const result = await sanitizeCodexRequestBody(body, {

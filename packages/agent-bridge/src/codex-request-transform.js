@@ -1713,13 +1713,42 @@ function validateResponseItemShape(item, allowed, label) {
 function sanitizeInternalMessageMetadata(item) {
   const key = "internal_chat_message_metadata_passthrough";
   if (item[key] == null) return;
-  assertPlainObject(item[key], "internal chat metadata");
-  assertOnlyKeys(item[key], new Set(["turn_id"]), "internal chat metadata");
-  if (item[key].turn_id == null) {
-    delete item[key];
-    return;
+  const metadata = item[key];
+  assertPlainObject(metadata, "internal chat metadata");
+  assertOnlyKeys(
+    metadata,
+    new Set(["turn_id", "create_time", "content_item_kinds"]),
+    "internal chat metadata"
+  );
+
+  if (metadata.turn_id != null) {
+    assertProtocolToken(metadata.turn_id, "internal turn id", 256);
   }
-  assertProtocolToken(item[key].turn_id, "internal turn id", 256);
+  if (
+    metadata.create_time != null &&
+    (typeof metadata.create_time !== "number" || !Number.isFinite(metadata.create_time) || metadata.create_time < 0)
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_PROTOCOL_TOKEN",
+      "PrivacyAI blocked an invalid Codex internal message creation time."
+    );
+  }
+  if (metadata.content_item_kinds != null) {
+    if (
+      !Array.isArray(metadata.content_item_kinds) ||
+      !Array.isArray(item.content) ||
+      metadata.content_item_kinds.length !== item.content.length
+    ) {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        "PrivacyAI blocked misaligned Codex internal content classifications."
+      );
+    }
+    for (const kind of metadata.content_item_kinds) {
+      assertProtocolToken(kind, "internal content classification", 128);
+    }
+  }
+  if (Object.values(metadata).every(value => value == null)) delete item[key];
 }
 
 function validateProviderItemMetadata(value, label) {
