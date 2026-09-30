@@ -2,10 +2,10 @@ import { firstCodexCommand, splitCodexArguments } from "./codex-arguments.js";
 
 export const CODEX_TUI_SESSION_ACTION_EXIT_CODE = 86;
 
-const SESSION_ACTIONS = new Set(["resume", "fork"]);
+const SESSION_ACTIONS = new Set(["resume"]);
 const SESSION_SELECTORS = new Set(["--last", "--all"]);
 const HELP_VERSION_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
-const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._: -]{0,254}$/;
 
 const PERSISTENT_VALUE_OPTIONS = new Set([
   "--add-dir",
@@ -24,13 +24,19 @@ const PERSISTENT_VALUE_OPTIONS = new Set([
 ]);
 
 const PERSISTENT_BOOLEAN_OPTIONS = new Set([
+  "--approve-for-me",
   "--dangerously-bypass-approvals-and-sandbox",
   "--dangerously-bypass-hook-trust",
   "--no-alt-screen",
-  "--strict-config"
+  "--no-daemon",
+  "--not-so-yolo",
+  "--search",
+  "--strict-config",
+  "--yolo"
 ]);
 
 const NON_INTERACTIVE_COMMANDS = new Set([
+  "agents",
   "app-server",
   "a",
   "apply",
@@ -43,16 +49,22 @@ const NON_INTERACTIVE_COMMANDS = new Set([
   "e",
   "exec",
   "exec-server",
+  "execpolicy",
   "features",
   "help",
   "login",
   "logout",
   "mcp",
   "mcp-server",
+  "migrate-rollouts",
   "plugin",
+  "queue",
   "remote-control",
+  "responses-api-proxy",
   "review",
   "sandbox",
+  "stdio-to-uds",
+  "tcp-tunnel",
   "unarchive",
   "update"
 ]);
@@ -61,7 +73,7 @@ export function parseCodexTuiSessionActionRecord(record) {
   if (!record || typeof record !== "object" || Array.isArray(record)) return null;
   if (record.version !== 1 || !SESSION_ACTIONS.has(record.action)) return null;
 
-  const selector = record.selector == null ? null : String(record.selector);
+  const selector = record.selector == null ? null : String(record.selector).trim();
   if (
     selector !== null &&
     !SESSION_SELECTORS.has(selector) &&

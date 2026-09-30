@@ -266,13 +266,13 @@ test("a warm Codex gateway launch proves the startup fingerprint and skips promp
   assert.equal(captures, 2);
 });
 
-test("Codex gateway relaunches protected resume and fork actions requested inside the TUI", async () => {
+test("Codex gateway relaunches protected resume actions requested inside the TUI", async () => {
   const root = await createTestTempDir("privacyai-launch-session-action-");
   const configPath = await writeTestConfig(root);
   const launches = [];
   let closed = 0;
 
-  const result = await launchNativeTui("codex", ["--no-alt-screen", "-C", root], {
+  const result = await launchNativeTui("codex", ["--no-alt-screen", "--search", "--approve-for-me", "--no-daemon", "-C", root], {
     configPath,
     binary: "/fake/stock-codex",
     python: "/fake/python3",
@@ -315,8 +315,11 @@ test("Codex gateway relaunches protected resume and fork actions requested insid
   assert.equal(closed, 1);
   assert.equal(launches.length, 2);
   assert.equal(launches[0].args.includes("resume"), false);
-  assert.deepEqual(launches[1].args.slice(-5), [
+  assert.deepEqual(launches[1].args.slice(-8), [
     "--no-alt-screen",
+    "--search",
+    "--approve-for-me",
+    "--no-daemon",
     "-C",
     root,
     "resume",

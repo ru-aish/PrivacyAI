@@ -23,6 +23,10 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Codex gateway compatibility is validated against stock Codex 0.159.1, including
+  direct MCP namespaces and current model-driven custom tool definitions.
+- Native Codex `/fork [name]` stays inside the protected 0.159.1 TUI and inherits
+  the active PrivacyAI provider instead of being misread as a resume-style relaunch.
 - Release packaging now requires one exact version across the SDK, private
   bridge runtime, and CLI, including exact internal workspace dependency
   specifiers.
@@ -34,6 +38,10 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Protected Codex `/resume` relaunches preserve current TUI launch state including
+  `--search`, `--approve-for-me`, and `--no-daemon`, and accept named sessions.
+- Stock Codex integration coverage accepts 0.159.1's direct MCP namespaces while
+  retaining compatibility with deferred `tool_search` exposure.
 - Release retries safely continue after a partial SDK-only publish by verifying
   registry integrity and skipping only an exact existing artifact.
 
