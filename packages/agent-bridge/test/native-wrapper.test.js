@@ -219,7 +219,14 @@ test("argument guards preserve normal Codex workflows while blocking provider by
   assert.doesNotThrow(() => validateNativeArguments("codex", ["-c", "model_reasoning_effort=\"high\""]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--model", "resume"]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--", "resume"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--approve-for-me"]));
+  assert.doesNotThrow(() => validateNativeArguments("codex", ["--no-daemon"]));
 
+  assert.throws(() => validateNativeArguments("codex", ["agents"]), /bypasses the protected provider session/);
+  assert.throws(() => validateNativeArguments("codex", ["queue", "thread-id", "hello"]), /bypasses the protected provider session/);
+  assert.throws(() => validateNativeArguments("codex", ["responses-api-proxy"]), /bypasses the protected provider session/);
+  assert.throws(() => validateNativeArguments("codex", ["stdio-to-uds", "/tmp/codex.sock"]), /bypasses the protected provider session/);
+  assert.throws(() => validateNativeArguments("codex", ["tcp-tunnel"]), /bypasses the protected provider session/);
   assert.throws(() => validateNativeArguments("codex", ["--remote", "unix:///tmp/server"]), /not protected by the local provider gateway/);
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--search"]));
   assert.doesNotThrow(() => validateNativeArguments("codex", ["--enable", "image_generation"]));
@@ -1158,7 +1165,20 @@ test("Unix PTY helper converts exact Codex session commands into private launche
   });
 
   const forkActionPath = join(root, "fork-action.json");
-  const forkInput = String.fromCharCode(27) + "/fork --all" + String.fromCharCode(13);
+  const forkTui = join(root, "fork-tui.py");
+  await writeFile(
+    forkTui,
+    [
+      "import os,sys",
+      "data=b''",
+      "while not data.endswith((b'\\r', b'\\n')):",
+      "    chunk=os.read(sys.stdin.fileno(), 1)",
+      "    if not chunk: break",
+      "    data += chunk",
+      "print('FORWARDED:'+data.decode(errors='replace'), flush=True)"
+    ].join("\n")
+  );
+  const forkInput = String.fromCharCode(27) + "/fork release-sync" + String.fromCharCode(13);
   const forkResult = await runProcessWithInput("python3", [
     PTY_HELPER,
     "--runtime-dir",
@@ -1168,15 +1188,13 @@ test("Unix PTY helper converts exact Codex session commands into private launche
     "--session-action-file",
     forkActionPath,
     "--",
-    "/bin/cat"
+    "python3",
+    forkTui
   ], forkInput);
 
-  assert.equal(forkResult.code, 86);
-  assert.deepEqual(JSON.parse(await readFile(forkActionPath, "utf8")), {
-    version: 1,
-    action: "fork",
-    selector: "--all"
-  });
+  assert.equal(forkResult.code, 0);
+  await assert.rejects(readFile(forkActionPath, "utf8"), /ENOENT/);
+  assert.match(forkResult.stdout, /\/fork release-sync/);
 
   const navigationActionPath = join(root, "navigation-action.json");
   const finiteTui = join(root, "finite-tui.py");
@@ -1226,8 +1244,8 @@ test("Unix PTY session actions survive line editing and bracketed paste", async 
     },
     {
       name: "bracketed-paste",
-      input: String.fromCharCode(27) + "[200~/fork --last" + String.fromCharCode(27) + "[201~" + String.fromCharCode(13),
-      expected: { version: 1, action: "fork", selector: "--last" }
+      input: String.fromCharCode(27) + "[200~/resume Research thread" + String.fromCharCode(27) + "[201~" + String.fromCharCode(13),
+      expected: { version: 1, action: "resume", selector: "Research thread" }
     }
   ];
 

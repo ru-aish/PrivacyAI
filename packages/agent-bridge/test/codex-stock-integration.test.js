@@ -247,11 +247,11 @@ test("installed stock Codex preserves custom Lark grammar under a false-positive
   const args = [
     ...buildCodexProviderArgs(gateway.baseURL),
     "-m",
-    "gpt-5.4-mini",
+    "gpt-5.5",
     "-a",
     "never",
     "-s",
-    "read-only",
+    "workspace-write",
     "exec",
     "--skip-git-repo-check",
     "Reply with exactly TOOL_GRAMMAR_OK and do not call tools."

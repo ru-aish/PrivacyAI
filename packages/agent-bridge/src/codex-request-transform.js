@@ -14,7 +14,7 @@ import {
   collectCodexJsonSchema,
   finalizeCodexJsonSchemaTrace
 } from "./codex-json-schema-policy.js";
-import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
+import { modelVisibleVerificationKey, sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
 import { deterministicProviderIdentifier, identityDomainForAlias } from "./privacy-identity.js";
 import { assertImmutableToolString } from "./immutable-tool-structure.js";
 
@@ -77,6 +77,12 @@ const RESERVED_METADATA_FIELDS = new Set([
   "x-codex-turn-state"
 ]);
 
+// These provider-owned bindings have fixed public protocol names. Matching
+// strings in user text, descriptions, arguments, or custom namespaces still
+// cross the privacy classifier.
+const CODEX_COLLABORATION_BINDINGS = new Set([
+  "followup_task", "interrupt_agent", "list_agents", "send_message", "spawn_agent", "wait_agent"
+]);
 const PROVIDER_IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]+$/;
 const PROVIDER_IDENTIFIER_ALIAS_MAX_LENGTH = 64;
 const DEFAULT_MAX_IMAGES_PER_REQUEST = 8;
@@ -208,6 +214,7 @@ export async function sanitizeCodexRequestBody(body, options = {}) {
     identityRoot: options.identityRoot,
     sessionMap: imageSessionMap,
     cache: createProtocolKeyVerificationCache(options.cache, transformed),
+    legacyCacheNamespace: "cache:codex-model-visible",
     policyFingerprint,
     maxContextChars: options.maxContextChars,
     maxContextTokens: options.maxContextTokens,
@@ -980,8 +987,10 @@ function collectResponseItem(item, slots, path, context = {}) {
         "function_call"
       );
       validateStatus(item.status, "function call status", false);
-      collectRequiredProviderIdentifier(item, "name", slots, path);
-      collectOptionalProviderIdentifier(item, "namespace", slots, path);
+      if (!isCodexCollaborationBinding(item.namespace, item.name)) {
+        collectRequiredProviderIdentifier(item, "name", slots, path);
+        collectOptionalProviderIdentifier(item, "namespace", slots, path);
+      }
       requireProtocolIdentity(item.call_id, "function call id");
       collectJsonStringField(item, "arguments", slots, path);
       return;
@@ -1300,7 +1309,9 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         new Set(["type", "name", "description", "strict", "defer_loading", "parameters"]),
         "function tool"
       );
-      collectRequiredProviderIdentifier(tool, "name", slots, path);
+      if (!isCodexCollaborationBinding(options.namespaceName, tool.name)) {
+        collectRequiredProviderIdentifier(tool, "name", slots, path);
+      }
       collectRequiredString(tool, "description", slots, path);
       if (typeof tool.strict !== "boolean") {
         throw gatewayError(
@@ -1331,7 +1342,9 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         );
       }
       assertOnlyKeys(tool, new Set(["type", "name", "description", "tools"]), "tool namespace");
-      collectRequiredProviderIdentifier(tool, "name", slots, path);
+      if (tool.name !== "collaboration") {
+        collectRequiredProviderIdentifier(tool, "name", slots, path);
+      }
       collectRequiredString(tool, "description", slots, path);
       if (!Array.isArray(tool.tools)) {
         throw gatewayError(
@@ -1349,7 +1362,8 @@ function collectToolDefinition(tool, slots, path, options = {}) {
         collectToolDefinition(child, slots, [...path, "tools", index], {
           ...options,
           nested: true,
-          namespaceChild: true
+          namespaceChild: true,
+          namespaceName: tool.name
         });
       });
       return;
@@ -1713,13 +1727,42 @@ function validateResponseItemShape(item, allowed, label) {
 function sanitizeInternalMessageMetadata(item) {
   const key = "internal_chat_message_metadata_passthrough";
   if (item[key] == null) return;
-  assertPlainObject(item[key], "internal chat metadata");
-  assertOnlyKeys(item[key], new Set(["turn_id"]), "internal chat metadata");
-  if (item[key].turn_id == null) {
-    delete item[key];
-    return;
+  const metadata = item[key];
+  assertPlainObject(metadata, "internal chat metadata");
+  assertOnlyKeys(
+    metadata,
+    new Set(["turn_id", "create_time", "content_item_kinds"]),
+    "internal chat metadata"
+  );
+
+  if (metadata.turn_id != null) {
+    assertProtocolToken(metadata.turn_id, "internal turn id", 256);
   }
-  assertProtocolToken(item[key].turn_id, "internal turn id", 256);
+  if (
+    metadata.create_time != null &&
+    (typeof metadata.create_time !== "number" || !Number.isFinite(metadata.create_time) || metadata.create_time < 0)
+  ) {
+    throw gatewayError(
+      "PRIVACYAI_CODEX_INVALID_PROTOCOL_TOKEN",
+      "PrivacyAI blocked an invalid Codex internal message creation time."
+    );
+  }
+  if (metadata.content_item_kinds != null) {
+    if (
+      !Array.isArray(metadata.content_item_kinds) ||
+      !Array.isArray(item.content) ||
+      metadata.content_item_kinds.length !== item.content.length
+    ) {
+      throw gatewayError(
+        "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE",
+        "PrivacyAI blocked misaligned Codex internal content classifications."
+      );
+    }
+    for (const kind of metadata.content_item_kinds) {
+      assertProtocolToken(kind, "internal content classification", 128);
+    }
+  }
+  if (Object.values(metadata).every(value => value == null)) delete item[key];
 }
 
 function validateProviderItemMetadata(value, label) {
@@ -1761,6 +1804,10 @@ function collectOptionalString(object, key, slots, path) {
     );
   }
   slots.push({ path: [...path, key], value: object[key] });
+}
+
+function isCodexCollaborationBinding(namespace, name) {
+  return namespace === "collaboration" && CODEX_COLLABORATION_BINDINGS.has(name);
 }
 
 function collectRequiredProviderIdentifier(object, key, slots, path) {
@@ -2316,25 +2363,9 @@ function modelVisibleCacheKey(
   objectKeyPolicyKey = "keys-and-values",
   identityRoot
 ) {
-  const material = {
-    version: 1,
-    policyFingerprint: String(policyFingerprint),
-    artifactType: String(artifactType),
-    objectKeyPolicyKey: String(objectKeyPolicyKey),
-    value
-  };
-  if (identityRoot?.digest) {
-    return identityRoot.digest("cache:codex-model-visible", material);
-  }
-  return createHash("sha256")
-    .update(String(policyFingerprint))
-    .update("\0")
-    .update(String(artifactType))
-    .update("\0")
-    .update(String(objectKeyPolicyKey))
-    .update("\0")
-    .update(JSON.stringify(value))
-    .digest("hex");
+  return modelVisibleVerificationKey(
+    value, artifactType, policyFingerprint, objectKeyPolicyKey, identityRoot
+  );
 }
 
 function modelVisibleContentHash(value) {

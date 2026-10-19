@@ -45,7 +45,21 @@ export async function sanitizeModelVisibleArtifacts(slots, options = {}) {
       entry.objectKeyPolicyKey,
       options.identityRoot
     );
-    const cached = options.cache?.get?.(cacheKey, policyFingerprint);
+    let cached = options.cache?.get?.(cacheKey, policyFingerprint);
+    if (!cached && options.legacyCacheNamespace && options.identityRoot?.digest) {
+      const legacyKey = options.identityRoot.digest(options.legacyCacheNamespace, {
+        version: 1,
+        policyFingerprint,
+        artifactType: entry.artifactType,
+        objectKeyPolicyKey: entry.objectKeyPolicyKey,
+        value: entry.value
+      });
+      cached = options.cache?.get?.(legacyKey, policyFingerprint);
+      if (cached?.sessionMapAdditions) {
+        cacheWrites.push([cacheKey, { ...cached, cacheKey, contentHash,
+          artifactType: entry.artifactType, policyFingerprint }]);
+      }
+    }
     const candidate = { ...entry, index, cacheKey, contentHash };
 
     itemRecords.push({
@@ -246,6 +260,18 @@ function requiredLabel(value, label) {
   const normalized = String(value || "");
   if (!normalized) throw new TypeError(`Model-visible ${label} must be non-empty.`);
   return normalized;
+}
+
+export function modelVisibleVerificationKey(
+  value,
+  artifactType,
+  policyFingerprint,
+  objectKeyPolicyKey = "keys-and-values",
+  identityRoot
+) {
+  return verificationKeyFromSerialized(
+    JSON.stringify(value), artifactType, policyFingerprint, objectKeyPolicyKey, identityRoot
+  );
 }
 
 function verificationKeyFromSerialized(

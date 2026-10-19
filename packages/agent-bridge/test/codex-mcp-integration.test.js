@@ -60,7 +60,8 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
   const captured = [];
   const serverErrors = [];
   const gatewayErrors = [];
-  let turn = 0;
+  let requestedToolSearch = false;
+  let requestedMcpCall = false;
   const upstream = await startServer(async (request, response) => {
     if (request.method === "GET" && request.url.startsWith("/v1/models")) {
       response.writeHead(200, { "content-type": "application/json" });
@@ -72,31 +73,42 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
     const serialized = JSON.stringify(body);
     assert.equal(serialized.includes(PRIVATE_ARG), false);
     assert.equal(serialized.includes(PRIVATE_RESULT), false);
-    turn += 1;
+    if (!requestedMcpCall) {
+      const directTool = findMcpTool(body.tools || [], "echo_private");
+      if (directTool) {
+        requestedMcpCall = true;
+        writeSse(response, [
+          responseCreated("resp-mcp-call"),
+          functionCall("call-mcp", directTool.name, { message: ARG_PLACEHOLDER }, directTool.namespace),
+          responseCompleted("resp-mcp-call")
+        ]);
+        return;
+      }
 
-    if (turn === 1) {
-      assert.equal(
-        (body.tools || []).some(tool => tool?.type === "tool_search"),
-        true,
-        `Stock Codex should expose tool_search for deferred MCPs: ${summarizeTools(body.tools || [])}`
-      );
-      writeSse(response, [
-        responseCreated("resp-mcp-search"),
-        toolSearchCall("search-mcp", { query: "privacy_test echo_private MCP tool", limit: 8 }),
-        responseCompleted("resp-mcp-search")
-      ]);
-      return;
-    }
+      if (!requestedToolSearch) {
+        assert.equal(
+          (body.tools || []).some(tool => tool?.type === "tool_search"),
+          true,
+          "Stock Codex should expose the MCP directly or through tool_search: " + summarizeTools(body.tools || [])
+        );
+        requestedToolSearch = true;
+        writeSse(response, [
+          responseCreated("resp-mcp-search"),
+          toolSearchCall("search-mcp", { query: "privacy_test echo_private MCP tool", limit: 8 }),
+          responseCompleted("resp-mcp-search")
+        ]);
+        return;
+      }
 
-    if (turn === 2) {
       const searchableTools = body.input
         .filter(item => item.type === "tool_search_output")
         .flatMap(item => item.tools || []);
       const tool = findMcpTool(searchableTools, "echo_private");
       assert.ok(
         tool,
-        `MCP tool not returned by native tool_search: ${summarizeTools(searchableTools)}`
+        "MCP tool not returned by native tool_search: " + summarizeTools(searchableTools)
       );
+      requestedMcpCall = true;
       writeSse(response, [
         responseCreated("resp-mcp-call"),
         functionCall("call-mcp", tool.name, { message: ARG_PLACEHOLDER }, tool.namespace),
@@ -156,7 +168,7 @@ test("stock Codex keeps a normal stdio MCP while gateway restores args and sanit
   assert.deepEqual(calls, [{ message: PRIVATE_ARG }]);
   assert.equal(result.stdout.includes(PRIVATE_ARG), true);
   assert.equal(result.stdout.includes(PRIVATE_RESULT), true);
-  assert.equal(captured.length >= 3, true);
+  assert.equal(captured.length >= 2, true);
   assert.equal(captured.every(body => !JSON.stringify(body).includes(PRIVATE_ARG)), true);
   assert.equal(captured.every(body => !JSON.stringify(body).includes(PRIVATE_RESULT)), true);
 });

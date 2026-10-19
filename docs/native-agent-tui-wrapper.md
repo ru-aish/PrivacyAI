@@ -1,7 +1,7 @@
 # PrivacyAI native Claude Code, Codex, and Antigravity wrapper
 
-Status: Codex provider gateway and AGY selective transport implementation stacked
-on the P0 context-boundary branch, July 2026.
+Status: Codex provider gateway and AGY selective transport implementation.
+Codex compatibility validated against stock Codex 0.163.0.
 
 ## Product invariant
 
@@ -78,7 +78,9 @@ supports_websockets = false
 It does not rewrite the user's configuration file or copy the normal Codex home.
 Security-critical provider/base-URL/WebSocket/compression overrides are reserved
 by the wrapper. Ordinary model, sandbox, approval, directory, resume, fork,
-exec, review, and local-feature arguments remain usable.
+exec, review, and local-feature arguments remain usable. Protected `/resume`
+relaunches retain current launch-state flags such as `--search`,
+`--approve-for-me`, and `--no-daemon`.
 
 ### Supported paths
 
@@ -145,6 +147,19 @@ mappings may be inherited only when:
 
 Any ambiguity blocks the request before upstream transmission.
 
+Codex 0.163.0 exposes provider-owned collaboration bindings under the reserved
+`collaboration` namespace. PrivacyAI keeps those protocol names unchanged while
+still classifying identical strings when they occur in user text, tool prose,
+arguments, or custom namespaces.
+
+With stock Codex 0.163.0, `/resume` remains a protected relaunch boundary because
+it can select an arbitrary saved session with different provider state. PrivacyAI
+therefore intercepts `/resume`, `/resume --all`, `/resume --last`, and explicit
+resume IDs or names and relaunches them with the protected provider arguments.
+Native `/fork [name]` is no longer intercepted: Codex forks the active session
+in-process and derives the fork parameters from the current session config, so
+the PrivacyAI model provider is inherited by the fork.
+
 A bounded in-memory cache fronts a persistent SQLite verification ledger. Each
 entry is addressed by the content hash, artifact type, and a policy fingerprint
 covering the sanitizer model and prompt. The ledger survives gateway restarts,
@@ -165,7 +180,7 @@ The following are intentionally disabled in gateway mode until their complete
 provider traffic and local restoration boundary are supported:
 
 - Responses WebSockets and realtime conversation;
-- provider-hosted web search;
+- unsupported provider-hosted tools other than the explicitly proxied web-search and image-generation paths;
 - OpenAI apps/connectors;
 - in-app browser and computer use;
 - image generation and direct media inputs;
