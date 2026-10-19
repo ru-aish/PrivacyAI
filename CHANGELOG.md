@@ -47,6 +47,9 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   identical strings in user text or custom namespaces require privacy masking.
 - Startup verification and live-request verification now share the same
   identity-aware cache key, while legacy verified entries are migrated on use.
+- AGY 1.4 transport accepts the audited trajectory-ACL metadata route and ignores
+  canonical classifier false positives that collide only with immutable provider
+  schema literals, while retaining fail-closed handling for real protected values.
 - Release retries safely continue after a partial SDK-only publish by verifying
   registry integrity and skipping only an exact existing artifact.
 

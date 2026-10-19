@@ -7,7 +7,10 @@ import {
   finalizeAgyToolSchemaTrace
 } from "./agy-tool-schema-policy.js";
 import { sanitizeModelVisibleArtifacts } from "./model-visible-artifacts.js";
-import { deterministicProviderIdentifier } from "./privacy-identity.js";
+import {
+  deterministicProviderIdentifier,
+  identityDomainForAlias
+} from "./privacy-identity.js";
 
 const OUTER_FIELDS = new Set([
   "project",
@@ -382,13 +385,30 @@ function collectValidatedAgyProtocolStrings(body) {
 }
 
 function filterGenericAgyProtocolCollisions(sessionMap, protocolStrings) {
-  if (!(protocolStrings instanceof Set) || protocolStrings.size === 0) {
-    return { ...(sessionMap || {}) };
+  const entries = Object.entries(sessionMap || {});
+  if (!(protocolStrings instanceof Set) || protocolStrings.size === 0 || entries.length === 0) {
+    return Object.fromEntries(entries);
   }
-  return Object.fromEntries(Object.entries(sessionMap || {}).filter(([placeholder, original]) =>
-    parsePrivacyPlaceholder(placeholder)?.category !== "PRIVATE_VALUE" ||
-    !mappingCollidesWithAgyProtocol(original, protocolStrings)
-  ));
+
+  const classifierCollisionCategories = new Set(["PRIVATE_VALUE", "SENSITIVE"]);
+  const falsePositiveOriginals = new Set(entries
+    .filter(([placeholder, original]) =>
+      classifierCollisionCategories.has(parsePrivacyPlaceholder(placeholder)?.category) &&
+      mappingCollidesWithAgyProtocol(original, protocolStrings)
+    )
+    .map(([, original]) => original.toLocaleLowerCase("en-US")));
+  if (falsePositiveOriginals.size === 0) return Object.fromEntries(entries);
+
+  return Object.fromEntries(entries.filter(([placeholder, original]) => {
+    if (
+      typeof original !== "string" ||
+      !falsePositiveOriginals.has(original.toLocaleLowerCase("en-US"))
+    ) {
+      return true;
+    }
+    return !classifierCollisionCategories.has(parsePrivacyPlaceholder(placeholder)?.category) &&
+      identityDomainForAlias(placeholder) !== "provider-identifier";
+  }));
 }
 
 function mappingCollidesWithAgyProtocol(original, protocolStrings) {

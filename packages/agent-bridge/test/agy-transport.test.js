@@ -204,6 +204,17 @@ test("AGY ignores generic mapping collisions in immutable protocol strings", asy
     declaration.parameters
   );
 
+  const canonicalClassifierCollision = await sanitizeAgyRequestBody(body, withTestIdentity({
+    sanitizer: deterministicSanitizer,
+    sessionMap: {
+      "[PAI1_SENSITIVE_AAAAAAAAAAAAAAAAAAAAAAAA]": "Subagents"
+    }
+  }));
+  assert.deepEqual(
+    canonicalClassifierCollision.body.request.tools[0].functionDeclarations[0].parameters,
+    declaration.parameters
+  );
+
   await assert.rejects(
     sanitizeAgyRequestBody(body, withTestIdentity({
       sanitizer: deterministicSanitizer,
@@ -1363,6 +1374,55 @@ test("AGY transport proxy forwards the audited metrics route opaquely", async t 
   assert.equal(observed.options.method, "POST");
   assert.equal(observed.options.path, "/v1internal:recordCodeAssistMetrics");
   assert.deepEqual(JSON.parse(observed.body), metrics);
+});
+
+test("AGY transport proxy forwards the AGY 1.4 trajectory ACL route opaquely", async t => {
+  const root = await createTestTempDir("privacyai-agy-trajectory-acl-route-");
+  const observed = {};
+  const runtime = await startAgyTransportRuntime({
+    sanitizer: deterministicSanitizer,
+    baseEnv: {},
+    baseDir: join(root, "vault"),
+    tmpDir: root,
+    verificationStore: new MemoryContextVerificationStore(),
+    requestOpaqueUpstream: (options, onResponse) => {
+      observed.options = options;
+      const upstreamRequest = new PassThrough();
+      const chunks = [];
+      upstreamRequest.on("data", chunk => chunks.push(chunk));
+      upstreamRequest.once("finish", () => {
+        observed.body = Buffer.concat(chunks).toString("utf8");
+        const upstreamResponse = Readable.from([Buffer.from("{}")]);
+        upstreamResponse.statusCode = 200;
+        upstreamResponse.headers = {
+          "content-type": "application/json",
+          "content-encoding": "identity"
+        };
+        onResponse(upstreamResponse);
+      });
+      return upstreamRequest;
+    }
+  });
+  t.after(async () => {
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const aclRequest = {
+    project: "project-123",
+    trajectoryId: "trajectory-123",
+    acl: { visibility: "private" }
+  };
+  const response = await proxyHttpRequest(
+    runtime,
+    aclRequest,
+    "/v1internal:writeTrajectoryAcls"
+  );
+
+  assert.match(response.statusLine, /^HTTP\/1\.1 200/);
+  assert.equal(observed.options.method, "POST");
+  assert.equal(observed.options.path, "/v1internal:writeTrajectoryAcls");
+  assert.deepEqual(JSON.parse(observed.body), aclRequest);
 });
 
 test("AGY opaque forwarding cancels upstream work after downstream disconnect", { timeout: 5000 }, async t => {
