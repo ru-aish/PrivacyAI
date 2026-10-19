@@ -157,6 +157,55 @@ test("Codex body metadata drops private IDs, nested analytics, and WebSocket tra
   assert.equal(JSON.stringify(result.body.client_metadata).includes(PRIVATE_KEY), false);
 });
 
+test("Codex internal message metadata accepts current stock timestamp and content classifications", async () => {
+  const body = sampleRequest();
+  body.input[0].internal_chat_message_metadata_passthrough = {
+    turn_id: "auto-compact-0",
+    create_time: 1790716396.5951645,
+    content_item_kinds: ["user.text"]
+  };
+
+  const result = await sanitizeCodexRequestBody(body, {
+    sanitizer: deterministicSanitizer,
+    fallbackSessionId: "fallback"
+  });
+
+  assert.deepEqual(
+    result.body.input[0].internal_chat_message_metadata_passthrough,
+    {
+      turn_id: "auto-compact-0",
+      create_time: 1790716396.5951645,
+      content_item_kinds: ["user.text"]
+    }
+  );
+
+  const unsupported = sampleRequest();
+  unsupported.input[0].internal_chat_message_metadata_passthrough = {
+    turn_id: "turn-safe",
+    executed_tool_calls: []
+  };
+  await assert.rejects(
+    sanitizeCodexRequestBody(unsupported, {
+      sanitizer: deterministicSanitizer,
+      fallbackSessionId: "fallback"
+    }),
+    error => error?.code === "PRIVACYAI_CODEX_UNSUPPORTED_REQUEST_FIELD"
+  );
+
+  const misaligned = sampleRequest();
+  misaligned.input[0].internal_chat_message_metadata_passthrough = {
+    create_time: 1790716396,
+    content_item_kinds: ["user.text", "agents_md.instructions"]
+  };
+  await assert.rejects(
+    sanitizeCodexRequestBody(misaligned, {
+      sanitizer: deterministicSanitizer,
+      fallbackSessionId: "fallback"
+    }),
+    error => error?.code === "PRIVACYAI_CODEX_INVALID_REQUEST_SHAPE"
+  );
+});
+
 test("Codex request transformation sanitizes model-visible fields and preserves protocol identity", async () => {
   const body = sampleRequest();
   const result = await sanitizeCodexRequestBody(body, {
@@ -287,6 +336,48 @@ test("Codex drops schema-identifier false positives learned from prose", async (
   assert.equal(result.cacheWrites.some(([, record]) =>
     Object.values(record.sessionMapAdditions || {}).includes("cell_id")
   ), false);
+});
+
+test("identity-aware startup verifications are reused by live requests", async () => {
+  const identityRoot = createPrivacyIdentityService({ key: new Uint8Array(32).fill(7) });
+  const policyFingerprint = "identity-startup-cache";
+  const body = {
+    model: "test-model",
+    client_metadata: { thread_id: "identity-cache-thread" },
+    instructions: "Stable public instructions.",
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    tools: [{ type: "function", name: "lookup", description: "Look up public records.", strict: false, parameters: { type: "object", properties: {} } }]
+  };
+  const seed = buildCodexRequestVerificationSeed(body, {}, { identityRoot, policyFingerprint });
+  const cache = new Map(seed.cacheWrites);
+  let calls = 0;
+  const sanitizer = async text => {
+    calls += 1;
+    return { sanitizedPrompt: text, sessionMap: {} };
+  };
+  const unchanged = await sanitizeCodexRequestBody(body, { identityRoot, policyFingerprint, cache, sanitizer });
+  assert.equal(calls, 0);
+  assert.equal(unchanged.metrics.cacheHitCount, seed.itemRecords.length);
+
+  const changed = await sanitizeCodexRequestBody({ ...body, instructions: "New instructions." }, {
+    identityRoot, policyFingerprint, cache, sanitizer
+  });
+  assert.equal(calls, 1);
+  assert.equal(changed.metrics.uncachedSlotCount, 1);
+  assert.equal(changed.metrics.cacheHitCount, seed.itemRecords.length - 1);
+
+  const legacyKey = identityRoot.digest("cache:codex-model-visible", {
+    version: 1, policyFingerprint, artifactType: "instructions",
+    objectKeyPolicyKey: "keys-and-values", value: body.instructions
+  });
+  const legacyCache = new Map([[legacyKey, { sessionMapAdditions: {} }]]);
+  calls = 0;
+  const legacy = await sanitizeCodexRequestBody(body, {
+    identityRoot, policyFingerprint, cache: legacyCache, sanitizer
+  });
+  assert.equal(legacy.metrics.cacheHitCount, 1);
+  assert.equal(calls, 1);
+  assert.ok(legacy.cacheWrites.some(([key]) => key !== legacyKey));
 });
 
 test("Codex ignores legacy cached mappings for safe schema identifiers", async () => {
@@ -1192,6 +1283,28 @@ test("Codex text.format schema uses the same immutable policy, including boolean
   body.text.format.schema = true;
   const booleanResult = await sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: deterministicSanitizer }));
   assert.equal(booleanResult.body.text.format.schema, true);
+});
+
+test("Codex reserved collaboration bindings stay fixed while matching private text is sanitized", async () => {
+  const body = sampleRequest();
+  body.input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "Private customer code wait_agent must be masked." }] }, {
+    type: "function_call", call_id: "call_public123", name: "wait_agent", namespace: "collaboration", arguments: '{"ids":["public123"]}'
+  }];
+  const makeNamespace = name => ({ type: "namespace", name, description: "Public tool namespace.", tools: [{
+    type: "function", name: "wait_agent", description: "Wait for an agent.", strict: false,
+    parameters: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } }, additionalProperties: false }
+  }] });
+  body.tools = [makeNamespace("collaboration"), makeNamespace("custom")];
+  const result = await sanitizeCodexRequestBody(body, withTestIdentity({ sanitizer: async text => ({
+    sanitizedPrompt: text.replaceAll("wait_agent", "[PRIVATE_IDENTIFIER_1]"),
+    sessionMap: { "[PRIVATE_IDENTIFIER_1]": "wait_agent" }
+  }) }));
+  assert.equal(result.body.tools[0].name, "collaboration");
+  assert.equal(result.body.tools[0].tools[0].name, "wait_agent");
+  assert.equal(result.body.input[1].name, "wait_agent");
+  assert.equal(result.body.input[1].namespace, "collaboration");
+  assert.equal(result.body.input[0].content[0].text.includes("wait_agent"), false);
+  assert.notEqual(result.body.tools[1].tools[0].name, "wait_agent");
 });
 
 test("Codex classifier false positives cannot poison later immutable schemas", async () => {

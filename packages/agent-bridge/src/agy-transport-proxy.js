@@ -39,7 +39,8 @@ const AUDITED_OPAQUE_ROUTES = new Map([
     "/v1internal:loadCodeAssist",
     "/v1internal:recordCodeAssistMetrics",
     "/v1internal:retrieveUserQuotaSummary",
-    "/v1internal:setUserSettings"
+    "/v1internal:setUserSettings",
+    "/v1internal:writeTrajectoryAcls"
   ])]
 ]);
 const AGY_TRANSPORT_HEADERS = new Set([

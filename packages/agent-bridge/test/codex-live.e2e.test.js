@@ -21,15 +21,15 @@ import {
 } from "../src/index.js";
 
 const ENABLED = process.env.PRIVACYAI_CODEX_LIVE_E2E === "1";
-const MODEL = process.env.PRIVACYAI_CODEX_TEST_MODEL || "gpt-5.4-mini";
-const PARITY_MODEL = process.env.PRIVACYAI_CODEX_PARITY_MODEL || "gpt-5.6-luna";
+const MODEL = process.env.PRIVACYAI_CODEX_TEST_MODEL || "gpt-6.1-sol";
+const PARITY_MODEL = process.env.PRIVACYAI_CODEX_PARITY_MODEL || "gpt-6.1-sol";
 const PRIVATE_EMAIL = "gateway-live-private@example.test";
 const PRIVATE_KEY = "sk-live-e2e-fake-1234567890";
 const EMAIL_PLACEHOLDER = "[EMAIL_1]";
 const KEY_PLACEHOLDER = "[API_KEY_1]";
 
 test(
-  "live GPT-5.4 mini keeps native Codex file, patch, and terminal work behind the provider gateway",
+  "live current Codex model keeps native file, patch, and terminal work behind the provider gateway",
   { skip: !ENABLED, timeout: 240_000 },
   async t => {
     const codex = await resolveExecutable("codex");
@@ -133,7 +133,7 @@ test(
 );
 
 test(
-  "live GPT-5.6 Luna keeps subagents, shell, web search, and image generation behind the provider gateway",
+  "live current Codex model keeps collaboration, shell, web search, and image generation behind the provider gateway",
   { skip: !ENABLED, timeout: 360_000 },
   async t => {
     const codex = await resolveExecutable("codex");

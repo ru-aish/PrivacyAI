@@ -109,9 +109,14 @@ function validateGatewayCodexArguments(args) {
     "--profile"
   ]);
   const blockedCommands = new Set([
+    "agents",
     "app-server",
     "mcp-server",
+    "queue",
     "remote-control",
+    "responses-api-proxy",
+    "stdio-to-uds",
+    "tcp-tunnel",
     "cloud",
     "exec-server"
   ]);

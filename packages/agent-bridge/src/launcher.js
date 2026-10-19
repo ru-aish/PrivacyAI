@@ -382,7 +382,7 @@ async function launchCodexGatewayTui({
     (await resolveExecutable("python"));
   if (!python) {
     throw new Error(
-      "PrivacyAI requires Python 3 for protected /resume and /fork handling inside the Codex TUI."
+      "PrivacyAI requires Python 3 for protected /resume handling inside the Codex TUI."
     );
   }
 

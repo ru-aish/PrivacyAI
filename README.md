@@ -146,15 +146,16 @@ not install separate PrivacyAI agent packages.
 Codex defaults to a bidirectional loopback Responses gateway. It keeps the
 normal `CODEX_HOME`, account, model, history, skills, plugins, user MCP servers,
 filesystem, shell, patch, Git, resume, fork, exec, and review workflows. On
-Unix-like systems, inside an interactive protected Codex TUI, `/resume`,
-`/resume --all`, `/resume --last`, `/fork`, `/fork --all`, and `/fork --last`
-restart stock Codex through the same protected gateway. The shell forms
-`privacyai agent codex resume ...` and `privacyai agent codex fork ...` remain
-available. Running raw `codex resume` or `codex fork` bypasses PrivacyAI and may
-submit unsanitized local history. Model-visible request content is sanitized
-locally; streamed assistant text and completed tool arguments are restored
-before stock Codex consumes them. The prior prompt-only mode remains available
-with `privacyai agent codex --privacy-strict`.
+Unix-like systems, `/resume`, `/resume --all`, `/resume --last`, and
+`/resume <session id or name>` inside an interactive protected Codex TUI restart
+stock Codex through the same protected gateway. Current Codex `/fork [name]`
+forks the active protected session in-process and inherits its PrivacyAI model
+provider. The shell forms `privacyai agent codex resume ...` and
+`privacyai agent codex fork ...` remain available. Running raw `codex resume` or
+`codex fork` bypasses PrivacyAI and may submit unsanitized local history.
+Model-visible request content is sanitized locally; streamed assistant text and
+completed tool arguments are restored before stock Codex consumes them. The
+prior prompt-only mode remains available with `privacyai agent codex --privacy-strict`.
 
 Claude Code continues to use startup isolation plus supported native prompt/tool
 hooks. AGY defaults to a process-scoped selective HTTPS boundary around the
