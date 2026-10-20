@@ -47,6 +47,19 @@ export async function startTestServers() {
   });
 
   apiServer = http.createServer(async (req, res) => {
+    if (req.method === "GET") {
+      if (req.url.endsWith("/v1/models") || req.url.endsWith("/models")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ data: [{ id: "test-model" }] }));
+        return;
+      }
+      if (req.url.endsWith("/api/tags") || req.url.endsWith("/tags")) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ models: [{ name: "test-model" }] }));
+        return;
+      }
+    }
+
     if (req.method !== "POST") {
       res.writeHead(404);
       res.end();
